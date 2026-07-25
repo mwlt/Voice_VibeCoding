@@ -14,6 +14,26 @@ static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 static HID_TAP_READY: AtomicBool = AtomicBool::new(false);
 static HOOK_ENABLED: AtomicBool = AtomicBool::new(true);
 
+/// 遥控器正在注入 Alt 开头的组合键（如 Alt+Space, Alt+S），
+/// 由 key_mapping 在 key_chord 注入前设置、注入后清除。
+/// 钩子检测到此标志时，对带 EXTRA_INFO 的 Alt/Space 等系统键也进行特殊处理：
+/// 吞掉原始的 WM_SYSKEYDOWN（防止系统菜单），改用 WM_KEYDOWN 放行。
+static ALT_CHORD_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// 通知钩子：即将注入 Alt 组合键（key_mapping 在 SendInput 之前调用）
+pub fn arm_alt_chord() {
+    ALT_CHORD_ACTIVE.store(true, Ordering::Release);
+}
+
+/// 通知钩子：Alt 组合键注入完毕（key_mapping 在 SendInput 之后调用）
+pub fn disarm_alt_chord() {
+    ALT_CHORD_ACTIVE.store(false, Ordering::Release);
+}
+
+fn alt_chord_active() -> bool {
+    ALT_CHORD_ACTIVE.load(Ordering::Acquire)
+}
+
 #[cfg(target_os = "windows")]
 static HOOK_PTR: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -80,6 +100,22 @@ fn store_hook(h: windows::Win32::UI::WindowsAndMessaging::HHOOK) {
     HOOK_PTR.store(h.0, Ordering::Release);
 }
 
+/// 判断 vk 是否属于 Alt 按下时会被 Windows 系统拦截的组合键成员。
+/// 包括 Alt 本身 + Space / F4 / Tab / Esc / 字母键等可能被全局热键占用的键。
+#[cfg(target_os = "windows")]
+fn is_alt_system_key(vk: u32) -> bool {
+    // Alt 修饰键本身
+    matches!(
+        vk,
+        0x12 | 0xA4 | 0xA5 | // VK_MENU, VK_LMENU, VK_RMENU
+        0x20 | // VK_SPACE → Alt+Space 系统菜单
+        0x73 | // VK_F4   → Alt+F4 关闭窗口
+        0x09 | // VK_TAB  → Alt+Tab 任务切换
+        0x1B    // VK_ESCAPE → Alt+Esc 切换窗口
+    ) || (0x41u32..=0x5A).contains(&vk) // A-Z 可能被注册为全局热键
+       || (0x30u32..=0x39).contains(&vk) // 0-9 可能被注册为全局热键
+}
+
 #[cfg(target_os = "windows")]
 fn hook_loop() {
     use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -94,11 +130,24 @@ fn hook_loop() {
         if code >= 0 {
             let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
             let flags = info.flags.0;
+            let vk = info.vkCode;
+
+            // Alt 和弦注入中：即使是注入键（带 EXTRA_INFO），
+            // 也不能直接放行 Alt/Space 等系统键 —— 否则会触发系统菜单。
+            // 这里走抑制路径，让调用方（key_mapping）通过 WM_KEYDOWN 路径
+            // 单独投递按键，避免 WM_SYSKEYDOWN。
+            if alt_chord_active()
+                && (info.dwExtraInfo == EXTRA_INFO || (flags & 0x10) != 0)
+                && is_alt_system_key(vk)
+            {
+                log::info!("XIAOMI SPECIAL KEY alt_chord suppressed vk=0x{vk:02X}");
+                return LRESULT(1);
+            }
+
             if info.dwExtraInfo == EXTRA_INFO || (flags & 0x10) != 0 {
                 return CallNextHookEx(hook, code, wparam, lparam);
             }
 
-            let vk = info.vkCode;
             let scan = info.scanCode;
             let msg = wparam.0 as u32;
             let down = msg == 0x0100 || msg == 0x0104;

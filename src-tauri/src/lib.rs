@@ -18,9 +18,26 @@ fn cleanup_on_exit(app: &tauri::AppHandle) {
     audio::pcm_router::stop_audio_router_process();
 }
 
+fn focus_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
 #[cfg_attr(mobile, mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    // single-instance 必须最先注册：二次启动时激活已有窗口并退出新进程
+    let mut builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            focus_main_window(app);
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
@@ -32,6 +49,10 @@ pub fn run() {
             app.manage(config_manager);
 
             log::info!("Voice VibeCoding starting...");
+            #[cfg(debug_assertions)]
+            log::info!("build_profile=debug (开发包)");
+            #[cfg(not(debug_assertions))]
+            log::info!("build_profile=release");
 
             // Initialize bridge state
             let bridge_state = bridges::BridgeState::new();
@@ -52,13 +73,28 @@ pub fn run() {
             // 语音电平/波形 UI 事件
             bridges::xiaomi::voice_meter::bind_app(app.handle().clone());
 
-            // 关闭窗口 → 隐藏到托盘（用托盘「退出」才真正结束进程）
+            // 开发包窗口标题加标记，便于和正式安装包区分
             if let Some(window) = app.get_webview_window("main") {
+                #[cfg(debug_assertions)]
+                {
+                    let _ = window.set_title("Voice VibeCoding [开发]");
+                }
+
+                // 关闭窗口：minimize_to_tray=true 则隐藏；false 则真正退出
+                let app_handle = app.handle().clone();
                 let window_ = window.clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = window_.hide();
+                        let minimize = app_handle
+                            .try_state::<config::manager::ConfigManager>()
+                            .and_then(|m| m.get_global_settings().ok())
+                            .map(|s| s.minimize_to_tray)
+                            .unwrap_or(true);
+                        if minimize {
+                            api.prevent_close();
+                            let _ = window_.hide();
+                        }
+                        // else: 允许关闭 → 触发 Exit → cleanup_on_exit
                     }
                 });
             }

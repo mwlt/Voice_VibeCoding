@@ -1218,7 +1218,8 @@ fn handle_hid_payload(
         if gate.try_emit(id) {
             emit_key_and_map(app, id, button_label(id), true);
         } else {
-            key_mapping::on_remote_button(app, id, true);
+            // 短窗重复边沿：不偷偷注入
+            log::debug!("XIAOMI HID gated drop key={id} usage=0x{usage:04X}");
         }
         log::info!("XIAOMI HID key={id} usage=0x{usage:04X}");
     }

@@ -25,7 +25,7 @@ function toggleConnection() {
 <template>
   <div class="page">
     <header class="page-header">
-      <h2>✏️ 汉王 V60 语音笔</h2>
+      <h2>✏️ 汉王 V60 语音笔 <span class="wip-tag">开发中</span></h2>
       <DeviceStatus
         :status="device.status"
         :loading="bridge.loading[type]"
@@ -94,6 +94,18 @@ function toggleConnection() {
 .page { max-width: 800px; }
 .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
 .page-header h2 { font-size: 20px; font-weight: 600; }
+.wip-tag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  vertical-align: middle;
+  color: #92400e;
+  background: #fef3c7;
+  border: 1px solid #fde68a;
+}
 .page-body { display: flex; flex-direction: column; gap: 16px; }
 
 .card {

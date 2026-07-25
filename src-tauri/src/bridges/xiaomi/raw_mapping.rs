@@ -94,10 +94,13 @@ fn run_raw_mapping(app: AppHandle, runtime: Arc<XiaomiRuntime>, gate: Arc<KeyEmi
         if ev.pressed && !was {
             if gate2.try_emit(id) {
                 emit_key_and_map(&app2, id, button_label(id), true);
+                log::info!("XIAOMI RAW MAP key={id} vk=0x{:02X} down", ev.usage_id);
             } else {
-                crate::bridges::xiaomi::key_mapping::on_remote_button(&app2, id, true);
+                log::debug!(
+                    "XIAOMI RAW MAP gated drop key={id} vk=0x{:02X}",
+                    ev.usage_id
+                );
             }
-            log::info!("XIAOMI RAW MAP key={id} vk=0x{:02X} down", ev.usage_id);
         } else if !ev.pressed && was {
             crate::bridges::xiaomi::key_mapping::on_remote_button(&app2, id, false);
         }

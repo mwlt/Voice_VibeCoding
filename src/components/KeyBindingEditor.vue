@@ -64,6 +64,13 @@ watch(
   }
 );
 
+/** 录入期间拦截 WebView 加速键；OS 层吞键由 LL 钩子负责 */
+function blockBrowserKeysDuringCapture(e: KeyboardEvent) {
+  if (!capturing.value) return;
+  e.preventDefault();
+  e.stopPropagation();
+}
+
 onMounted(async () => {
   try {
     unlistenCaptured = await listen<{ keys: number[]; labels: string[] }>(
@@ -86,12 +93,16 @@ onMounted(async () => {
   } catch (e) {
     console.warn("shortcut listen failed", e);
   }
+  window.addEventListener("keydown", blockBrowserKeysDuringCapture, true);
+  window.addEventListener("keyup", blockBrowserKeysDuringCapture, true);
 });
 
 onUnmounted(() => {
   stopPolling();
   unlistenCaptured?.();
   unlistenProgress?.();
+  window.removeEventListener("keydown", blockBrowserKeysDuringCapture, true);
+  window.removeEventListener("keyup", blockBrowserKeysDuringCapture, true);
   if (capturing.value) {
     invoke("capture_shortcut_stop").catch(() => {});
   }
@@ -122,21 +133,26 @@ function startPolling() {
   }, 50);
 }
 
-function onCaptured(keys: number[], labels: string[]) {
+async function onCaptured(keys: number[], labels: string[]) {
   if (applied) return;
-  const buttonId = editingKey.value;
-  if (!buttonId) return;
   applied = true;
   stopPolling();
+  liveLabels.value = [];
 
-  applyCapturedKeys(buttonId, keys);
+  const buttonId = editingKey.value;
+  if (buttonId && keys?.length) {
+    applyCapturedKeys(buttonId, keys);
+    captureStatus.value = `已录入 ${labels.join(" + ") || keys.map(vkName).join(" + ")}，已保存`;
+  } else {
+    captureStatus.value = "录入结束";
+  }
+  try {
+    await invoke("capture_shortcut_stop");
+  } catch {
+    /* ignore */
+  }
   capturing.value = false;
   editingKey.value = null;
-  liveLabels.value = [];
-  captureStatus.value = `已录入 ${labels.join(" + ") || keys.map(vkName).join(" + ")}，已保存`;
-
-  // 停止后台轮询线程（结果已取出，不怕 clear）
-  invoke("capture_shortcut_stop").catch(() => {});
 }
 
 async function startEdit(buttonId: string) {
@@ -272,14 +288,14 @@ function vkName(vk: number): string {
     0x28: "↓",
     0x2d: "Insert",
     0x2e: "Delete",
-    0x10: "Shift",
-    0xa0: "Shift",
+    0x10: "左 Shift",
+    0xa0: "左 Shift",
     0xa1: "右 Shift",
-    0x11: "Ctrl",
-    0xa2: "Ctrl",
+    0x11: "左 Ctrl",
+    0xa2: "左 Ctrl",
     0xa3: "右 Ctrl",
-    0x12: "Alt",
-    0xa4: "Alt",
+    0x12: "左 Alt",
+    0xa4: "左 Alt",
     0xa5: "右 Alt",
     0x5b: "左 Win",
     0x5c: "右 Win",

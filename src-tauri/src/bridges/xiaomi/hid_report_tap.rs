@@ -29,6 +29,30 @@ const FORWARDED: &[u16] = &[
     0x0080, 0x0081,
 ];
 
+/// 附着/首包 IO 后短冷静期：只同步按键状态，不注入（避免连接抖动误触）
+const INPUT_GRACE: Duration = Duration::from_millis(800);
+static INPUT_GRACE_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn arm_input_grace() {
+    *INPUT_GRACE_UNTIL.lock() = Some(Instant::now() + INPUT_GRACE);
+    tap_log(&format!(
+        "XIAOMI HID TAP input grace {}ms",
+        INPUT_GRACE.as_millis()
+    ));
+}
+
+fn in_input_grace() -> bool {
+    let mut g = INPUT_GRACE_UNTIL.lock();
+    match *g {
+        Some(until) if Instant::now() < until => true,
+        Some(_) => {
+            *g = None;
+            false
+        }
+        None => false,
+    }
+}
+
 struct HidTapController {
     stop: Arc<AtomicBool>,
     gate: Arc<Mutex<Arc<KeyEmitGate>>>,
@@ -313,6 +337,7 @@ fn run_hub(app: AppHandle, gate_slot: Arc<Mutex<Arc<KeyEmitGate>>>, stop: Arc<At
             "XIAOMI HID TAP ATTACHED pid={pid} awaiting_io=true forwarded={}",
             FORWARDED.len()
         ));
+        arm_input_grace();
 
         let mut buffer = Vec::new();
         let mut last_heartbeat = Instant::now();
@@ -355,6 +380,7 @@ fn run_hub(app: AppHandle, gate_slot: Arc<Mutex<Arc<KeyEmitGate>>>, stop: Arc<At
                                                 if !io_announced {
                                                     io_announced = true;
                                                     special_keys::set_hid_tap_ready(true);
+                                                    arm_input_grace();
                                                     emit_message(
                                                         &app,
                                                         "HID Tap 就绪：返回/音量信号可捕获",
@@ -436,6 +462,11 @@ fn handle_ioctl(
     if next == *guard {
         return;
     }
+    // 冷静期内只同步状态，避免附着抖动当成真实按键注入
+    if in_input_grace() {
+        *guard = next;
+        return;
+    }
     let pressed: Vec<u16> = next.difference(&guard).copied().collect();
     let released: Vec<u16> = guard.difference(&next).copied().collect();
     *guard = next;
@@ -447,15 +478,15 @@ fn handle_ioctl(
         if id == "unknown" {
             continue;
         }
-        if gate.try_emit(id) {
-            emit_key_and_map(app, id, button_label(id), true);
-            tap_log(&format!(
-                "XIAOMI HID TAP key={id} usage=0x{usage:04X} down raw={}",
-                encode_hex(data)
-            ));
-        } else {
-            crate::bridges::xiaomi::key_mapping::on_remote_button(app, id, true);
+        // gate 挡住 = 短窗重复边沿：不偷偷注入，保持日志与行为一致
+        if !gate.try_emit(id) {
+            continue;
         }
+        emit_key_and_map(app, id, button_label(id), true);
+        tap_log(&format!(
+            "XIAOMI HID TAP key={id} usage=0x{usage:04X} down raw={}",
+            encode_hex(data)
+        ));
     }
     for usage in released {
         let btn = XiaomiButton::from_hid_usage(usage);

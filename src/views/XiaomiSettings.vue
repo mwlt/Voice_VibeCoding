@@ -547,14 +547,14 @@ function vkDisplayName(vk: number): string {
     0x26: "↑",
     0x27: "→",
     0x28: "↓",
-    0x10: "Shift",
-    0xa0: "Shift",
+    0x10: "左 Shift",
+    0xa0: "左 Shift",
     0xa1: "右 Shift",
-    0x11: "Ctrl",
-    0xa2: "Ctrl",
+    0x11: "左 Ctrl",
+    0xa2: "左 Ctrl",
     0xa3: "右 Ctrl",
-    0x12: "Alt",
-    0xa4: "Alt",
+    0x12: "左 Alt",
+    0xa4: "左 Alt",
     0xa5: "右 Alt",
     0x5b: "左 Win",
     0x5c: "右 Win",
@@ -850,6 +850,7 @@ function toggleConnection() {
     bridge.startBridge(type);
   }
 }
+
 </script>
 
 <template>
@@ -868,7 +869,7 @@ function toggleConnection() {
     <div class="overview-row">
       <div class="overview-left">
         <div class="device-info-row">
-          <div class="info-item">
+          <div class="info-item" style="min-width: 140px !important;">
             <span class="info-label">设备名称</span>
             <span class="info-value">{{ device.device_name || "—" }}</span>
           </div>
@@ -876,13 +877,14 @@ function toggleConnection() {
             <span class="info-label">蓝牙地址</span>
             <span class="info-value">{{ device.device_address || "—" }}</span>
           </div>
-          <div class="info-item">
+          <div class="info-item" >
             <span class="info-label">电量</span>
             <span class="info-value">
               {{ device.battery_level != null ? device.battery_level + "%" : "—" }}
             </span>
           </div>
           <div class="info-item">
+  
             <span class="info-label">连接方式</span>
             <span class="info-value">蓝牙 BLE</span>
           </div>
@@ -1040,13 +1042,13 @@ function toggleConnection() {
                   @mouseleave="scheduleCloseRestartTip"
                 >
                   <p class="tip-lead">
-                    把本软件里负责连接遥控器的后台服务关掉再重新拉起，相当于「软重启」桥接，不用退出整个应用。
+                    软重启「与遥控器的蓝牙连接」，按最新配置重新连上；无需退出整个应用。
                   </p>
                   <div class="tip-block tip-on">
                     <div class="tip-badge">会做什么</div>
                     <ul>
-                      <li>停止当前蓝牙桥接进程，再按最新配置重新启动</li>
-                      <li>重新尝试连接遥控器</li>
+                      <li>停止并重新拉起蓝牙 / ATVV 连接</li>
+                      <li>按当前映射、增益等配置重新尝试连接遥控器</li>
                       <li>语音路由异常时也会顺带尝试拉起</li>
                     </ul>
                   </div>
@@ -1059,7 +1061,7 @@ function toggleConnection() {
                     </ul>
                   </div>
                   <p class="tip-foot">
-                    正常使用时不必反复点。若仍无效，可再试「虚拟声卡检测与修复」，或查看日志。
+                    返回 / 音量专用通道会尽量保持，一般不必为此反复重启。若仍无效，可再试「虚拟声卡检测与修复」，或查看日志。
                   </p>
                 </div>
               </Teleport>
@@ -1516,7 +1518,7 @@ function toggleConnection() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 .title-row {
   display: flex;

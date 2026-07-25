@@ -11,6 +11,7 @@ const settings = ref<GlobalSettings>({
 
 const saved = ref(true);
 const saving = ref(false);
+const appVersion = import.meta.env.DEV ? "v1.3.5-dev" : "v1.3.5";
 
 onMounted(async () => {
   try {
@@ -73,7 +74,9 @@ function onSettingChange() {
         <div class="setting-row">
           <div class="setting-info">
             <span class="setting-label">最小化到托盘</span>
-            <span class="setting-desc">关闭窗口时最小化到系统托盘而非退出</span>
+            <span class="setting-desc"
+              >关闭窗口时隐藏到托盘（可从托盘再打开）。关闭此项后，关窗即退出软件</span
+            >
           </div>
           <label class="toggle">
             <input
@@ -111,7 +114,7 @@ function onSettingChange() {
           </div>
           <div class="about-item">
             <span class="about-label">版本</span>
-            <span class="about-value">v1.3.5</span>
+            <span class="about-value">{{ appVersion }}</span>
           </div>
           <div class="about-item">
             <span class="about-label">技术栈</span>

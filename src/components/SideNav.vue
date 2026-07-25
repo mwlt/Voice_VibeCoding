@@ -21,9 +21,11 @@ function statusClass(status: BridgeStatus): string {
 
 const deviceItems = [
   { path: "/xiaomi", label: "小米2 pro", type: "xiaomi" as const },
-  { path: "/t1", label: "T1", type: "t1" as const },
-  { path: "/v60", label: "V60", type: "hanvon" as const },
+  { path: "/t1", label: "T1 [开发中]", type: "t1" as const },
+  { path: "/v60", label: "V60 [开发中]", type: "hanvon" as const },
 ];
+
+const appVersion = import.meta.env.DEV ? "v1.3.5-dev" : "v1.3.5";
 
 function navigate(path: string) {
   router.push(path);
@@ -58,7 +60,7 @@ async function confirmQuit() {
   <header class="topnav">
     <div class="brand">
       <span class="brand-name">Voice VibeCoding</span>
-      <span class="brand-ver">v1.3.5</span>
+      <span class="brand-ver">{{ appVersion }}</span>
     </div>
 
     <nav class="nav-row">

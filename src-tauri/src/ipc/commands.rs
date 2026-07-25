@@ -329,7 +329,10 @@ pub async fn get_autostart(
 pub async fn get_global_settings(
     config_manager: State<'_, ConfigManager>,
 ) -> Result<GlobalSettings, String> {
-    config_manager.get_global_settings()
+    let mut settings = config_manager.get_global_settings()?;
+    // 开机自启以注册表实况为准，避免 UI 与系统不一致
+    settings.autostart = crate::bridges::xiaomi::autostart::is_autostart_enabled();
+    Ok(settings)
 }
 
 /// 保存全局设置
@@ -339,7 +342,11 @@ pub async fn save_global_settings(
     config_manager: State<'_, ConfigManager>,
 ) -> Result<(), String> {
     crate::bridges::xiaomi::autostart::set_autostart_enabled(settings.autostart)?;
-    config_manager.save_global_settings(&settings)
+    // 再读一遍注册表，把真实结果写回配置文件
+    let mut synced = settings;
+    synced.autostart = crate::bridges::xiaomi::autostart::is_autostart_enabled();
+    config_manager.save_global_settings(&synced)?;
+    Ok(())
 }
 
 // ============================================================
