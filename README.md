@@ -1,6 +1,6 @@
 # Voice VibeCoding
 
-Windows 桌面端遥控器桥接工具（**v1.3.3**）。把小米遥控器 2 Pro / T1 / 汉王 V60 接到电脑，用于按键映射与语音听写通路。
+Windows 桌面端遥控器桥接工具（**v1.3.5**）。把小米遥控器 2 Pro / T1 / 汉王 V60 接到电脑，用于按键映射与语音听写通路。
 
 技术栈：**Rust + Tauri 2 + Vue 3 + TypeScript**。
 
@@ -52,8 +52,8 @@ npm run tauri:build
 
 - 可执行文件：`src-tauri/target/release/remote-bridge-hub.exe`
 - 安装包：
-  - `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.3.3_x64_zh-CN.msi`
-  - `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.3.3_x64-setup.exe`
+  - `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.3.5_x64_zh-CN.msi`
+  - `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.3.5_x64-setup.exe`
 
 ## 目录结构
 

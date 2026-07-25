@@ -58,7 +58,7 @@ async function confirmQuit() {
   <header class="topnav">
     <div class="brand">
       <span class="brand-name">Voice VibeCoding</span>
-      <span class="brand-ver">v1.3.3</span>
+      <span class="brand-ver">v1.3.5</span>
     </div>
 
     <nav class="nav-row">

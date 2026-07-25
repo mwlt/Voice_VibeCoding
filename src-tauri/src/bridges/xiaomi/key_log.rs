@@ -184,13 +184,11 @@ pub fn start_key_logger(
         }
 
         {
-            let app2 = app.clone();
             let runtime2 = Arc::clone(&runtime);
-            let gate2 = Arc::clone(&gate);
             std::thread::Builder::new()
                 .name("xiaomi-vk-poll".into())
                 .spawn(move || {
-                    windows_vk_poll_logger(app2, runtime2, gate2);
+                    windows_vk_poll_logger(runtime2);
                 })
                 .ok();
         }
@@ -206,9 +204,11 @@ pub fn start_key_logger(
     }
 }
 
-/// VK 轮询：仅作 UI/诊断兜底，不执行映射（避免与系统原生气 + HID 映射双触发）
+/// VK 轮询：仅写 rust 诊断日志，不发 UI、不执行映射。
+/// 连接瞬间 Windows 常抖动 VK_HOME 等，若 `emit` 到前端会误显示成「主页：左 Win」；
+/// 真实按键仍由 HID Tap / ATVV / Raw Input 上报并映射。
 #[cfg(target_os = "windows")]
-fn windows_vk_poll_logger(app: AppHandle, runtime: Arc<XiaomiRuntime>, gate: Arc<KeyEmitGate>) {
+fn windows_vk_poll_logger(runtime: Arc<XiaomiRuntime>) {
     use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 
     let keys: &[(i32, &str)] = &[
@@ -228,9 +228,8 @@ fn windows_vk_poll_logger(app: AppHandle, runtime: Arc<XiaomiRuntime>, gate: Arc
         for &(vk, id) in keys {
             let down = unsafe { GetAsyncKeyState(vk) as u16 } & 0x8000 != 0;
             let was = prev.get(&vk).copied().unwrap_or(false);
-            if down && !was && gate.try_emit(id) {
-                emit_key(&app, id, button_label(id));
-                log::info!("XIAOMI VK observe key={id} vk=0x{vk:02X} (no map)");
+            if down && !was {
+                log::debug!("XIAOMI VK observe key={id} vk=0x{vk:02X} (no map, no ui)");
             }
             prev.insert(vk, down);
         }

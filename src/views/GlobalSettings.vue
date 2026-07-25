@@ -111,7 +111,7 @@ function onSettingChange() {
           </div>
           <div class="about-item">
             <span class="about-label">版本</span>
-            <span class="about-value">v1.3.3</span>
+            <span class="about-value">v1.3.5</span>
           </div>
           <div class="about-item">
             <span class="about-label">技术栈</span>
