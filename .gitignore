@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Frontend build
+dist/
+
+# Rust / Tauri build output
+src-tauri/target/
+
+# Logs & temp
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor / IDE / local agent tooling
+.vscode/
+.idea/
+.cursor/
+.reasonix/
+.codegraph/
+reasonix.toml
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# Accidental installer copies in repo root
+/*.msi
+/*-setup.exe

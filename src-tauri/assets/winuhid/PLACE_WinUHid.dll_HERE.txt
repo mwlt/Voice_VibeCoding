@@ -1,0 +1,1 @@
+Place WinUHid.dll here (or set REMOTE_BRIDGE_WINUHID_DLL). Without it, key injection falls back to SendInput.

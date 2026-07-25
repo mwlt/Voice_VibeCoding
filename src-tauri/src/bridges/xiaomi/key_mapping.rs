@@ -1,0 +1,584 @@
+//! 对齐 Python `handle_direct_hid_report` / `VoiceShortcut` / `_perform_button_action`
+//!
+//! 遥控器按键 → 读取 xiaomi.json 的 button_bindings / voice_hotkey → SendInput 注入
+
+use crate::bridges::xiaomi::tv_gate;
+use crate::config::manager::{ConfigManager, DeviceConfig, KeyAction};
+use parking_lot::Mutex;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Manager};
+
+/// 与 Python `EXTRA_INFO = 0x584D4952` ('XMIR') 一致，供 LL hook 放行虚拟键
+pub const EXTRA_INFO: usize = 0x584D_4952;
+
+static VOICE_HELD: AtomicBool = AtomicBool::new(false);
+static DIRECT_MARKS: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+static REPEAT_GEN: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+static ACTION_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// 语音键在 Windows 上常被译成 F5；记事本 F5=插入日期。
+/// 短窗 `direct_signal_recent` 盖不住 typematic，故额外 sticky 抑制直到 F5 抬起或截止。
+static VOICE_NATIVE_SUPPRESS: AtomicBool = AtomicBool::new(false);
+static VOICE_NATIVE_DEADLINE: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// 与 special_keys F5 抑制策略对齐（测试/文档）
+pub const VOICE_F5_SUPPRESS_DEADLINE_MS: u64 = 3_000;
+
+pub fn arm_voice_native_suppress() {
+    VOICE_NATIVE_SUPPRESS.store(true, Ordering::Release);
+    *VOICE_NATIVE_DEADLINE.lock() =
+        Some(Instant::now() + Duration::from_millis(VOICE_F5_SUPPRESS_DEADLINE_MS));
+}
+
+pub fn disarm_voice_native_suppress() {
+    VOICE_NATIVE_SUPPRESS.store(false, Ordering::Release);
+    *VOICE_NATIVE_DEADLINE.lock() = None;
+}
+
+pub fn voice_native_suppress_active() -> bool {
+    if !VOICE_NATIVE_SUPPRESS.load(Ordering::Acquire) {
+        return false;
+    }
+    let mut g = VOICE_NATIVE_DEADLINE.lock();
+    match *g {
+        Some(deadline) if Instant::now() <= deadline => true,
+        _ => {
+            VOICE_NATIVE_SUPPRESS.store(false, Ordering::Release);
+            *g = None;
+            false
+        }
+    }
+}
+
+fn marks() -> parking_lot::MutexGuard<'static, Option<HashMap<String, Instant>>> {
+    let mut g = DIRECT_MARKS.lock();
+    if g.is_none() {
+        *g = Some(HashMap::new());
+    }
+    g
+}
+
+fn repeats() -> parking_lot::MutexGuard<'static, Option<HashMap<String, u64>>> {
+    let mut g = REPEAT_GEN.lock();
+    if g.is_none() {
+        *g = Some(HashMap::new());
+    }
+    g
+}
+
+/// HID DIRECT 刚触发某键：供 special hook 抑制 Windows 原键
+pub fn mark_direct_signal(name: &str) {
+    marks().as_mut().unwrap().insert(name.to_string(), Instant::now());
+    // 别名同步标记，便于 LL hook 用 Python 键名匹配
+    for alt in binding_aliases(name) {
+        if *alt != name {
+            marks()
+                .as_mut()
+                .unwrap()
+                .insert((*alt).to_string(), Instant::now());
+        }
+    }
+    // 语音键原生多为 F5：提前 sticky 抑制，避免 120ms 后 typematic 漏进记事本
+    if name == "mic" || name == "voice" || binding_aliases(name).iter().any(|a| *a == "mic") {
+        arm_voice_native_suppress();
+    }
+}
+
+pub fn direct_signal_recent(name: &str, window: Duration) -> bool {
+    let g = marks();
+    let Some(m) = g.as_ref() else {
+        return false;
+    };
+    if m.get(name).map(|t| t.elapsed() <= window).unwrap_or(false) {
+        return true;
+    }
+    for alt in binding_aliases(name) {
+        if m.get(*alt).map(|t| t.elapsed() <= window).unwrap_or(false) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Python / 旧版 UI 键名互认
+fn binding_aliases(id: &str) -> &'static [&'static str] {
+    match id {
+        "up" | "dpad_up" => &["up", "dpad_up"],
+        "down" | "dpad_down" => &["down", "dpad_down"],
+        "left" | "dpad_left" => &["left", "dpad_left"],
+        "right" | "dpad_right" => &["right", "dpad_right"],
+        "mic" | "voice" => &["mic", "voice"],
+        "volume_mute" | "mute" => &["volume_mute", "mute"],
+        _ => &[],
+    }
+}
+
+fn lookup_action<'a>(config: &'a DeviceConfig, button_id: &str) -> Option<&'a KeyAction> {
+    if let Some(a) = config.button_bindings.get(button_id) {
+        return Some(a);
+    }
+    for alt in binding_aliases(button_id) {
+        if let Some(a) = config.button_bindings.get(*alt) {
+            return Some(a);
+        }
+    }
+    None
+}
+
+fn load_xiaomi_config(app: &AppHandle) -> Option<DeviceConfig> {
+    let mgr = app.try_state::<ConfigManager>()?;
+    mgr.get_device_config("xiaomi").ok()
+}
+
+/// 按下遥控器物理键后的统一处理
+pub fn on_remote_button(app: &AppHandle, button_id: &str, pressed: bool) {
+    if button_id == "voice" || button_id == "mic" {
+        mark_direct_signal("voice");
+        mark_direct_signal("mic");
+        handle_voice(app, pressed);
+        return;
+    }
+
+    if button_id == "tv" && pressed && !tv_gate::is_ready() {
+        log::info!("XIAOMI MAPPING tv blocked_by_gate");
+        return;
+    }
+
+    if !pressed {
+        mark_direct_signal(button_id);
+        cancel_repeat(button_id);
+        for alt in binding_aliases(button_id) {
+            cancel_repeat(alt);
+        }
+        return;
+    }
+
+    let Some(config) = load_xiaomi_config(app) else {
+        log::warn!("XIAOMI MAPPING no config manager");
+        return;
+    };
+
+    let triggered = perform_button_action(&config, button_id);
+    log::debug!("XIAOMI MAPPING key={button_id} mapped={triggered} pressed=true");
+
+    if triggered {
+        mark_direct_signal(button_id);
+        match button_id {
+            "back" => start_hold_repeat(
+                app.clone(),
+                button_id.to_string(),
+                Duration::from_millis(280),
+                Duration::from_millis(40),
+            ),
+            "volume_up" | "volume_down" => start_hold_repeat(
+                app.clone(),
+                button_id.to_string(),
+                Duration::from_millis(400),
+                Duration::from_millis(120),
+            ),
+            "up" | "down" | "left" | "right" | "dpad_up" | "dpad_down" | "dpad_left"
+            | "dpad_right" => start_hold_repeat(
+                app.clone(),
+                button_id.to_string(),
+                Duration::from_millis(280),
+                Duration::from_millis(40),
+            ),
+            _ => {}
+        }
+    }
+}
+
+fn cancel_repeat(button_id: &str) {
+    let mut map = repeats();
+    let gen = map
+        .as_mut()
+        .unwrap()
+        .entry(button_id.to_string())
+        .or_insert(0);
+    *gen = gen.wrapping_add(1);
+}
+
+fn start_hold_repeat(app: AppHandle, button_id: String, delay: Duration, interval: Duration) {
+    let gen = {
+        let mut map = repeats();
+        let e = map.as_mut().unwrap().entry(button_id.clone()).or_insert(0);
+        *e = e.wrapping_add(1);
+        *e
+    };
+    std::thread::Builder::new()
+        .name(format!("xiaomi-repeat-{button_id}"))
+        .spawn(move || {
+            std::thread::sleep(delay);
+            loop {
+                {
+                    let map = repeats();
+                    if map.as_ref().and_then(|m| m.get(&button_id)).copied() != Some(gen) {
+                        break;
+                    }
+                }
+                if button_id == "tv" && !tv_gate::is_ready() {
+                    break;
+                }
+                if let Some(config) = load_xiaomi_config(&app) {
+                    let _ = perform_button_action(&config, &button_id);
+                }
+                std::thread::sleep(interval);
+            }
+        })
+        .ok();
+}
+
+fn perform_button_action(config: &DeviceConfig, button_id: &str) -> bool {
+    let Some(action) = lookup_action(config, button_id) else {
+        return false;
+    };
+    match action {
+        KeyAction::None => false,
+        KeyAction::SingleKey(vk) => {
+            tap_vks(&[*vk], 20);
+            true
+        }
+        KeyAction::ComboKey(vks) if !vks.is_empty() => {
+            tap_vks(vks, 70);
+            true
+        }
+        KeyAction::ComboKey(_) => false,
+        KeyAction::TextInput(text) => {
+            tap_unicode_text(text);
+            true
+        }
+        KeyAction::LaunchApp(path) => {
+            let _ = std::process::Command::new(path).spawn();
+            true
+        }
+    }
+}
+
+fn handle_voice(app: &AppHandle, pressed: bool) {
+    let Some(config) = load_xiaomi_config(app) else {
+        return;
+    };
+    if !config.voice_shortcut_enabled {
+        log::info!("XIAOMI VOICE shortcut disabled");
+        return;
+    }
+    let vks = resolve_voice_hotkey(&config);
+    if vks.is_empty() {
+        log::warn!("XIAOMI VOICE shortcut empty");
+        return;
+    }
+    // 点击 / 按住：快捷键都跟遥控按下/抬起走（短按≈点按，长按=按住）
+    // 「点击模式」的短按点按由 input_session 在短于阈值抬起时改走 tap；此处处理按下/抬起和弦
+    if pressed {
+        if !VOICE_HELD.swap(true, Ordering::SeqCst) {
+            key_chord(&vks, false);
+            log::info!(
+                "XIAOMI VOICE SHORTCUT DOWN mode={:?} vks={vks:?}",
+                config.trigger_mode
+            );
+        }
+    } else if VOICE_HELD.swap(false, Ordering::SeqCst) {
+        key_chord(&vks, true);
+        log::info!(
+            "XIAOMI VOICE SHORTCUT UP mode={:?} vks={vks:?}",
+            config.trigger_mode
+        );
+    }
+}
+
+/// 点击模式：短按判定为「点按一次」完整 tap（若尚未因长按而 DOWN）
+pub fn voice_shortcut_tap(app: &AppHandle) {
+    let Some(config) = load_xiaomi_config(app) else {
+        return;
+    };
+    if !config.voice_shortcut_enabled {
+        return;
+    }
+    let vks = resolve_voice_hotkey(&config);
+    if vks.is_empty() {
+        return;
+    }
+    // 若已经按住 DOWN，先松开再 tap，避免粘键
+    if VOICE_HELD.swap(false, Ordering::SeqCst) {
+        key_chord(&vks, true);
+    }
+    let hold = if vks.iter().any(|vk| matches!(vk, 0x5B | 0x5C)) {
+        120
+    } else {
+        70
+    };
+    tap_vks(&vks, hold);
+    log::info!("XIAOMI VOICE SHORTCUT TAP (click) vks={vks:?} hold_ms={hold}");
+}
+
+/// 点击模式：确认已进入长按后补发 DOWN（若尚未 DOWN）
+pub fn voice_shortcut_ensure_down(app: &AppHandle) {
+    let Some(config) = load_xiaomi_config(app) else {
+        return;
+    };
+    if !config.voice_shortcut_enabled {
+        return;
+    }
+    let vks = resolve_voice_hotkey(&config);
+    if vks.is_empty() {
+        return;
+    }
+    if !VOICE_HELD.swap(true, Ordering::SeqCst) {
+        key_chord(&vks, false);
+        log::info!("XIAOMI VOICE SHORTCUT DOWN (hold-after-click-threshold) vks={vks:?}");
+    }
+}
+
+/// ATVV opcode 路径调用（对齐 VoiceShortcut.press/release/tap）
+pub fn voice_from_atvv(app: &AppHandle, opcode: u8) {
+    match opcode {
+        0x04 => on_remote_button(app, "mic", true),
+        0x00 => on_remote_button(app, "mic", false),
+        _ => {}
+    }
+}
+
+fn resolve_voice_hotkey(config: &DeviceConfig) -> Vec<u16> {
+    // 对齐 Python voice_hotkey_from_configs：界面上的 mic 按键映射优先于 voice_hotkey 字段
+    if let Some(action) = config.button_bindings.get("mic") {
+        if let Some(vks) = action_to_vks(action) {
+            return vks;
+        }
+    }
+    if let Some(action) = config.button_bindings.get("voice") {
+        if let Some(vks) = action_to_vks(action) {
+            return vks;
+        }
+    }
+    if let Some(keys) = &config.voice_hotkey {
+        let mut out = Vec::new();
+        for k in keys {
+            if let Some(vk) = name_to_vk(k) {
+                out.push(vk);
+            }
+        }
+        if !out.is_empty() {
+            return out;
+        }
+    }
+    vec![0xA5] // 默认右 Alt
+}
+
+fn action_to_vks(action: &KeyAction) -> Option<Vec<u16>> {
+    match action {
+        KeyAction::SingleKey(vk) => Some(vec![*vk]),
+        KeyAction::ComboKey(vks) if !vks.is_empty() => Some(vks.clone()),
+        _ => None,
+    }
+}
+
+fn vks_to_hotkey_names(vks: &[u16]) -> Vec<String> {
+    vks.iter()
+        .map(|&vk| match vk {
+            0xA2 => "leftctrl".into(),
+            0xA3 => "rightctrl".into(),
+            0x11 => "ctrl".into(),
+            0xA0 => "leftshift".into(),
+            0xA1 => "rightshift".into(),
+            0x10 => "shift".into(),
+            0xA4 => "leftalt".into(),
+            0xA5 => "rightalt".into(),
+            0x12 => "alt".into(),
+            0x5B => "leftwin".into(),
+            0x5C => "rightwin".into(),
+            0x20 => "space".into(),
+            0x0D => "enter".into(),
+            0x08 => "backspace".into(),
+            0x1B => "esc".into(),
+            other if (0x41..=0x5A).contains(&other) => {
+                ((other as u8) as char).to_ascii_lowercase().to_string()
+            }
+            other if (0x30..=0x39).contains(&other) => {
+                char::from(b'0' + (other - 0x30) as u8).to_string()
+            }
+            other if (0x70..=0x7B).contains(&other) => format!("f{}", other - 0x6F),
+            other => format!("vk_{other:02x}"),
+        })
+        .collect()
+}
+
+/// 保存前：mic 映射同步到 voice_hotkey / voice 别名（对齐 Python 保存逻辑）
+pub fn sync_voice_from_mic_binding(config: &mut DeviceConfig) {
+    let mic = config
+        .button_bindings
+        .get("mic")
+        .cloned()
+        .or_else(|| config.button_bindings.get("voice").cloned());
+    let Some(action) = mic else {
+        return;
+    };
+    let Some(vks) = action_to_vks(&action) else {
+        return;
+    };
+    config.voice_hotkey = Some(vks_to_hotkey_names(&vks));
+    config.button_bindings.insert("mic".into(), action.clone());
+    config.button_bindings.insert("voice".into(), action);
+}
+
+fn name_to_vk(name: &str) -> Option<u16> {
+    let n = name.trim().to_ascii_lowercase().replace(' ', "");
+    match n.as_str() {
+        "backspace" => Some(0x08),
+        "tab" => Some(0x09),
+        "enter" | "return" => Some(0x0D),
+        "shift" => Some(0x10),
+        "ctrl" | "control" => Some(0x11),
+        "alt" => Some(0x12),
+        "esc" | "escape" => Some(0x1B),
+        "space" => Some(0x20),
+        "left" => Some(0x25),
+        "up" => Some(0x26),
+        "right" => Some(0x27),
+        "down" => Some(0x28),
+        "home" => Some(0x24),
+        "f10" => Some(0x79),
+        "d" => Some(0x44),
+        "win" | "leftwin" | "lwin" => Some(0x5B),
+        "rightwin" | "rwin" => Some(0x5C),
+        "leftshift" => Some(0xA0),
+        "rightshift" => Some(0xA1),
+        "leftctrl" => Some(0xA2),
+        "rightctrl" => Some(0xA3),
+        "leftalt" => Some(0xA4),
+        "rightalt" | "ralt" | "rmenu" => Some(0xA5),
+        "volume_mute" | "volumemute" => Some(0xAD),
+        "volume_down" | "volumedown" => Some(0xAE),
+        "volume_up" | "volumeup" => Some(0xAF),
+        other if other.len() == 1 => {
+            let c = other.chars().next()?.to_ascii_uppercase();
+            if c.is_ascii_alphanumeric() {
+                Some(c as u16)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn is_extended(vk: u16) -> bool {
+    matches!(
+        vk,
+        0x21 | 0x22 | 0x23 | 0x24 | 0x25 | 0x26 | 0x27 | 0x28 | 0x2C | 0x2D | 0x2E | 0x5B
+            | 0x5C | 0x5D | 0xA3 | 0xA5 | 0xAD | 0xAE | 0xAF | 0xB0 | 0xB1 | 0xB2 | 0xB3
+    )
+}
+
+pub fn tap_vks(vks: &[u16], hold_ms: u64) {
+    // 音量/静音：优先走 SendInput 的 VK_VOLUME_*（系统音量最稳）
+    // WinUHid 虚拟 Consumer 在无驱动时不可用；有驱动时也可，但系统壳层对 SendInput 更直接
+    let is_volume = vks.len() == 1 && matches!(vks[0], 0xAD | 0xAE | 0xAF);
+    if !is_volume {
+        if crate::bridges::xiaomi::hid_injector::tap_vks(vks, hold_ms) {
+            let _ = ACTION_SEQ.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
+    key_chord(vks, false);
+    std::thread::sleep(Duration::from_millis(hold_ms.max(1)));
+    key_chord(vks, true);
+    let _ = ACTION_SEQ.fetch_add(1, Ordering::Relaxed);
+    log::debug!("XIAOMI MAPPING inject SendInput vks={vks:?} hold_ms={hold_ms} volume={is_volume}");
+}
+
+fn tap_unicode_text(text: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+            KEYEVENTF_UNICODE, VIRTUAL_KEY,
+        };
+        for ch in text.encode_utf16() {
+            let inputs = [
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: VIRTUAL_KEY(0),
+                            wScan: ch,
+                            dwFlags: KEYEVENTF_UNICODE,
+                            time: 0,
+                            dwExtraInfo: EXTRA_INFO,
+                        },
+                    },
+                },
+                INPUT {
+                    r#type: INPUT_KEYBOARD,
+                    Anonymous: INPUT_0 {
+                        ki: KEYBDINPUT {
+                            wVk: VIRTUAL_KEY(0),
+                            wScan: ch,
+                            dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                            time: 0,
+                            dwExtraInfo: EXTRA_INFO,
+                        },
+                    },
+                },
+            ];
+            unsafe {
+                let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = text;
+    }
+}
+
+fn key_chord(vks: &[u16], key_up: bool) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+            KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, VIRTUAL_KEY,
+        };
+
+        let iter: Box<dyn Iterator<Item = &u16>> = if key_up {
+            Box::new(vks.iter().rev())
+        } else {
+            Box::new(vks.iter())
+        };
+
+        let mut inputs: Vec<INPUT> = Vec::with_capacity(vks.len());
+        for &vk in iter {
+            let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
+            let mut flags = if is_extended(vk) {
+                KEYEVENTF_EXTENDEDKEY
+            } else {
+                Default::default()
+            };
+            if key_up {
+                flags |= KEYEVENTF_KEYUP;
+            }
+            inputs.push(INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VIRTUAL_KEY(vk),
+                        wScan: scan,
+                        dwFlags: flags,
+                        time: 0,
+                        dwExtraInfo: EXTRA_INFO,
+                    },
+                },
+            });
+        }
+        if !inputs.is_empty() {
+            unsafe {
+                let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (vks, key_up);
+    }
+}
