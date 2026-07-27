@@ -74,13 +74,7 @@ pub fn run() {
             bridges::xiaomi::voice_meter::bind_app(app.handle().clone());
             bridges::xiaomi::conflict_guard::bind_app(app.handle().clone());
 
-            // 开发包窗口标题加标记，便于和正式安装包区分
             if let Some(window) = app.get_webview_window("main") {
-                #[cfg(debug_assertions)]
-                {
-                    let _ = window.set_title("Voice VibeCoding [开发]");
-                }
-
                 // 关闭窗口：minimize_to_tray=true 则隐藏；false 则真正退出
                 let app_handle = app.handle().clone();
                 let window_ = window.clone();
