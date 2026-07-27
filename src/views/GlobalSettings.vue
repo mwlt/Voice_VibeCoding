@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openUrl } from "@tauri-apps/plugin-shell";
 import type { GlobalSettings } from "../types";
+import sanodiaLogo from "../assets/mwlt_sanodia_logo.png";
 
 const settings = ref<GlobalSettings>({
   autostart: false,
@@ -36,6 +38,15 @@ async function saveSettings() {
 
 function onSettingChange() {
   saved.value = false;
+}
+
+async function openExternal(url: string) {
+  try {
+    await openUrl(url);
+  } catch (e) {
+    console.warn("open url failed:", e);
+    window.open(url, "_blank");
+  }
 }
 </script>
 
@@ -123,6 +134,75 @@ function onSettingChange() {
           <div class="about-item">
             <span class="about-label">支持设备</span>
             <span class="about-value">小米遥控器 2 Pro / T1 遥控器 / 汉王 V60</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card credit-card">
+        <h3>版本信息</h3>
+        <div class="credit-layout">
+          <div class="credit-logo-wrap">
+            <img
+              class="credit-logo"
+              :src="sanodiaLogo"
+              alt="Sanodia / mwlt"
+            />
+          </div>
+          <div class="credit-columns">
+            <div class="credit-col">
+              <p class="credit-lead">
+                本软件 : Rust+tauri2+vue3 Windows版（基于 Python 版本重构）
+              </p>
+              <p class="credit-author">作者：mwlt</p>
+              <div class="credit-block">
+                <span class="credit-k">Gitee</span>
+                <button
+                  type="button"
+                  class="credit-link"
+                  @click="openExternal('https://gitee.com/mwlt/remote-voice-vibe-coding')"
+                >
+                  https://gitee.com/mwlt/remote-voice-vibe-coding
+                </button>
+              </div>
+              <div class="credit-block">
+                <span class="credit-k">GitHub</span>
+                <button
+                  type="button"
+                  class="credit-link"
+                  @click="openExternal('https://github.com/mwlt/Voice_VibeCoding')"
+                >
+                  https://github.com/mwlt/Voice_VibeCoding
+                </button>
+              </div>
+            </div>
+            <div class="credit-col">
+              <p class="credit-lead">Python Windows 版</p>
+              <p class="credit-author">作者：xxb26553663-star</p>
+              <div class="credit-block">
+                <span class="credit-k">GitHub</span>
+                <button
+                  type="button"
+                  class="credit-link"
+                  @click="openExternal('https://github.com/xxb26553663-star/remote-bridge-hub')"
+                >
+                  https://github.com/xxb26553663-star/remote-bridge-hub
+                </button>
+              </div>
+            </div>
+            <div class="credit-col">
+              <p class="credit-lead">Apple macOS 版</p>
+              <p class="credit-author">作者：nijez</p>
+              <div class="credit-block">
+                <span class="credit-k">GitHub</span>
+                <button
+                  type="button"
+                  class="credit-link"
+                  @click="openExternal('https://github.com/nijez/open-voice-bridge')"
+                >
+                  https://github.com/nijez/open-voice-bridge
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -246,4 +326,121 @@ function onSettingChange() {
 .about-item { display: flex; flex-direction: column; gap: 4px; }
 .about-label { font-size: 12px; color: var(--text-secondary); }
 .about-value { font-size: 13px; font-weight: 500; }
+
+.credit-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.credit-logo-wrap {
+  flex-shrink: 0;
+  width: 120px;
+  padding: 10px;
+  border-radius: 10px;
+  background: #fff;
+  border: 1px solid var(--border);
+}
+
+.credit-logo {
+  display: block;
+  width: 100%;
+  height: auto;
+  object-fit: contain;
+}
+
+.credit-columns {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px 20px;
+}
+
+.credit-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding-left: 16px;
+  border-left: 1px solid var(--border);
+}
+
+.credit-col:first-child {
+  padding-left: 0;
+  border-left: none;
+}
+
+.credit-lead {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.credit-author {
+  margin: 0 0 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.credit-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.credit-k {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.credit-link {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--primary);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+  word-break: break-all;
+  cursor: pointer;
+}
+
+.credit-link:hover {
+  text-decoration: underline;
+}
+
+@media (max-width: 900px) {
+  .credit-columns {
+    grid-template-columns: 1fr;
+  }
+  .credit-col {
+    padding-left: 0;
+    border-left: none;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+  .credit-col:first-child {
+    padding-top: 0;
+    border-top: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .credit-layout {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .credit-logo-wrap {
+    width: 100px;
+  }
+  .about-grid {
+    grid-template-columns: 1fr;
+  }
+}
 </style>
