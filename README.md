@@ -1,39 +1,26 @@
 # Voice VibeCoding
 
+本项目：   rust语言 windows版（基于python版本重构） 作者 ：mwlt
 
+*gitee:* 
 
-
-
-本项目：   rust语言 windows版（基于python版本重构） 作者 
-
-*gitee:* **[](https://gitee.com/mwlt)**
-
-[RemoteVoiceVibeCoding: Windows 桌面端遥控器桥接工具。把小米遥控器 2 Pro / T1 / 汉王 V60 接到电脑，用于按键映射与语音听写通路。](https://gitee.com/mwlt/remote-voice-vibe-coding)
+https://gitee.com/mwlt/remote-voice-vibe-coding
 
 github:
 
-
+https://github.com/mwlt/Voice_VibeCoding
 
 
 
 python windows版，作者：[xxb26553663-star](https://github.com/xxb26553663-star)  
-[xxb26553663-star/remote-bridge-hub: Windows voice input and remote-control bridge for Xiaomi Remote, T1 and Hanvon V60](https://github.com/xxb26553663-star/remote-bridge-hub)
+https://github.com/xxb26553663-star/remote-bridge-hub
+
+
+
+
 
 apple macos版 ，作者 [nijez](https://github.com/nijez)
-
-[nijez/open-voice-bridge: 小米蓝牙遥控器 2 Pro / RC003 的原生 macOS 按键与 ATVV 语音桥接](https://github.com/nijez/open-voice-bridge)
-
-
-
-
-
-
-
-
-
-
-
-
+https://github.com/nijez/open-voice-bridge
 
 **v1.3.6** · Windows 桌面应用
 
@@ -43,7 +30,11 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 ---
 
+
+
 ## 它能做什么
+
+
 
 ### 小米遥控器 2 Pro（主力）
 
@@ -60,12 +51,18 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 | ATVV 修复 | 一键软重启并重新订阅语音通道                                 |
 
 
+
+
 ### 其它
 
 - **T1 / V60**：界面与配置页已预留，我没有对应设备无法测试，需要使用的请自行二次开发
 - **托盘**：可最小化到托盘；支持开机自启
 - **单实例**：再次打开会激活已有窗口，避免重复占端口
 - **日志**：应用内查看 / 打开日志文件
+
+
+
+![界面图](./image/1.png "系统界面预览")
 
 ---
 

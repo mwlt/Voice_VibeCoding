@@ -11,7 +11,7 @@ const settings = ref<GlobalSettings>({
 
 const saved = ref(true);
 const saving = ref(false);
-const appVersion = import.meta.env.DEV ? "v1.3.6-dev" : "v1.3.6";
+const appVersion = "v1.3.6";
 
 onMounted(async () => {
   try {
