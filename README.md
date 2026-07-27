@@ -140,8 +140,6 @@ npm run tauri:dev
 npm run dev
 ```
 
-开发包窗口标题带 `[开发]`，顶栏版本为 `v1.3.6-dev`。
-
 ---
 
 
