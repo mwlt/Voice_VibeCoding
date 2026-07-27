@@ -263,6 +263,10 @@ fn run_hub(app: AppHandle, gate_slot: Arc<Mutex<Arc<KeyEmitGate>>>, stop: Arc<At
                             "HID Tap 端口 {port} 被其它进程占用（请关闭其它 RemoteBridge 实例）: {e}"
                         ),
                     );
+                    crate::bridges::xiaomi::conflict_guard::notify_hid_tap_bind_failed(
+                        port,
+                        &e.to_string(),
+                    );
                 }
                 sleep_interruptible(&stop, retry);
                 continue;

@@ -395,6 +395,22 @@ pub fn stop_audio_router_process() {
     let _ = AUDIO_CHILD.lock().take();
 }
 
+/// 语音路由子进程 PID（冲突扫描时排除，避免把自己当成占用方）
+pub fn audio_router_child_pid() -> Option<u32> {
+    let mut guard = AUDIO_CHILD.lock();
+    match guard.as_mut() {
+        Some(ac) => match ac.child.try_wait() {
+            Ok(None) => Some(ac.child.id()),
+            Ok(Some(_)) => {
+                *guard = None;
+                None
+            }
+            Err(_) => None,
+        },
+        None => None,
+    }
+}
+
 /// 进程是否仍在跑（poll）
 pub fn audio_router_process_alive() -> bool {
     let mut guard = AUDIO_CHILD.lock();

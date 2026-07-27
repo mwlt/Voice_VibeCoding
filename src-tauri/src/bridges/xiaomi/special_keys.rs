@@ -3,7 +3,7 @@
 //! 仅在「刚收到同键 HID direct / ATVV 信号」时吞掉 Windows 翻译的原 VK。
 
 use crate::bridges::xiaomi::key_mapping::{
-    direct_signal_recent, disarm_voice_native_suppress, voice_native_suppress_active, EXTRA_INFO,
+    direct_signal_recent, on_uncorrelated_f5_down, should_suppress_voice_f5, EXTRA_INFO,
 };
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
@@ -49,6 +49,29 @@ pub fn hid_tap_ready() -> bool {
 
 pub fn set_hook_enabled(enabled: bool) {
     HOOK_ENABLED.store(enabled, Ordering::Release);
+}
+
+/// 诊断/录入：钩子线程是否在跑
+pub fn is_hook_running() -> bool {
+    RUNNING.load(Ordering::Acquire)
+}
+
+/// LL 钩子是否已 SetWindowsHookEx 成功（比 RUNNING 更准）
+pub fn is_hook_armed() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        !HOOK_PTR.load(Ordering::Acquire).is_null()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+/// 录入开始时确保常驻 LL 钩子在跑（即使配置曾关掉抑制钩子）
+pub fn ensure_hook_for_capture() {
+    HOOK_ENABLED.store(true, Ordering::Release);
+    start_special_key_hook();
 }
 
 pub fn start_special_key_hook() {
@@ -131,25 +154,33 @@ fn hook_loop() {
             let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
             let flags = info.flags.0;
             let vk = info.vkCode;
+            let msg = wparam.0 as u32;
+            let injected = info.dwExtraInfo == EXTRA_INFO || (flags & 0x10) != 0;
+
+            // 快捷键录入：最优先吞掉全部物理键（含 WM_SYSKEY* / Alt+Space / Win 热键）
+            // 必须在 CallNextHookEx 之前；第二套短生命周期钩子不可靠（易被超时静默卸掉）
+            if crate::bridges::shared::shortcut_capture::try_swallow_capture_key(vk, msg, injected)
+            {
+                return LRESULT(1);
+            }
 
             // Alt 和弦注入中：即使是注入键（带 EXTRA_INFO），
             // 也不能直接放行 Alt/Space 等系统键 —— 否则会触发系统菜单。
             // 这里走抑制路径，让调用方（key_mapping）通过 WM_KEYDOWN 路径
             // 单独投递按键，避免 WM_SYSKEYDOWN。
             if alt_chord_active()
-                && (info.dwExtraInfo == EXTRA_INFO || (flags & 0x10) != 0)
+                && injected
                 && is_alt_system_key(vk)
             {
                 log::info!("XIAOMI SPECIAL KEY alt_chord suppressed vk=0x{vk:02X}");
                 return LRESULT(1);
             }
 
-            if info.dwExtraInfo == EXTRA_INFO || (flags & 0x10) != 0 {
+            if injected {
                 return CallNextHookEx(hook, code, wparam, lparam);
             }
 
             let scan = info.scanCode;
-            let msg = wparam.0 as u32;
             let down = msg == 0x0100 || msg == 0x0104;
             let up = msg == 0x0101 || msg == 0x0105;
             let tap_ready = HID_TAP_READY.load(Ordering::Acquire);
@@ -211,16 +242,16 @@ fn hook_loop() {
                 _ if scan == 0x5E && direct_signal_recent("power", Duration::from_millis(250)) => {
                     Some("power")
                 }
-                0x74
-                    if voice_native_suppress_active()
-                        || direct_signal_recent("voice", Duration::from_millis(120))
-                        || direct_signal_recent("mic", Duration::from_millis(120)) =>
-                {
-                    // sticky：F5 抬起后解除，避免误伤用户真 F5；截止见 VOICE_F5_SUPPRESS_DEADLINE_MS
-                    if up {
-                        disarm_voice_native_suppress();
+                0x74 if !injected && (down || up) => {
+                    if should_suppress_voice_f5(down, up) {
+                        crate::bridges::xiaomi::key_mapping::on_firmware_voice_key(down);
+                        Some("voice_f5")
+                    } else {
+                        if down {
+                            on_uncorrelated_f5_down();
+                        }
+                        None
                     }
-                    Some("voice")
                 }
                 _ => None,
             };

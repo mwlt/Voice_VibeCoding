@@ -30,6 +30,8 @@ pub struct VoiceMeterSnapshot {
     /// 虚拟声卡侧：近期是否有 UDP PCM 送出
     pub cable_active: bool,
     pub cable_level: f32,
+    /// ATVV 控制/音频 GATT 是否已订阅
+    pub atvv_ok: bool,
 }
 
 struct MeterInner {
@@ -78,6 +80,7 @@ impl MeterInner {
             waveform,
             cable_active,
             cable_level,
+            atvv_ok: crate::bridges::xiaomi::connect::atvv_subscribed(),
         }
     }
 }
@@ -127,6 +130,11 @@ pub fn set_session(active: bool) {
             // 会话结束也不立刻清 UDP 痕迹，交给 hold 自然掉
         }
     }
+    emit_if_needed(true);
+}
+
+/// ATVV 订阅状态变化时立刻推 UI（红字「ATVV 未连接」）
+pub fn force_emit_atvv_change() {
     emit_if_needed(true);
 }
 
@@ -196,6 +204,7 @@ fn emit_if_needed(force: bool) {
             .map(|p| {
                 p.ble_state != snap.ble_state
                     || p.cable_active != snap.cable_active
+                    || p.atvv_ok != snap.atvv_ok
                     || (p.ble_level - snap.ble_level).abs() > 0.04
                     || (p.cable_level - snap.cable_level).abs() > 0.04
             })
@@ -233,5 +242,6 @@ pub fn current_snapshot() -> VoiceMeterSnapshot {
             waveform: vec![0.0; WAVE_BINS],
             cable_active: false,
             cable_level: 0.0,
+            atvv_ok: crate::bridges::xiaomi::connect::atvv_subscribed(),
         })
 }

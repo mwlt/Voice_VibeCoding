@@ -5,13 +5,14 @@
 //! - 语音键：ATVV Control opcode `0x08`/`0x04`/`0x00`
 
 use crate::bridges::xiaomi::ble_bridge::XiaomiButton;
-use crate::bridges::xiaomi::connect::XiaomiRuntime;
+use crate::bridges::xiaomi::connect::{mark_atvv_subscribed, reset_atvv_subscribed, XiaomiRuntime};
 use crate::bridges::xiaomi::key_log::{
     button_label, emit_key_and_map, emit_key_phase, emit_message, KeyEmitGate,
 };
 use crate::bridges::xiaomi::key_mapping;
 use crate::config::manager::{ConfigManager, TriggerMode};
 use std::collections::HashSet;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
@@ -94,13 +95,15 @@ fn windows_run_input_session(
     use windows::Devices::Bluetooth::GenericAttributeProfile::{
         GattCharacteristic, GattCommunicationStatus, GattDeviceService,
     };
-    use windows::Devices::Bluetooth::{BluetoothCacheMode, BluetoothLEDevice};
+    use windows::Devices::Bluetooth::{BluetoothCacheMode, BluetoothConnectionStatus, BluetoothLEDevice};
+    use windows::Foundation::TypedEventHandler;
     use crate::bridges::xiaomi::tv_gate;
     use crate::bridges::xiaomi::voice_pcm;
     use crate::config::manager::ConfigManager;
     use tauri::Manager;
 
     tv_gate::mark_connecting();
+    reset_atvv_subscribed();
 
     unsafe {
         let _ = windows::Win32::System::Com::CoInitializeEx(
@@ -122,6 +125,33 @@ fn windows_run_input_session(
         .map_err(|e| format!("input session open: {e}"))?
         .get()
         .map_err(|e| format!("input session get: {e}"))?;
+
+    match device.ConnectionStatus() {
+        Ok(status) if status == BluetoothConnectionStatus::Disconnected => {
+            return Err("遥控器已断开连接".into());
+        }
+        Ok(_) => {}
+        Err(e) => return Err(format!("读取连接状态失败: {e}")),
+    }
+
+    let runtime_conn = Arc::clone(&runtime);
+    let conn_token = device
+        .ConnectionStatusChanged(&TypedEventHandler::new(
+            move |sender: &Option<BluetoothLEDevice>, _args| {
+                if let Some(dev) = sender {
+                    if let Ok(status) = dev.ConnectionStatus() {
+                        if status == BluetoothConnectionStatus::Disconnected {
+                            log::warn!("Xiaomi remote disconnected (input session)");
+                            runtime_conn.running.store(false, Ordering::SeqCst);
+                        }
+                    }
+                }
+                Ok(())
+            },
+        ))
+        .map_err(|e| format!("ConnectionStatusChanged: {e}"))?;
+
+    runtime.running.store(true, Ordering::SeqCst);
 
     let services = device
         .GetGattServicesWithCacheModeAsync(BluetoothCacheMode::Uncached)
@@ -200,31 +230,79 @@ fn windows_run_input_session(
         );
     }
 
-    // ---- ATVV Control：语音键（优先用发现阶段的服务接口 FromId）----
-    if !atvv_interface_id.is_empty() {
-        match subscribe_atvv_from_interface(&app, &atvv_interface_id, &gate, &mut tokens, gain_db) {
-            Ok(true) => {
-                atvv_ok = true;
-                emit_message(&app, "ATVV 语音键/音频已订阅（FromId）");
+    // ---- ATVV Control：语音键（对齐 v1.3.3：FromId 优先，再地址路径）----
+    let mut last_atvv_fail: Option<AtvvFailReason> = None;
+    for attempt in 0..8 {
+        if atvv_ok {
+            break;
+        }
+        if attempt > 0 {
+            log::info!("ATVV subscribe retry attempt={attempt}");
+            std::thread::sleep(Duration::from_millis(500));
+        }
+
+        // 1) 发现阶段 AQS 接口 FromId（连接时已 Open 过，成功率最高）
+        if !atvv_interface_id.is_empty() {
+            match subscribe_atvv_from_interface(
+                &app,
+                &atvv_interface_id,
+                &gate,
+                &mut tokens,
+                gain_db,
+            ) {
+                Ok(true) => {
+                    atvv_ok = true;
+                    emit_message(&app, "ATVV 语音键/音频已订阅（FromId）");
+                }
+                Ok(false) => {
+                    let reason = AtvvFailReason::chars_incomplete();
+                    log_atvv_fail("FromId", &reason, attempt);
+                    last_atvv_fail = Some(reason);
+                }
+                Err(e) => {
+                    let reason = AtvvFailReason::from_error(&e);
+                    log_atvv_fail("FromId", &reason, attempt);
+                    if attempt == 0 {
+                        emit_message(
+                            &app,
+                            &format!("ATVV FromId 失败，回退地址打开: {}", reason.label),
+                        );
+                    }
+                    last_atvv_fail = Some(reason);
+                }
             }
-            Ok(false) => log::warn!("ATVV FromId subscribe returned empty"),
-            Err(e) => {
-                log::warn!("ATVV FromId path failed: {e}");
-                emit_message(&app, &format!("ATVV FromId 失败，回退地址打开: {e}"));
+        }
+
+        // 2) 回退：设备枚举到的 ATVV 服务（地址路径）
+        if !atvv_ok {
+            if let Some(atvv) = atvv_service.as_ref() {
+                match subscribe_atvv_service(&app, atvv, &gate, &mut tokens, gain_db) {
+                    Ok(true) => {
+                        atvv_ok = true;
+                        emit_message(&app, "ATVV 语音键/音频已订阅");
+                    }
+                    Ok(false) => {
+                        let reason = AtvvFailReason::chars_incomplete();
+                        log_atvv_fail("address-path", &reason, attempt);
+                        last_atvv_fail = Some(reason);
+                    }
+                    Err(e) => {
+                        let reason = AtvvFailReason::from_error(&e);
+                        log_atvv_fail("address-path", &reason, attempt);
+                        last_atvv_fail = Some(reason);
+                    }
+                }
+            } else if atvv_interface_id.is_empty() {
+                let reason = AtvvFailReason::service_missing();
+                log_atvv_fail("address-path", &reason, attempt);
+                last_atvv_fail = Some(reason);
             }
         }
     }
 
-    if !atvv_ok {
-        if let Some(atvv) = atvv_service.as_ref() {
-            match subscribe_atvv_service(&app, atvv, &gate, &mut tokens, gain_db) {
-                Ok(true) => atvv_ok = true,
-                Ok(false) => {}
-                Err(e) => log::warn!("ATVV address-path failed: {e}"),
-            }
-        } else {
-            log::warn!("ATVV service not found");
-        }
+    if atvv_ok {
+        mark_atvv_subscribed(true);
+        log::info!("ATVV subscribe ok after diagnostics");
     }
 
     // ---- Battery Level（0x180F / 0x2A19）----
@@ -256,10 +334,30 @@ fn windows_run_input_session(
             );
         }
         log::warn!("ATVV subscribe failed; continuing for battery monitor");
+        let reason = last_atvv_fail.unwrap_or_else(AtvvFailReason::unknown);
+        log::warn!(
+            "ATVV FAIL code={} recoverable={} hint={}",
+            reason.code,
+            reason.recoverable,
+            reason.hint
+        );
         emit_message(
             &app,
-            "ATVV 语音通道不可用；电量仍会刷新（请重连或稍后再试语音）",
+            &format!(
+                "ATVV 不可用：{}（{}；电量仍会刷新；{}）",
+                reason.label,
+                reason.code,
+                if reason.recoverable {
+                    "将后台重试，或请重连"
+                } else {
+                    "请重连遥控器"
+                }
+            ),
         );
+        crate::bridges::xiaomi::conflict_guard::notify_atvv_failed(&format!(
+            "{} ({})",
+            reason.label, reason.code
+        ));
     }
 
     let mode = match (hid_ok, atvv_ok) {
@@ -286,12 +384,48 @@ fn windows_run_input_session(
             );
             voice_pcm::warmup_async();
         }
+    } else if battery_ch.is_some() {
+        tv_gate::mark_ready(Duration::from_secs_f32(tv_delay.max(0.0)));
     }
+
+    crate::bridges::xiaomi::key_mapping::set_input_session_active(true);
 
     let mut since_batt = Instant::now();
     let mut since_pcm_warm = Instant::now();
+    let mut since_atvv_retry = Instant::now();
     while !runtime.should_stop() {
         std::thread::sleep(Duration::from_millis(200));
+        if !atvv_ok && since_atvv_retry.elapsed() >= Duration::from_secs(3) {
+            since_atvv_retry = Instant::now();
+            if let Some(atvv) = atvv_service.as_ref() {
+                match subscribe_atvv_service(&app, atvv, &gate, &mut tokens, gain_db) {
+                    Ok(true) => {
+                        atvv_ok = true;
+                        mark_atvv_subscribed(true);
+                        emit_message(&app, "ATVV 语音键/音频已订阅（后台重试成功）");
+                        log::info!("ATVV subscribe recovered on periodic retry");
+                        tv_gate::mark_ready(Duration::from_secs_f32(tv_delay.max(0.0)));
+                        if let Err(e) = voice_pcm::ensure_started() {
+                            log::warn!("VB-CABLE PCM not ready after ATVV retry: {e}");
+                            voice_pcm::warmup_async();
+                        }
+                    }
+                    Ok(false) => {
+                        log::debug!(
+                            "ATVV periodic retry: {}",
+                            AtvvFailReason::chars_incomplete().code
+                        );
+                    }
+                    Err(e) => {
+                        let reason = AtvvFailReason::from_error(&e);
+                        log::debug!(
+                            "ATVV periodic retry still failing code={} raw={e}",
+                            reason.code
+                        );
+                    }
+                }
+            }
+        }
         // 会话中保持 PCM 通路预热（路由重启后自动恢复）
         if atvv_ok
             && !voice_pcm::is_ready()
@@ -314,7 +448,11 @@ fn windows_run_input_session(
     }
 
     voice_pcm::stop();
+    crate::bridges::xiaomi::key_mapping::set_input_session_active(false);
     tv_gate::reset();
+    mark_atvv_subscribed(false);
+    let _ = device.RemoveConnectionStatusChanged(conn_token);
+    runtime.running.store(false, Ordering::SeqCst);
     for (ch, token) in tokens {
         let _ = ch.RemoveValueChanged(token);
     }
@@ -628,6 +766,136 @@ fn try_subscribe_gatt_hid(
     }
 }
 
+/// ATVV 订阅失败分类（写入日志 / UI；便于区分可自愈与需用户操作）
+#[derive(Debug, Clone)]
+struct AtvvFailReason {
+    /// 机器可读：access_denied / unreachable / protocol_error / fromid_null / …
+    code: &'static str,
+    /// 短中文标签
+    label: &'static str,
+    /// 处理建议
+    hint: &'static str,
+    /// 后台重试/重连是否可能恢复
+    recoverable: bool,
+}
+
+impl AtvvFailReason {
+    fn unknown() -> Self {
+        Self {
+            code: "unknown",
+            label: "未知错误",
+            hint: "查看 app.log 中 ATVV FAIL 行",
+            recoverable: true,
+        }
+    }
+
+    fn service_missing() -> Self {
+        Self {
+            code: "service_missing",
+            label: "设备上未发现 ATVV 服务",
+            hint: "确认已配对小米 2 Pro，并靠近电脑后重连",
+            recoverable: false,
+        }
+    }
+
+    fn chars_incomplete() -> Self {
+        Self {
+            code: "chars_incomplete",
+            label: "ATVV 特征不完整（缺 Control）",
+            hint: "固件/缓存异常，尝试断开蓝牙后重连",
+            recoverable: true,
+        }
+    }
+
+    fn from_error(err: &str) -> Self {
+        let lower = err.to_ascii_lowercase();
+        // Windows GattCommunicationStatus: Success=0 Unreachable=1 ProtocolError=2 AccessDenied=3
+        if err.contains("GattCommunicationStatus(3)")
+            || lower.contains("accessdenied")
+            || lower.contains("access denied")
+        {
+            return Self {
+                code: "access_denied",
+                label: "GATT 拒绝访问（特征被占用）",
+                hint: "常见于 HID Tap/WUDFHost 抢占；软件会先停 Tap 再订、并后台重试",
+                recoverable: true,
+            };
+        }
+        if err.contains("GattCommunicationStatus(1)") || lower.contains("unreachable") {
+            return Self {
+                code: "unreachable",
+                label: "遥控器 GATT 不可达",
+                hint: "请靠近电脑、确认遥控器未休眠后重连",
+                recoverable: true,
+            };
+        }
+        if err.contains("GattCommunicationStatus(2)") || lower.contains("protocolerror") {
+            return Self {
+                code: "protocol_error",
+                label: "GATT 协议错误",
+                hint: "链路抖动；软件会重试，仍失败请重连",
+                recoverable: true,
+            };
+        }
+        if lower.contains("fromid") && (err.contains("0x00000000") || lower.contains("null") || err.contains("操作成功完成"))
+        {
+            return Self {
+                code: "fromid_null",
+                label: "FromId 返回空服务对象",
+                hint: "接口路径失效或服务未就绪；会改走地址路径并重试",
+                recoverable: true,
+            };
+        }
+        if lower.contains("cccd") {
+            return Self {
+                code: "cccd_failed",
+                label: "无法写入 Notify（CCCD）",
+                hint: "通知订阅被拒，多与 AccessDenied 同类；后台会重试",
+                recoverable: true,
+            };
+        }
+        if lower.contains("getcharacteristics") {
+            return Self {
+                code: "get_chars_failed",
+                label: "读取 ATVV 特征失败",
+                hint: "见具体 GattCommunicationStatus；软件已做 Uncached→Cached 回退",
+                recoverable: true,
+            };
+        }
+        Self {
+            code: "other",
+            label: "ATVV 订阅失败",
+            hint: "详见日志原文",
+            recoverable: true,
+        }
+    }
+}
+
+fn log_atvv_fail(path: &str, reason: &AtvvFailReason, attempt: u32) {
+    log::warn!(
+        "ATVV FAIL path={path} attempt={attempt} code={} recoverable={} label={} hint={}",
+        reason.code,
+        reason.recoverable,
+        reason.label,
+        reason.hint
+    );
+}
+
+#[cfg(target_os = "windows")]
+fn describe_gatt_comm_status(
+    status: Option<windows::Devices::Bluetooth::GenericAttributeProfile::GattCommunicationStatus>,
+) -> &'static str {
+    use windows::Devices::Bluetooth::GenericAttributeProfile::GattCommunicationStatus;
+    match status {
+        Some(GattCommunicationStatus::Success) => "Success(0)",
+        Some(GattCommunicationStatus::Unreachable) => "Unreachable(1)=遥控器不可达",
+        Some(GattCommunicationStatus::ProtocolError) => "ProtocolError(2)=协议错误",
+        Some(GattCommunicationStatus::AccessDenied) => "AccessDenied(3)=特征被占用/拒绝访问",
+        Some(_) => "UnknownStatus",
+        None => "StatusUnavailable",
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn subscribe_atvv_from_interface(
     app: &AppHandle,
@@ -650,6 +918,7 @@ fn subscribe_atvv_from_interface(
         .get()
         .map_err(|e| format!("ATVV FromId get: {e}"))?;
 
+    // 对齐 v1.3.3：FromId 后显式 Open（SharedReadOnly 优先）
     let _ = service
         .OpenAsync(GattSharingMode::SharedReadOnly)
         .and_then(|op| op.get())
@@ -854,11 +1123,12 @@ fn subscribe_atvv_service(
     use windows::Foundation::TypedEventHandler;
     use windows::Storage::Streams::{DataReader, DataWriter};
 
+    // 对齐 v1.3.3：订阅前 Open（SharedReadOnly 优先；Exclusive 仅作最后手段）
     let _ = atvv
-        .OpenAsync(GattSharingMode::SharedReadAndWrite)
+        .OpenAsync(GattSharingMode::SharedReadOnly)
         .and_then(|op| op.get())
         .or_else(|_| {
-            atvv.OpenAsync(GattSharingMode::SharedReadOnly)
+            atvv.OpenAsync(GattSharingMode::SharedReadAndWrite)
                 .and_then(|op| op.get())
         })
         .or_else(|_| {
@@ -875,8 +1145,24 @@ fn subscribe_atvv_service(
         .map_err(|e| e.to_string())?
         .get()
         .map_err(|e| e.to_string())?;
+    let chars_result = if chars_result.Status().ok() == Some(GattCommunicationStatus::Success) {
+        chars_result
+    } else {
+        log::warn!(
+            "ATVV GetCharacteristics uncached status={}, retry cached",
+            describe_gatt_comm_status(chars_result.Status().ok())
+        );
+        atvv
+            .GetCharacteristicsWithCacheModeAsync(BluetoothCacheMode::Cached)
+            .map_err(|e| e.to_string())?
+            .get()
+            .map_err(|e| e.to_string())?
+    };
     if chars_result.Status().ok() != Some(GattCommunicationStatus::Success) {
-        return Err("ATVV GetCharacteristics status failed".into());
+        return Err(format!(
+            "ATVV GetCharacteristics status failed: {}",
+            describe_gatt_comm_status(chars_result.Status().ok())
+        ));
     }
     let chars = chars_result.Characteristics().map_err(|e| e.to_string())?;
     let n = chars.Size().unwrap_or(0);
@@ -946,16 +1232,18 @@ fn subscribe_atvv_service(
     let token = control
         .ValueChanged(&handler)
         .map_err(|e| format!("ATVV ValueChanged: {e}"))?;
-    let cccd_ok = control
+    let cccd_status = control
         .WriteClientCharacteristicConfigurationDescriptorAsync(
             GattClientCharacteristicConfigurationDescriptorValue::Notify,
         )
-        .and_then(|op| op.get())
-        .map(|s| s == GattCommunicationStatus::Success)
-        .unwrap_or(false);
+        .and_then(|op| op.get());
+    let cccd_ok = matches!(cccd_status, Ok(GattCommunicationStatus::Success));
     if !cccd_ok {
         let _ = control.RemoveValueChanged(token);
-        return Err("ATVV CCCD notify failed".into());
+        return Err(format!(
+            "ATVV CCCD notify failed: {}",
+            describe_gatt_comm_status(cccd_status.ok())
+        ));
     }
     tokens.push((control.clone(), token));
     log::info!("Subscribed ATVV control characteristic");
@@ -1218,8 +1506,7 @@ fn handle_hid_payload(
         if gate.try_emit(id) {
             emit_key_and_map(app, id, button_label(id), true);
         } else {
-            // 短窗重复边沿：不偷偷注入
-            log::debug!("XIAOMI HID gated drop key={id} usage=0x{usage:04X}");
+            key_mapping::on_remote_button(app, id, true);
         }
         log::info!("XIAOMI HID key={id} usage=0x{usage:04X}");
     }

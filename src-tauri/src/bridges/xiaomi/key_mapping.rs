@@ -2,6 +2,8 @@
 //!
 //! 遥控器按键 → 读取 xiaomi.json 的 button_bindings / voice_hotkey → SendInput 注入
 
+use crate::bridges::xiaomi::connect;
+use crate::bridges::xiaomi::key_log::{button_label, emit_key_phase};
 use crate::bridges::xiaomi::tv_gate;
 use crate::config::manager::{ConfigManager, DeviceConfig, KeyAction};
 use parking_lot::Mutex;
@@ -22,6 +24,58 @@ static ACTION_SEQ: AtomicU64 = AtomicU64::new(1);
 /// 短窗 `direct_signal_recent` 盖不住 typematic，故额外 sticky 抑制直到 F5 抬起或截止。
 static VOICE_NATIVE_SUPPRESS: AtomicBool = AtomicBool::new(false);
 static VOICE_NATIVE_DEADLINE: Mutex<Option<Instant>> = Mutex::new(None);
+/// 对齐 Python `voice_f5_down_suppressed`：一次语音按压周期内吞掉 F5 连发/typematic
+static VOICE_F5_DOWN_SUPPRESSED: AtomicBool = AtomicBool::new(false);
+static INPUT_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+static FIRMWARE_VOICE_HELD: AtomicBool = AtomicBool::new(false);
+static VOICE_HOOK_APP: Mutex<Option<AppHandle>> = Mutex::new(None);
+
+/// 输入会话（含仅电量）运行中：供 F5 固件泄漏抑制
+pub fn set_input_session_active(active: bool) {
+    INPUT_SESSION_ACTIVE.store(active, Ordering::Release);
+    if active {
+        // 新连接会话：允许再发一次 ATVV 失败 F5 提示
+        reset_atvv_f5_toast_throttle();
+    }
+}
+
+pub fn input_session_active() -> bool {
+    INPUT_SESSION_ACTIVE.load(Ordering::Acquire)
+}
+
+/// 供 F5 固件回退路径发 UI 事件（ATVV 未订阅时语音键仍走 Windows F5）
+pub fn bind_voice_hook_app(app: AppHandle) {
+    *VOICE_HOOK_APP.lock() = Some(app);
+}
+
+/// ATVV 不可用时，由 special_keys 在吞掉固件 F5 后调用，补齐按键映射区的按下/抬起提示
+pub fn on_firmware_voice_key(pressed: bool) {
+    if connect::atvv_subscribed() {
+        return;
+    }
+    let Some(app) = VOICE_HOOK_APP.lock().clone() else {
+        return;
+    };
+    if pressed {
+        if FIRMWARE_VOICE_HELD.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        mark_direct_signal("voice");
+        mark_direct_signal("mic");
+        emit_key_phase(&app, "mic", button_label("mic"), true);
+        handle_voice(&app, true);
+        log::debug!("XIAOMI VOICE UI down (firmware F5 fallback)");
+    } else {
+        if !FIRMWARE_VOICE_HELD.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        mark_direct_signal("voice");
+        mark_direct_signal("mic");
+        emit_key_phase(&app, "mic", button_label("mic"), false);
+        handle_voice(&app, false);
+        log::debug!("XIAOMI VOICE UI up (firmware F5 fallback)");
+    }
+}
 
 /// 与 special_keys F5 抑制策略对齐（测试/文档）
 pub const VOICE_F5_SUPPRESS_DEADLINE_MS: u64 = 3_000;
@@ -100,6 +154,87 @@ pub fn direct_signal_recent(name: &str, window: Duration) -> bool {
         }
     }
     false
+}
+
+/// 对齐 Python `_wait_for_direct_signal`：F5 可能比 ATVV 0x04 先到
+fn wait_for_direct_signal(name: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if direct_signal_recent(name, Duration::from_millis(400)) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    direct_signal_recent(name, Duration::from_millis(400))
+}
+
+/// 对齐 Python `_should_suppress_voice_f5`：关联固件 F5 与语音键，避免记事本刷日期时间
+pub fn should_suppress_voice_f5(down: bool, up: bool) -> bool {
+    if !down && !up {
+        return false;
+    }
+    if up {
+        return VOICE_F5_DOWN_SUPPRESSED.swap(false, Ordering::AcqRel);
+    }
+    if VOICE_F5_DOWN_SUPPRESSED.load(Ordering::Acquire) {
+        return true;
+    }
+    if !input_session_active() {
+        return false;
+    }
+    if voice_native_suppress_active()
+        || direct_signal_recent("voice", Duration::from_millis(300))
+        || direct_signal_recent("mic", Duration::from_millis(300))
+    {
+        VOICE_F5_DOWN_SUPPRESSED.store(true, Ordering::Release);
+        return true;
+    }
+    if wait_for_direct_signal("mic", Duration::from_millis(80)) {
+        VOICE_F5_DOWN_SUPPRESSED.store(true, Ordering::Release);
+        arm_voice_native_suppress();
+        return true;
+    }
+    // Policy B：关联不上则放行（键盘 F5 可用）。ATVV 挂掉时由 toast 提示，不再会话级全吞。
+    false
+}
+
+static ATVV_F5_TOAST_LAST: Mutex<Option<Instant>> = Mutex::new(None);
+const ATVV_F5_TOAST_GAP: Duration = Duration::from_secs(60);
+
+fn reset_atvv_f5_toast_throttle() {
+    *ATVV_F5_TOAST_LAST.lock() = None;
+}
+
+/// N1：会话中且 ATVV 未订阅时，未关联的 F5（多为遥控语音键固件泄漏）→ 系统通知
+pub fn on_uncorrelated_f5_down() {
+    if !input_session_active() || connect::atvv_subscribed() {
+        return;
+    }
+    {
+        let mut last = ATVV_F5_TOAST_LAST.lock();
+        if let Some(t) = *last {
+            if t.elapsed() < ATVV_F5_TOAST_GAP {
+                return;
+            }
+        }
+        *last = Some(Instant::now());
+    }
+    let Some(app) = VOICE_HOOK_APP.lock().clone() else {
+        return;
+    };
+    use tauri_plugin_notification::NotificationExt;
+    log::info!("XIAOMI VOICE F5 toast (atvv down; not suppressed)");
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title("遥控器 ATVV 未连接")
+        .body(
+            "语音键可能触发系统 F5（如记事本插入日期）。请打开本软件，在小米设置中点击「修复 ATVV 连接」。",
+        )
+        .show()
+    {
+        log::warn!("ATVV F5 notification failed: {e}");
+    }
 }
 
 /// Python / 旧版 UI 键名互认

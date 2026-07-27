@@ -72,6 +72,7 @@ pub fn run() {
 
             // 语音电平/波形 UI 事件
             bridges::xiaomi::voice_meter::bind_app(app.handle().clone());
+            bridges::xiaomi::conflict_guard::bind_app(app.handle().clone());
 
             // 开发包窗口标题加标记，便于和正式安装包区分
             if let Some(window) = app.get_webview_window("main") {
@@ -103,9 +104,15 @@ pub fn run() {
             std::env::set_var("REMOTE_BRIDGE_PCM_PORT", "31680");
             if let Err(e) = audio::pcm_router::spawn_audio_router_process() {
                 log::warn!("audio router spawn failed: {e}");
+                bridges::xiaomi::conflict_guard::emit_if_conflicts(
+                    "pcm_port",
+                    &format!("语音路由启动失败: {e}"),
+                    true,
+                );
             } else {
                 // 路由起来后立刻预热 UDP，避免首句语音才 PING
                 bridges::xiaomi::voice_pcm::warmup_async();
+                bridges::xiaomi::conflict_guard::check_audio_router_after_spawn(app.handle());
             }
 
             // 启动后自动连接 + 断线重连（对齐 Python worker 循环）
@@ -170,6 +177,10 @@ pub fn run() {
             ipc::commands::get_app_log,
             ipc::commands::open_app_log,
             ipc::commands::quit_application,
+            ipc::commands::get_xiaomi_conflicts,
+            ipc::commands::kill_xiaomi_conflicts,
+            ipc::commands::retry_xiaomi_after_conflict_clear,
+            ipc::commands::repair_xiaomi_atvv,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

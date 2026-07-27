@@ -1,21 +1,18 @@
 //! 快捷键捕获
 //!
-//! 架构（修「任何键都录不进 / 录完后残留吞键」）：
-//! - WH_KEYBOARD_LL **只负责吞键**（`SWALLOW_ACTIVE` 时 return 1），不做和弦判定
-//! - GetAsyncKeyState **轮询负责识别**单键/组合键（物理键状态与是否吞键无关）
-//! - 钩子消息循环写法对齐本仓库已验证的 `special_keys.rs`
+//! - 吞键 + 识别：都走常驻 `special_keys` WH_KEYBOARD_LL
+//!   （`try_swallow_capture_key` 内用 vk/wParam 驱动 CaptureEngine，再 return 1）
+//! - 禁止靠 GetAsyncKeyState 识别：键被 LL 吞掉后异步状态常不更新 → 永远录不上
 //!
 //! 完成规则：
 //! - 主键按下：提交「修饰键 + 主键」
-//! - 纯修饰键 ≥2：任一抬起即提交（扛 Win KEYUP 丢失）
-//! - 纯修饰键 =1：抬起后提交
+//! - 纯修饰键：全部抬起后提交（对齐 Python；钩子路径 KEYUP 可靠）
 
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
@@ -30,23 +27,6 @@ const VK_LCONTROL: u32 = 0xA2;
 const VK_RCONTROL: u32 = 0xA3;
 const VK_LMENU: u32 = 0xA4;
 const VK_RMENU: u32 = 0xA5;
-
-const ARM_GRACE_MS: u64 = 200;
-
-fn scan_vks() -> Vec<u32> {
-    let mut vks = vec![
-        VK_LCONTROL, VK_RCONTROL, VK_CONTROL, VK_LSHIFT, VK_RSHIFT, VK_SHIFT, VK_LMENU,
-        VK_RMENU, VK_MENU, VK_LWIN, VK_RWIN, 0x08, 0x09, 0x0D, 0x1B, 0x20, 0x21, 0x22, 0x23,
-        0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0x5D, 0xAD, 0xAE, 0xAF,
-    ];
-    vks.extend(0x30u32..=0x39);
-    vks.extend(0x41u32..=0x5A);
-    vks.extend(0x70u32..=0x7B);
-    vks.extend([0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xC0, 0xDB, 0xDC, 0xDD, 0xDE]);
-    vks.extend(0x60u32..=0x69);
-    vks.extend([0x6A, 0x6B, 0x6D, 0x6E, 0x6F]);
-    vks
-}
 
 fn is_modifier(vk: u32) -> bool {
     matches!(
@@ -157,7 +137,9 @@ fn should_commit_mods_only(hist_norm: &[u32], active_norm: &[u32], newly_up_mod:
     if hist_norm.iter().any(|vk| !is_modifier(*vk)) {
         return false;
     }
-    hist_norm.len() >= 2 || active_norm.is_empty()
+    // 对齐 Python：纯修饰键等全部抬起再提交。
+    // 钩子路径能可靠收到 KEYUP；「任一抬起」会在 Ctrl+Win 时过早只交 Ctrl，并提前关吞键漏出 Win。
+    active_norm.is_empty()
 }
 
 struct CaptureEngine {
@@ -191,6 +173,13 @@ impl CaptureEngine {
 
     fn progress_mods(&self) -> Vec<u32> {
         normalize_chord(&self.active_mods.iter().copied().collect::<Vec<_>>())
+    }
+
+    /// 钩子路径：按单个按键事件增量更新（勿依赖 GetAsyncKeyState）
+    fn on_event(&mut self, vk: u32, is_down: bool) -> CaptureStep {
+        let mut frame = self.prev.clone();
+        frame.insert(vk, is_down);
+        self.step(&frame)
     }
 
     fn step(&mut self, down: &HashMap<u32, bool>) -> CaptureStep {
@@ -265,11 +254,15 @@ impl CaptureRuntime {
 
     fn publish_progress(&self, labels: Vec<String>) {
         *self.progress.lock().unwrap() = labels.clone();
-        if let Some(app) = self.app.lock().unwrap().as_ref() {
-            let _ = app.emit(
-                "shortcut-capture-progress",
-                ShortcutCaptureProgress { labels },
-            );
+        let app = self.app.lock().unwrap().clone();
+        if let Some(app) = app {
+            // 勿在 LL 回调线程同步 emit
+            thread::spawn(move || {
+                let _ = app.emit(
+                    "shortcut-capture-progress",
+                    ShortcutCaptureProgress { labels },
+                );
+            });
         }
     }
 
@@ -286,10 +279,13 @@ impl CaptureRuntime {
         };
         *self.pending.lock().unwrap() = Some(payload.clone());
         self.capturing.store(false, Ordering::SeqCst);
-        // 对齐 Python：提交后钩子继续吞键，直到 blocked_vks 全部 KEYUP 再退出。
+        // 对齐 Python：提交后继续吞键，直到 blocked_vks 全部 KEYUP
         mark_capture_submitted();
-        if let Some(app) = self.app.lock().unwrap().as_ref() {
-            let _ = app.emit("shortcut-captured", payload);
+        let app = self.app.lock().unwrap().clone();
+        if let Some(app) = app {
+            thread::spawn(move || {
+                let _ = app.emit("shortcut-captured", payload);
+            });
         }
     }
 
@@ -299,20 +295,28 @@ impl CaptureRuntime {
 }
 
 // ---------------------------------------------------------------------------
-// 吞键钩子：全局原子开关，回调极简
+// 吞键 + 钩子内识别（由 special_keys 调用）
 // ---------------------------------------------------------------------------
 
 static SWALLOW_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CAPTURE_SUBMITTED: AtomicBool = AtomicBool::new(false);
-static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
-static HOOK_HANDLE: AtomicUsize = AtomicUsize::new(0);
 static SWALLOW_HIT_LOGGED: AtomicBool = AtomicBool::new(false);
 static BLOCKED_VKS: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+static HOOK_ENGINE: LazyLock<Mutex<Option<CaptureEngine>>> =
+    LazyLock::new(|| Mutex::new(None));
+static HOOK_RUNTIME: LazyLock<Mutex<Option<Arc<CaptureRuntime>>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 fn reset_hook_session() {
     CAPTURE_SUBMITTED.store(false, Ordering::SeqCst);
     if let Ok(mut blocked) = BLOCKED_VKS.lock() {
         blocked.clear();
+    }
+    if let Ok(mut eng) = HOOK_ENGINE.lock() {
+        *eng = None;
+    }
+    if let Ok(mut rt) = HOOK_RUNTIME.lock() {
+        *rt = None;
     }
 }
 
@@ -331,8 +335,7 @@ fn maybe_finish_hook_after_drain() {
         .unwrap_or(false);
     if empty {
         set_swallow_active(false);
-        request_hook_thread_quit();
-        log::info!("Shortcut capture hook drain complete");
+        log::info!("Shortcut capture swallow drain complete");
     }
 }
 
@@ -340,56 +343,105 @@ fn set_swallow_active(active: bool) {
     SWALLOW_ACTIVE.store(active, Ordering::SeqCst);
 }
 
-fn request_hook_thread_quit() {
-    let tid = HOOK_THREAD_ID.load(Ordering::SeqCst);
-    if tid == 0 {
-        return;
+pub fn is_swallow_active() -> bool {
+    SWALLOW_ACTIVE.load(Ordering::SeqCst)
+}
+
+/// 由常驻 `special_keys` LL 钩子最前调用。true = 已吞掉，调用方必须 `return LRESULT(1)`。
+/// 在回调内用 vk/wParam 识别和弦；**禁止** GetAsyncKeyState（吞键后状态不更新）。
+pub fn try_swallow_capture_key(vk: u32, wparam: u32, is_injected: bool) -> bool {
+    if is_injected || !SWALLOW_ACTIVE.load(Ordering::SeqCst) {
+        return false;
     }
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
-        // 即使在钩子线程内也必须投递，否则 GetMessage 永不返回、钩子残留
-        let _ = unsafe {
-            PostThreadMessageW(
-                tid,
-                WM_QUIT,
-                windows::Win32::Foundation::WPARAM(0),
-                windows::Win32::Foundation::LPARAM(0),
-            )
+
+    const WM_KEYDOWN: u32 = 0x0100;
+    const WM_KEYUP: u32 = 0x0101;
+    const WM_SYSKEYDOWN: u32 = 0x0104;
+    const WM_SYSKEYUP: u32 = 0x0105;
+
+    let is_down = wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN;
+    let is_up = wparam == WM_KEYUP || wparam == WM_SYSKEYUP;
+    if !is_down && !is_up {
+        return true;
+    }
+
+    // 必须记录每个物理键：丢事件会丢 Win → 只录到 Ctrl，并提前关吞键漏出 Win/语音
+    track_blocked_vk(vk, is_down);
+    if is_up {
+        maybe_finish_hook_after_drain();
+    }
+
+    // 注意：钩子路径无宽限期。宽限期内吞键但不喂引擎，会重演「Ctrl+Win 只录到 Ctrl」：
+    // 按下先于宽限期结束的键对引擎不可见，剩余键抬起时按纯修饰键提前提交。
+    // 钩子是精确边沿：录入前已按住的键只会收到 KEYUP，引擎按 was=false 忽略，天然安全。
+    if !CAPTURE_SUBMITTED.load(Ordering::SeqCst) {
+        // 先算 step 再放锁，再 publish，避免持锁 emit / 嵌套锁丢事件
+        let step = {
+            let mut slot = match HOOK_ENGINE.lock() {
+                Ok(s) => s,
+                Err(_) => return true,
+            };
+            match slot.as_mut() {
+                Some(eng) => Some(eng.on_event(vk, is_down)),
+                None => None,
+            }
         };
+        if let Some(step) = step {
+            let runtime = HOOK_RUNTIME.lock().ok().and_then(|g| g.clone());
+            if let Some(runtime) = runtime {
+                if runtime.capturing.load(Ordering::SeqCst) {
+                    match step {
+                        CaptureStep::Captured(keys) => {
+                            runtime.publish_result(keys);
+                        }
+                        CaptureStep::Progress(mods) => {
+                            if !mods.is_empty() {
+                                let labels: Vec<String> =
+                                    mods.iter().copied().map(vk_to_label).collect();
+                                runtime.publish_progress(labels);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !SWALLOW_HIT_LOGGED.swap(true, Ordering::SeqCst) {
+        log::info!("Shortcut capture swallow vk=0x{vk:02X} wp=0x{wparam:X}");
+    }
+    true
+}
+
+fn track_blocked_vk(vk: u32, down: bool) {
+    if let Ok(mut g) = BLOCKED_VKS.lock() {
+        if down {
+            g.insert(vk);
+        } else {
+            g.remove(&vk);
+        }
     }
 }
 
-fn emergency_unhook() {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::UI::WindowsAndMessaging::{UnhookWindowsHookEx, HHOOK};
-        let raw = HOOK_HANDLE.swap(0, Ordering::SeqCst);
-        if raw != 0 {
-            let _ = unsafe { UnhookWindowsHookEx(HHOOK(raw as *mut _)) };
-            log::warn!("Shortcut capture emergency unhook raw={raw:#x}");
-        }
+fn wait_swallow_inactive(timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while SWALLOW_ACTIVE.load(Ordering::SeqCst) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        HOOK_HANDLE.store(0, Ordering::SeqCst);
+    if SWALLOW_ACTIVE.load(Ordering::SeqCst) {
+        log::warn!("Shortcut capture swallow drain timeout, forcing off");
+        set_swallow_active(false);
     }
-    HOOK_THREAD_ID.store(0, Ordering::SeqCst);
-    set_swallow_active(false);
 }
 
 pub struct ShortcutCaptureSession {
     runtime: Arc<CaptureRuntime>,
-    poll_join: Mutex<Option<JoinHandle<()>>>,
-    hook_join: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl ShortcutCaptureSession {
     pub fn new() -> Self {
         Self {
             runtime: Arc::new(CaptureRuntime::new()),
-            poll_join: Mutex::new(None),
-            hook_join: Mutex::new(None),
         }
     }
 
@@ -397,24 +449,10 @@ impl ShortcutCaptureSession {
         self.runtime.stop.store(true, Ordering::SeqCst);
         self.runtime.capturing.store(false, Ordering::SeqCst);
 
-        if CAPTURE_SUBMITTED.load(Ordering::SeqCst) {
-            // 已提交：等钩子线程根据 blocked_vks 自然排空后退出（勿 SendInput 强放 Alt）
-            let hook_ok = join_with_timeout(self.hook_join.lock().unwrap().take(), 2500);
-            if !hook_ok {
-                log::warn!("Shortcut capture hook drain timeout, emergency unhook");
-                emergency_unhook();
-            }
-        } else {
-            set_swallow_active(false);
-            request_hook_thread_quit();
-            let hook_ok = join_with_timeout(self.hook_join.lock().unwrap().take(), 800);
-            if !hook_ok {
-                emergency_unhook();
-                request_hook_thread_quit();
-            }
+        if SWALLOW_ACTIVE.load(Ordering::SeqCst) {
+            wait_swallow_inactive(Duration::from_millis(2500));
         }
-
-        join_with_timeout(self.poll_join.lock().unwrap().take(), 400);
+        set_swallow_active(false);
         reset_hook_session();
         self.runtime.progress.lock().unwrap().clear();
         Ok(())
@@ -430,31 +468,29 @@ impl ShortcutCaptureSession {
         self.runtime.capturing.store(true, Ordering::SeqCst);
         reset_hook_session();
 
-        // 先装吞键钩子，再开轮询识别
         #[cfg(target_os = "windows")]
         {
-            match start_swallow_hook_thread() {
-                Ok(h) => {
-                    *self.hook_join.lock().unwrap() = Some(h);
-                    SWALLOW_HIT_LOGGED.store(false, Ordering::SeqCst);
-                    set_swallow_active(true);
-                    log::info!("Shortcut capture swallow hook ON");
-                }
-                Err(e) => {
-                    log::warn!(
-                        "Shortcut capture swallow hook failed: {e} (poll-only, OS/WebView 仍会响应快捷键)"
-                    );
-                }
+            crate::bridges::xiaomi::special_keys::ensure_hook_for_capture();
+            let deadline = Instant::now() + Duration::from_millis(800);
+            while !crate::bridges::xiaomi::special_keys::is_hook_armed()
+                && Instant::now() < deadline
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if !crate::bridges::xiaomi::special_keys::is_hook_armed() {
+                return Err(
+                    "键盘吞键钩子未启动：无法安全录入（系统热键会穿透）。请检查 special_keys。"
+                        .into(),
+                );
             }
         }
 
-        let runtime = Arc::clone(&self.runtime);
-        let poll = thread::Builder::new()
-            .name("shortcut-capture-poll".into())
-            .spawn(move || capture_poll_thread(runtime))
-            .map_err(|e| format!("启动录入轮询失败: {e}"))?;
-        *self.poll_join.lock().unwrap() = Some(poll);
-        log::info!("Shortcut capture started (poll detect + optional LL swallow)");
+        *HOOK_ENGINE.lock().unwrap() = Some(CaptureEngine::new(HashMap::new()));
+        *HOOK_RUNTIME.lock().unwrap() = Some(Arc::clone(&self.runtime));
+
+        SWALLOW_HIT_LOGGED.store(false, Ordering::SeqCst);
+        set_swallow_active(true);
+        log::info!("Shortcut capture started (special_keys detect+swallow)");
         Ok(())
     }
 
@@ -477,227 +513,6 @@ impl Drop for ShortcutCaptureSession {
     fn drop(&mut self) {
         let _ = self.cancel();
     }
-}
-
-fn join_with_timeout(handle: Option<JoinHandle<()>>, ms: u64) -> bool {
-    let Some(h) = handle else {
-        return true;
-    };
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = h.join();
-        let _ = tx.send(());
-    });
-    rx.recv_timeout(Duration::from_millis(ms)).is_ok()
-}
-
-#[cfg(target_os = "windows")]
-fn start_swallow_hook_thread() -> Result<JoinHandle<()>, String> {
-    let (tx, rx) = mpsc::channel::<Result<(), String>>();
-    let handle = thread::Builder::new()
-        .name("shortcut-swallow-hook".into())
-        .spawn(move || swallow_hook_thread(tx))
-        .map_err(|e| format!("{e}"))?;
-
-    match rx.recv_timeout(Duration::from_millis(800)) {
-        Ok(Ok(())) => Ok(handle),
-        Ok(Err(e)) => {
-            let _ = handle.join();
-            Err(e)
-        }
-        Err(_) => {
-            request_hook_thread_quit();
-            let _ = handle.join();
-            Err("钩子线程启动超时".into())
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn swallow_hook_thread(ready: mpsc::Sender<Result<(), String>>) {
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::System::Threading::GetCurrentThreadId;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-        MSG, WH_KEYBOARD_LL,
-    };
-
-    let tid = unsafe { GetCurrentThreadId() };
-    HOOK_THREAD_ID.store(tid, Ordering::SeqCst);
-
-    // 对齐 Python / hotkey_monitor：LL 钩子需传入本模块句柄，hMod=None 时常见「装上了但不回调」
-    let hmod = match unsafe { GetModuleHandleW(None) } {
-        Ok(h) => h,
-        Err(e) => {
-            let msg = format!("GetModuleHandleW failed: {e}");
-            log::error!("Shortcut capture {msg}");
-            let _ = ready.send(Err(msg));
-            HOOK_THREAD_ID.store(0, Ordering::SeqCst);
-            return;
-        }
-    };
-
-    let hook =
-        unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(swallow_low_level_proc), hmod, 0) };
-    let hook = match hook {
-        Ok(h) if !h.is_invalid() => h,
-        other => {
-            let msg = format!("SetWindowsHookExW failed: {other:?}");
-            log::error!("Shortcut capture {msg}");
-            let _ = ready.send(Err(msg));
-            HOOK_THREAD_ID.store(0, Ordering::SeqCst);
-            return;
-        }
-    };
-
-    HOOK_HANDLE.store(hook.0 as usize, Ordering::SeqCst);
-    let _ = ready.send(Ok(()));
-    log::info!("Shortcut capture LL swallow armed tid={tid}");
-
-    unsafe {
-        let mut msg = MSG::default();
-        // 对齐 special_keys：用 .0 判断，勿用 into() 误判
-        loop {
-            let ret = GetMessageW(&mut msg, None, 0, 0);
-            if ret.0 == -1 || ret.0 == 0 {
-                break;
-            }
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-
-        HOOK_HANDLE.store(0, Ordering::SeqCst);
-        let _ = UnhookWindowsHookEx(hook);
-    }
-
-    HOOK_THREAD_ID.store(0, Ordering::SeqCst);
-    set_swallow_active(false);
-    log::info!("Shortcut capture LL swallow thread exit");
-}
-
-#[cfg(target_os = "windows")]
-unsafe extern "system" fn swallow_low_level_proc(
-    code: i32,
-    wparam: windows::Win32::Foundation::WPARAM,
-    lparam: windows::Win32::Foundation::LPARAM,
-) -> windows::Win32::Foundation::LRESULT {
-    use windows::Win32::Foundation::LRESULT;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, HHOOK, KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
-    };
-
-    const LLKHF_INJECTED: u32 = 0x10;
-    let hook = HHOOK(HOOK_HANDLE.load(Ordering::SeqCst) as *mut _);
-
-    if code < 0 {
-        return unsafe { CallNextHookEx(hook, code, wparam, lparam) };
-    }
-
-    let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-    let flags = info.flags.0 as u32;
-    if (flags & LLKHF_INJECTED) != 0 {
-        return unsafe { CallNextHookEx(hook, code, wparam, lparam) };
-    }
-
-    if !SWALLOW_ACTIVE.load(Ordering::SeqCst) {
-        return unsafe { CallNextHookEx(hook, code, wparam, lparam) };
-    }
-
-    let wp = wparam.0 as u32;
-    let is_down = wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN;
-    let is_up = wp == WM_KEYUP || wp == WM_SYSKEYUP;
-    if is_down || is_up {
-        let vk = info.vkCode;
-        if let Ok(mut blocked) = BLOCKED_VKS.lock() {
-            if is_down {
-                blocked.insert(vk);
-            } else {
-                blocked.remove(&vk);
-            }
-        }
-        if is_up {
-            maybe_finish_hook_after_drain();
-        }
-    }
-
-    if !SWALLOW_HIT_LOGGED.swap(true, Ordering::SeqCst) {
-        log::info!(
-            "Shortcut capture swallow hit vk=0x{:02X} wp=0x{:X} flags=0x{:X}",
-            info.vkCode,
-            wp,
-            flags
-        );
-    }
-    // 非零 = 吞掉（含 WM_SYSKEY* / Alt+Space），对齐 Python 始终 return 1
-    LRESULT(1)
-}
-
-// ---------------------------------------------------------------------------
-// 轮询识别
-// ---------------------------------------------------------------------------
-
-#[cfg(target_os = "windows")]
-fn key_down(vk: u32) -> bool {
-    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-    unsafe { GetAsyncKeyState(vk as i32) as u16 & 0x8000 != 0 }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn key_down(_vk: u32) -> bool {
-    false
-}
-
-fn capture_poll_thread(runtime: Arc<CaptureRuntime>) {
-    let vks = scan_vks();
-
-    // 宽限：同步状态，不触发边沿
-    let grace_deadline = Instant::now() + Duration::from_millis(ARM_GRACE_MS);
-    let mut prev: HashMap<u32, bool> = vks.iter().map(|&vk| (vk, key_down(vk))).collect();
-    while !runtime.stop.load(Ordering::SeqCst) && Instant::now() < grace_deadline {
-        for &vk in &vks {
-            prev.insert(vk, key_down(vk));
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-
-    if runtime.stop.load(Ordering::SeqCst) {
-        return;
-    }
-
-    let mut engine = CaptureEngine::new(prev);
-    let mut finished = false;
-    let mut last_progress = String::new();
-    log::info!("Shortcut capture poll armed");
-
-    while !runtime.stop.load(Ordering::SeqCst) && !finished {
-        if !runtime.capturing.load(Ordering::SeqCst) {
-            break;
-        }
-        let frame: HashMap<u32, bool> = vks.iter().map(|&vk| (vk, key_down(vk))).collect();
-        match engine.step(&frame) {
-            CaptureStep::Captured(keys) => {
-                runtime.publish_result(keys);
-                finished = true;
-            }
-            CaptureStep::Progress(mods) => {
-                let labels: Vec<String> = mods.iter().copied().map(vk_to_label).collect();
-                let key = labels.join("+");
-                if key != last_progress {
-                    last_progress = key;
-                    if !labels.is_empty() {
-                        runtime.publish_progress(labels);
-                    }
-                }
-            }
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-
-    // 清理交给 cancel()/钩子 drain；轮询线程只等待 stop
-    while finished && !runtime.stop.load(Ordering::SeqCst) {
-        thread::sleep(Duration::from_millis(10));
-    }
-    log::info!("Shortcut capture poll exit finished={finished}");
 }
 
 #[cfg(test)]
@@ -732,6 +547,16 @@ mod tests {
     }
 
     #[test]
+    fn capture_via_hook_on_event() {
+        let mut eng = idle_engine();
+        eng.on_event(VK_LMENU, true);
+        assert_eq!(
+            eng.on_event(0x20, true),
+            CaptureStep::Captured(vec![VK_LMENU, 0x20])
+        );
+    }
+
+    #[test]
     fn capture_ctrl_plus_a() {
         let mut eng = idle_engine();
         eng.step(&frame(&[(VK_LCONTROL, true), (VK_CONTROL, true)]));
@@ -742,7 +567,28 @@ mod tests {
     }
 
     #[test]
-    fn capture_ctrl_win_on_first_release() {
+    fn capture_ctrl_win_on_all_modifiers_released() {
+        let mut eng = idle_engine();
+        eng.on_event(VK_LCONTROL, true);
+        eng.on_event(VK_CONTROL, true);
+        eng.on_event(VK_LWIN, true);
+        // 只松左 Ctrl：通用 Ctrl 与 Win 仍按下，不应提交
+        assert_eq!(
+            eng.on_event(VK_LCONTROL, false),
+            CaptureStep::Progress(vec![VK_LCONTROL, VK_LWIN])
+        );
+        assert_eq!(
+            eng.on_event(VK_CONTROL, false),
+            CaptureStep::Progress(vec![VK_LWIN])
+        );
+        assert_eq!(
+            eng.on_event(VK_LWIN, false),
+            CaptureStep::Captured(vec![VK_LCONTROL, VK_LWIN])
+        );
+    }
+
+    #[test]
+    fn capture_ctrl_win_does_not_commit_on_first_release() {
         let mut eng = idle_engine();
         eng.step(&frame(&[(VK_LCONTROL, true), (VK_CONTROL, true)]));
         eng.step(&frame(&[
@@ -756,7 +602,7 @@ mod tests {
                 (VK_CONTROL, false),
                 (VK_LWIN, true),
             ])),
-            CaptureStep::Captured(vec![VK_LCONTROL, VK_LWIN])
+            CaptureStep::Progress(vec![VK_LWIN])
         );
     }
 
@@ -767,6 +613,37 @@ mod tests {
         assert_eq!(
             eng.step(&frame(&[(VK_LCONTROL, false), (VK_CONTROL, false)])),
             CaptureStep::Captured(vec![VK_LCONTROL])
+        );
+    }
+
+    #[test]
+    fn keyup_without_keydown_is_ignored() {
+        // 录入开始前就按住 Win：钩子只会补到 KEYUP。若误当成修饰键抬起提交，
+        // 会重演「Ctrl+Win 只录到 Ctrl / 只录到 Win」。
+        let mut eng = idle_engine();
+        assert_eq!(eng.on_event(VK_LWIN, false), CaptureStep::Progress(vec![]));
+        eng.on_event(VK_LCONTROL, true);
+        eng.on_event(VK_LWIN, true);
+        assert_eq!(
+            eng.on_event(VK_LCONTROL, false),
+            CaptureStep::Progress(vec![VK_LWIN])
+        );
+        assert_eq!(
+            eng.on_event(VK_LWIN, false),
+            CaptureStep::Captured(vec![VK_LCONTROL, VK_LWIN])
+        );
+    }
+
+    #[test]
+    fn capture_win_first_then_ctrl() {
+        // 左 Win 先按、左 Ctrl 后按，同样提交完整组合
+        let mut eng = idle_engine();
+        eng.on_event(VK_LWIN, true);
+        eng.on_event(VK_LCONTROL, true);
+        eng.on_event(VK_LWIN, false);
+        assert_eq!(
+            eng.on_event(VK_LCONTROL, false),
+            CaptureStep::Captured(vec![VK_LCONTROL, VK_LWIN])
         );
     }
 
@@ -783,5 +660,25 @@ mod tests {
             b.step(&frame(&[(0x41, true)])),
             CaptureStep::Captured(vec![0x41])
         );
+    }
+
+    #[test]
+    fn special_keys_must_consult_capture_swallow() {
+        let src = include_str!("../xiaomi/special_keys.rs");
+        assert!(
+            src.contains("try_swallow_capture_key"),
+            "special_keys LL proc must call try_swallow_capture_key so Alt/Win hotkeys are swallowed during capture"
+        );
+    }
+
+    #[test]
+    fn try_swallow_blocks_syskeydown_when_active() {
+        set_swallow_active(false);
+        assert!(!try_swallow_capture_key(0x20, 0x0104, false));
+        // 无 engine/runtime 时仍应吞键
+        set_swallow_active(true);
+        assert!(try_swallow_capture_key(0x20, 0x0104, false));
+        assert!(!try_swallow_capture_key(0x53, 0x0104, true));
+        set_swallow_active(false);
     }
 }

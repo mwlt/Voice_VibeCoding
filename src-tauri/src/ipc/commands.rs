@@ -6,7 +6,7 @@ use crate::config::manager::{ConfigManager, DeviceConfig, GlobalSettings, KeyAct
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 // ============================================================
 // 前端请求/响应类型
@@ -367,6 +367,8 @@ pub struct XiaomiHostStatus {
     pub bridge_alive: bool,
     pub audio_alive: bool,
     pub cable_ready: bool,
+    /// 输入会话在跑且 ATVV 已订阅
+    pub atvv_ok: bool,
     pub status_text: String,
     pub detail: String,
     /// ok | warn | error
@@ -395,6 +397,7 @@ pub fn xiaomi_host_status_now(app: &AppHandle) -> XiaomiHostStatus {
     let audio_alive = crate::audio::pcm_router::audio_router_ready()
         || crate::audio::pcm_router::audio_router_process_alive();
     let cable_ready = crate::audio::vb_cable::voice_env_status().ready;
+    let atvv_ok = crate::bridges::xiaomi::connect::atvv_subscribed();
 
     let items = vec![
         XiaomiHostStatusItem {
@@ -441,11 +444,17 @@ pub fn xiaomi_host_status_now(app: &AppHandle) -> XiaomiHostStatus {
         },
     ];
 
-    let (status_text, detail, tone) = if bridge_alive && audio_alive && cable_ready {
+    let (status_text, detail, tone) = if bridge_alive && audio_alive && cable_ready && atvv_ok {
         (
             "运行正常".into(),
             String::new(),
             "ok".into(),
+        )
+    } else if bridge_alive && !atvv_ok {
+        (
+            "ATVV 未连接".into(),
+            "语音专用通道未就绪。按住语音键时「音频信号」可能无绿色波动，并可能触发系统 F5。可点「修复 ATVV 连接」。".into(),
+            "warn".into(),
         )
     } else if !cable_ready {
         (
@@ -477,6 +486,7 @@ pub fn xiaomi_host_status_now(app: &AppHandle) -> XiaomiHostStatus {
         bridge_alive,
         audio_alive,
         cable_ready,
+        atvv_ok,
         status_text,
         detail,
         tone,
@@ -631,6 +641,116 @@ pub async fn open_app_log() -> Result<(), String> {
 pub async fn quit_application(app: AppHandle) -> Result<(), String> {
     crate::ipc::tray::quit_app_public(&app);
     Ok(())
+}
+
+/// 扫描白名单冲突进程（端口 / 其它桥接）
+#[tauri::command]
+pub async fn get_xiaomi_conflicts(
+    include_idle_bridges: Option<bool>,
+) -> Result<crate::bridges::xiaomi::conflict_guard::ConflictSnapshot, String> {
+    Ok(crate::bridges::xiaomi::conflict_guard::current_snapshot(
+        "manual",
+        "",
+        include_idle_bridges.unwrap_or(true),
+    ))
+}
+
+/// 结束白名单冲突进程（仅 XiaomiRemoteBridge / remote-bridge-hub / xiaomi_main）
+#[tauri::command]
+pub async fn kill_xiaomi_conflicts(pids: Vec<u32>) -> Result<Vec<u32>, String> {
+    crate::bridges::xiaomi::conflict_guard::kill_whitelisted(&pids)
+}
+
+/// 清理冲突后自动重试语音路由
+#[tauri::command]
+pub async fn retry_xiaomi_after_conflict_clear() -> Result<String, String> {
+    crate::bridges::xiaomi::conflict_guard::retry_after_clear()
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AtvvRepairResult {
+    /// awaiting_conflict_clear | done
+    pub phase: String,
+    pub message: String,
+    pub atvv_ok: bool,
+    pub had_conflicts: bool,
+}
+
+/// R2+W：修复 ATVV。有占用则先弹冲突框；`force=true` 表示用户已清完，直接跑流水线。
+#[tauri::command]
+pub async fn repair_xiaomi_atvv(
+    app: AppHandle,
+    force: Option<bool>,
+) -> Result<AtvvRepairResult, String> {
+    let force = force.unwrap_or(false);
+    if !force {
+        let snap = crate::bridges::xiaomi::conflict_guard::emit_conflicts_now(
+            "atvv_repair",
+            "修复 ATVV 前检测到其它遥控桥接进程占用端口或 BLE，请先结束后再继续。",
+            true,
+        );
+        if !snap.processes.is_empty() {
+            let names: Vec<_> = snap
+                .processes
+                .iter()
+                .map(|p| format!("{} (PID {})", p.name, p.pid))
+                .collect();
+            return Ok(AtvvRepairResult {
+                phase: "awaiting_conflict_clear".into(),
+                message: format!(
+                    "发现占用进程：{}。请在弹窗中结束后，将自动继续修复。",
+                    names.join("、")
+                ),
+                atvv_ok: false,
+                had_conflicts: true,
+            });
+        }
+    }
+
+    let app_for_job = app.clone();
+    let (ok, msg) = tokio::task::spawn_blocking(move || {
+        let state = app_for_job.state::<BridgeState>();
+        let config_manager = app_for_job.state::<ConfigManager>();
+        run_atvv_repair_pipeline(&app_for_job, state.inner(), config_manager.inner())
+    })
+    .await
+    .map_err(|e| format!("ATVV repair task: {e}"))??;
+
+    let _ = app.emit(
+        "xiaomi-atvv-repair-result",
+        serde_json::json!({
+            "ok": ok,
+            "message": &msg,
+        }),
+    );
+
+    Ok(AtvvRepairResult {
+        phase: "done".into(),
+        message: msg,
+        atvv_ok: ok,
+        had_conflicts: false,
+    })
+}
+
+fn run_atvv_repair_pipeline(
+    app: &AppHandle,
+    state: &BridgeState,
+    config_manager: &ConfigManager,
+) -> Result<(bool, String), String> {
+    log::info!("XIAOMI ATVV repair pipeline start");
+    crate::bridges::xiaomi::hid_report_tap::stop_and_join();
+    restart_xiaomi_bridge_inner(app, state, config_manager)?;
+    let ok = connect::wait_atvv_subscribed(std::time::Duration::from_secs(12));
+    let msg = if ok {
+        "ATVV 语音通道已恢复".to_string()
+    } else if !crate::bridges::xiaomi::conflict_guard::scan_conflicts(true).is_empty() {
+        "重连后仍无 ATVV，且仍有桥接占用进程。请结束占用后再点「修复 ATVV 连接」。".to_string()
+    } else {
+        "已重连但仍未订阅 ATVV（未见端口占用）。可再试一次，或检查蓝牙配对后重试。".to_string()
+    };
+    log::info!("XIAOMI ATVV repair pipeline done atvv_ok={ok}");
+    Ok((ok, msg))
 }
 
 fn append_host_log(_config_manager: &ConfigManager, message: &str) {

@@ -27,6 +27,7 @@ interface HostStatus {
   bridge_alive: boolean;
   audio_alive: boolean;
   cable_ready: boolean;
+  atvv_ok?: boolean;
   status_text: string;
   detail: string;
   tone: string;
@@ -35,6 +36,7 @@ interface HostStatus {
 
 const restarting = ref(false);
 const voiceRepairing = ref(false);
+const atvvRepairing = ref(false);
 const showVoiceChoice = ref(false);
 const voiceChoiceMsg = ref("");
 const showLogModal = ref(false);
@@ -52,6 +54,7 @@ interface VoiceMeterSnapshot {
   waveform: number[];
   cableActive: boolean;
   cableLevel: number;
+  atvvOk: boolean;
 }
 
 const voiceMeter = ref<VoiceMeterSnapshot>({
@@ -60,6 +63,7 @@ const voiceMeter = ref<VoiceMeterSnapshot>({
   waveform: Array(28).fill(0),
   cableActive: false,
   cableLevel: 0,
+  atvvOk: false,
 });
 
 /** 「按键映射」标题旁：最近一次 按下/抬起 + 遥控键：映射 */
@@ -96,32 +100,38 @@ function applyVoiceMeter(p: Record<string, unknown>) {
     waveform: Array.isArray(waveform) && waveform.length ? [...waveform] : Array(28).fill(0),
     cableActive: Boolean(p.cableActive ?? p.cable_active ?? false),
     cableLevel: Number(p.cableLevel ?? p.cable_level ?? 0),
+    atvvOk: Boolean(p.atvvOk ?? p.atvv_ok ?? false),
   };
 }
 const showVoiceShortcutTip = ref(false);
 const showGainTip = ref(false);
 const showTriggerTip = ref(false);
 const showRepairTip = ref(false);
+const showAtvvTip = ref(false);
 const showRestartTip = ref(false);
 const voiceInfoBtn = ref<HTMLElement | null>(null);
 const gainInfoBtn = ref<HTMLElement | null>(null);
 const triggerInfoBtn = ref<HTMLElement | null>(null);
 const repairInfoBtn = ref<HTMLElement | null>(null);
+const atvvInfoBtn = ref<HTMLElement | null>(null);
 const restartInfoBtn = ref<HTMLElement | null>(null);
 const voiceTipEl = ref<HTMLElement | null>(null);
 const gainTipEl = ref<HTMLElement | null>(null);
 const triggerTipEl = ref<HTMLElement | null>(null);
 const repairTipEl = ref<HTMLElement | null>(null);
+const atvvTipEl = ref<HTMLElement | null>(null);
 const restartTipEl = ref<HTMLElement | null>(null);
 const voiceTipStyle = ref<Record<string, string>>({});
 const gainTipStyle = ref<Record<string, string>>({});
 const triggerTipStyle = ref<Record<string, string>>({});
 const repairTipStyle = ref<Record<string, string>>({});
+const atvvTipStyle = ref<Record<string, string>>({});
 const restartTipStyle = ref<Record<string, string>>({});
 let voiceTipCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let gainTipCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let triggerTipCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let repairTipCloseTimer: ReturnType<typeof setTimeout> | null = null;
+let atvvTipCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let restartTipCloseTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** 右上 / 右下自动落位，并钳制在视口内 */
@@ -301,6 +311,40 @@ function toggleRepairTip() {
   }
 }
 
+async function openAtvvTip() {
+  if (atvvTipCloseTimer) {
+    clearTimeout(atvvTipCloseTimer);
+    atvvTipCloseTimer = null;
+  }
+  atvvTipStyle.value = {
+    position: "fixed",
+    top: "0px",
+    left: "0px",
+    visibility: "hidden",
+    zIndex: "2000",
+  };
+  showAtvvTip.value = true;
+  await nextTick();
+  requestAnimationFrame(() => {
+    placeInfoTip(atvvInfoBtn.value, atvvTipEl.value, atvvTipStyle);
+  });
+}
+
+function scheduleCloseAtvvTip() {
+  if (atvvTipCloseTimer) clearTimeout(atvvTipCloseTimer);
+  atvvTipCloseTimer = setTimeout(() => {
+    showAtvvTip.value = false;
+  }, 120);
+}
+
+function toggleAtvvTip() {
+  if (showAtvvTip.value) {
+    showAtvvTip.value = false;
+  } else {
+    void openAtvvTip();
+  }
+}
+
 async function openRestartTip() {
   if (restartTipCloseTimer) {
     clearTimeout(restartTipCloseTimer);
@@ -348,6 +392,9 @@ function onViewportChange() {
   if (showRepairTip.value) {
     placeInfoTip(repairInfoBtn.value, repairTipEl.value, repairTipStyle);
   }
+  if (showAtvvTip.value) {
+    placeInfoTip(atvvInfoBtn.value, atvvTipEl.value, atvvTipStyle);
+  }
   if (showRestartTip.value) {
     placeInfoTip(restartInfoBtn.value, restartTipEl.value, restartTipStyle);
   }
@@ -356,6 +403,7 @@ const host = ref<HostStatus>({
   bridge_alive: false,
   audio_alive: false,
   cable_ready: false,
+  atvv_ok: false,
   status_text: "正在启动",
   detail: "",
   tone: "warn",
@@ -365,6 +413,11 @@ const host = ref<HostStatus>({
     { id: "bridge", label: "按键桥接", state_label: "检测中", tone: "warn" },
   ],
 });
+
+/** C1：桥接在跑且 ATVV 未订阅 → 音频信号旁红字 */
+const showAtvvFailLabel = computed(
+  () => Boolean(host.value.bridge_alive) && !(voiceMeter.value.atvvOk || host.value.atvv_ok)
+);
 
 const voiceShortcutEnabled = computed({
   get: () => config.value?.voice_shortcut_enabled !== false,
@@ -460,6 +513,8 @@ const logAreaRef = ref<HTMLElement | null>(null);
 let logSeq = 0;
 let unlistenKey: UnlistenFn | null = null;
 let unlistenMeter: UnlistenFn | null = null;
+let unlistenAtvvRepair: UnlistenFn | null = null;
+let unlistenAtvvCancel: UnlistenFn | null = null;
 
 function formatTime(d = new Date()): string {
   return d.toLocaleTimeString("zh-CN", { hour12: false });
@@ -630,6 +685,7 @@ async function refreshHost() {
       bridge_alive: false,
       audio_alive: false,
       cable_ready: false,
+      atvv_ok: false,
       status_text: "桥接未运行",
       detail: String(e),
       tone: "error",
@@ -656,6 +712,50 @@ async function restartBridge() {
     };
   } finally {
     restarting.value = false;
+  }
+}
+
+interface AtvvRepairResult {
+  phase: string;
+  message: string;
+  atvvOk: boolean;
+  hadConflicts: boolean;
+}
+
+async function repairAtvv() {
+  if (atvvRepairing.value || restarting.value || voiceRepairing.value) return;
+  atvvRepairing.value = true;
+  let awaitingClear = false;
+  try {
+    const result = await invoke<AtvvRepairResult>("repair_xiaomi_atvv", {
+      force: false,
+    });
+    awaitingClear = result.phase === "awaiting_conflict_clear";
+    host.value = {
+      ...host.value,
+      status_text: result.atvvOk
+        ? "ATVV 已修复"
+        : awaitingClear
+          ? "等待清理占用"
+          : "ATVV 修复未完成",
+      detail: result.message,
+      tone: result.atvvOk ? "ok" : awaitingClear ? "warn" : "error",
+    };
+    if (awaitingClear) {
+      return;
+    }
+    await refreshHost();
+  } catch (e) {
+    host.value = {
+      ...host.value,
+      status_text: "ATVV 修复失败",
+      detail: String(e),
+      tone: "error",
+    };
+  } finally {
+    if (!awaitingClear) {
+      atvvRepairing.value = false;
+    }
   }
 }
 
@@ -809,17 +909,56 @@ onMounted(async () => {
   } catch (e) {
     console.warn("listen xiaomi-voice-meter failed:", e);
   }
+
+  try {
+    unlistenAtvvRepair = await listen<{ ok?: boolean; message?: string }>(
+      "xiaomi-atvv-repair-result",
+      async (event) => {
+        const p = event.payload || {};
+        host.value = {
+          ...host.value,
+          status_text: p.ok ? "ATVV 已修复" : "ATVV 修复未完成",
+          detail: p.message || "",
+          tone: p.ok ? "ok" : "error",
+        };
+        atvvRepairing.value = false;
+        await refreshHost();
+      },
+    );
+  } catch (e) {
+    console.warn("listen xiaomi-atvv-repair-result failed:", e);
+  }
+
+  try {
+    unlistenAtvvCancel = await listen<{ message?: string }>(
+      "xiaomi-atvv-repair-cancelled",
+      (event) => {
+        host.value = {
+          ...host.value,
+          status_text: "ATVV 修复已取消",
+          detail: event.payload?.message || "已取消修复",
+          tone: "warn",
+        };
+        atvvRepairing.value = false;
+      },
+    );
+  } catch (e) {
+    console.warn("listen xiaomi-atvv-repair-cancelled failed:", e);
+  }
 });
 
 onUnmounted(() => {
   unlistenKey?.();
   unlistenMeter?.();
+  unlistenAtvvRepair?.();
+  unlistenAtvvCancel?.();
   if (hostPollTimer) clearInterval(hostPollTimer);
   if (devicePollTimer) clearInterval(devicePollTimer);
   if (voiceTipCloseTimer) clearTimeout(voiceTipCloseTimer);
   if (gainTipCloseTimer) clearTimeout(gainTipCloseTimer);
   if (triggerTipCloseTimer) clearTimeout(triggerTipCloseTimer);
   if (repairTipCloseTimer) clearTimeout(repairTipCloseTimer);
+  if (atvvTipCloseTimer) clearTimeout(atvvTipCloseTimer);
   if (restartTipCloseTimer) clearTimeout(restartTipCloseTimer);
   if (mappingFlashClearTimer) clearTimeout(mappingFlashClearTimer);
   window.removeEventListener("resize", onViewportChange);
@@ -899,7 +1038,11 @@ function toggleConnection() {
             <div class="audio-label-row">
               <span class="info-label">音频信号</span>
               <span
-                v-if="voiceMeter.bleState !== 'idle'"
+                v-if="showAtvvFailLabel"
+                class="audio-atvv-fail"
+              >ATVV 未连接</span>
+              <span
+                v-else-if="voiceMeter.bleState !== 'idle'"
                 class="audio-state"
               >{{ bleSignalLabel }}</span>
             </div>
@@ -1012,7 +1155,65 @@ function toggleConnection() {
               <button
                 class="btn btn-secondary"
                 type="button"
-                :disabled="restarting || voiceRepairing"
+                :disabled="atvvRepairing || restarting || voiceRepairing"
+                @click="repairAtvv"
+              >
+                {{ atvvRepairing ? "修复中..." : "修复 ATVV 连接" }}
+              </button>
+              <button
+                ref="atvvInfoBtn"
+                type="button"
+                class="title-info"
+                :aria-expanded="showAtvvTip"
+                aria-label="修复 ATVV 连接说明"
+                @mouseenter="openAtvvTip"
+                @mouseleave="scheduleCloseAtvvTip"
+                @focus="openAtvvTip"
+                @blur="scheduleCloseAtvvTip"
+                @click.stop="toggleAtvvTip"
+              >
+                <span class="title-info-icon" aria-hidden="true">i</span>
+              </button>
+              <Teleport to="body">
+                <div
+                  v-if="showAtvvTip"
+                  ref="atvvTipEl"
+                  class="floating-info-tip voice-info-tip"
+                  role="tooltip"
+                  :style="atvvTipStyle"
+                  @mouseenter="openAtvvTip"
+                  @mouseleave="scheduleCloseAtvvTip"
+                >
+                  <p class="tip-lead">
+                    修好遥控器到电脑的「语音专用蓝牙通道」（ATVV）。通道正常后，按住语音键才有绿色音频波动，也不会误触发系统 F5 插入日期。
+                  </p>
+                  <div class="tip-block tip-on">
+                    <div class="tip-badge">会做什么</div>
+                    <ul>
+                      <li>检查是否有其它遥控桥接软件占用</li>
+                      <li>暂停 HID Tap 后软重启连接，并重新订阅语音通道</li>
+                      <li>有占用时会先弹窗让你结束相关进程，再继续修复</li>
+                    </ul>
+                  </div>
+                  <div class="tip-block tip-off">
+                    <div class="tip-badge">什么时候点</div>
+                    <ul>
+                      <li>「音频信号」旁出现红字「ATVV 未连接」</li>
+                      <li>按住语音键说话，绿色波形一直不动</li>
+                      <li>按语音键后记事本等处插入了日期时间</li>
+                    </ul>
+                  </div>
+                  <p class="tip-foot">
+                    平时语音和波形都正常就不必点。这和「虚拟声卡检测与修复」不同：那边管电脑声卡，这边管遥控器蓝牙语音通道。
+                  </p>
+                </div>
+              </Teleport>
+            </div>
+            <div class="host-action-group">
+              <button
+                class="btn btn-secondary"
+                type="button"
+                :disabled="restarting || voiceRepairing || atvvRepairing"
                 @click="restartBridge"
               >
                 {{ restarting ? "重启中..." : "重启桥接" }}
@@ -1074,7 +1275,7 @@ function toggleConnection() {
               type="button"
               @click="showSetupTips = true"
             >
-              设置建议
+              输入法设置
             </button>
           </div>
         </section>
@@ -1098,7 +1299,7 @@ function toggleConnection() {
       <div v-if="showSetupTips" class="voice-modal-backdrop" @click.self="showSetupTips = false">
         <div class="voice-modal setup-tips-modal" role="dialog" aria-modal="true" aria-labelledby="setup-tips-title">
           <div class="setup-tips-head">
-            <h3 id="setup-tips-title">设置建议</h3>
+            <h3 id="setup-tips-title">输入法设置</h3>
             <button class="btn btn-secondary" type="button" @click="showSetupTips = false">关闭</button>
           </div>
           <p class="setup-tips-lead">按输入法对照设置；本软件语音键映射需与输入法快捷键一致。</p>
@@ -1108,18 +1309,29 @@ function toggleConnection() {
               <h4>微信输入法</h4>
               <span class="setup-ime-tag">推荐 · 按住说话，松开输入文字</span>
             </header>
+            <div class="setup-ime-warn" role="note">
+              <p class="setup-ime-warn-title">
+                必须先设置本软件快捷键，再设置微信输入法的快捷键；否则本软件无法录入微信输入法已设置的快捷键。
+              </p>
+              <p class="setup-ime-warn-sub">3种可行设置流程：</p>
+              <ol class="setup-ime-warn-ways">
+                <li>录入前先临时关掉或改掉微信语音快捷键（或先切到其它输入法），本软件录完后再改回。</li>
+                <li>不必现场录入：点下方「快速应用：左 Ctrl + 左 Win」，直接写好本软件映射。</li>
+                <li>先录一个微信暂未占用的组合键，录完后再把微信快捷键改成与本软件一致。</li>
+              </ol>
+            </div>
             <ol class="setup-ime-steps">
-              <li>打开微信输入法 → 设置 → 快捷键</li>
               <li>
+                本软件语音键先设为 <code>左 Ctrl + 左 Win</code>，触发模式选
+                <strong>按住</strong>（可用下方快速应用；遥控自带的 F5 会凑齐「按住说话」）
+              </li>
+              <li>再打开微信输入法 → 设置 → 快捷键 (参考下方图片设置)</li>
+              <!-- <li>
                 <strong>启动语音输入</strong>：左 Ctrl + 左 Win（点按开/关）
               </li>
               <li>
                 <strong>按住说话</strong>：左 Ctrl + 左 Win + F5（按住说、松手上屏）
-              </li>
-              <li>
-                本软件语音键设为 <code>左 Ctrl + 左 Win</code>，触发模式选
-                <strong>按住</strong>（遥控自带的 F5 会凑齐「按住说话」）
-              </li>
+              </li> -->
             </ol>
             <div class="setup-ime-apply">
               <button
@@ -1128,17 +1340,18 @@ function toggleConnection() {
                 :disabled="!config"
                 @click="applyWechatVoiceMapping"
               >
-                快速应用：左 Ctrl + 左 Win
+                快速设置语音键映射为：左 Ctrl + 左 Win
               </button>
               <span v-if="setupApplyHint" class="setup-apply-hint">{{ setupApplyHint }}</span>
             </div>
             <figure class="setup-ime-figure">
+              <figcaption>微信输入法 · 语音输入设置图</figcaption>
               <img
                 :src="wechatImeHotkeysImg"
                 alt="微信输入法快捷键：启动语音输入为左Ctrl+左Win；按住说话为左Ctrl+左Win+F5"
                 class="setup-ime-img"
               />
-              <figcaption>微信输入法 · 快捷键示意</figcaption>
+             
             </figure>
           </article>
 
@@ -1873,8 +2086,25 @@ function toggleConnection() {
 .setup-tips-modal {
   width: min(560px, 100%);
   max-height: min(86vh, 820px);
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 16px 18px 18px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.setup-tips-modal::-webkit-scrollbar {
+  width: 8px;
+}
+.setup-tips-modal::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 4px;
+}
+.setup-tips-modal::-webkit-scrollbar-thumb {
+  background: #94a3b8;
+  border-radius: 4px;
+}
+.setup-tips-modal::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
 }
 .setup-tips-head {
   display: flex;
@@ -1882,6 +2112,13 @@ function toggleConnection() {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 6px;
+  position: sticky;
+  top: -16px;
+  z-index: 1;
+  margin-left: -2px;
+  margin-right: -2px;
+  padding: 2px;
+  background: var(--card-bg, #fff);
 }
 .setup-tips-head h3 {
   margin: 0;
@@ -1925,6 +2162,36 @@ function toggleConnection() {
   border: 1px solid #bfdbfe;
   border-radius: 4px;
   padding: 2px 6px;
+}
+.setup-ime-warn {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  background: #fef2f2;
+}
+.setup-ime-warn-title {
+  margin: 0 0 8px !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  color: #dc2626 !important;
+  line-height: 1.5 !important;
+}
+.setup-ime-warn-sub {
+  margin: 0 0 4px !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  color: #b91c1c !important;
+}
+.setup-ime-warn-ways {
+  margin: 0;
+  padding-left: 1.25em;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #b91c1c;
+}
+.setup-ime-warn-ways li + li {
+  margin-top: 4px;
 }
 .setup-ime-steps {
   margin: 0 0 12px;
@@ -2027,6 +2294,13 @@ function toggleConnection() {
   font-size: 12px;
   font-weight: 500;
   color: var(--text-secondary);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.audio-atvv-fail {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--danger, #ef4444);
   line-height: 1.2;
   white-space: nowrap;
 }

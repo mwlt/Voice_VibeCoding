@@ -8,7 +8,33 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+static ATVV_SUBSCRIBED: AtomicBool = AtomicBool::new(false);
+
+pub fn reset_atvv_subscribed() {
+    ATVV_SUBSCRIBED.store(false, Ordering::SeqCst);
+}
+
+pub fn mark_atvv_subscribed(ok: bool) {
+    ATVV_SUBSCRIBED.store(ok, Ordering::SeqCst);
+    crate::bridges::xiaomi::voice_meter::force_emit_atvv_change();
+}
+
+pub fn wait_atvv_subscribed(timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if ATVV_SUBSCRIBED.load(Ordering::SeqCst) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    ATVV_SUBSCRIBED.load(Ordering::SeqCst)
+}
+
+pub fn atvv_subscribed() -> bool {
+    ATVV_SUBSCRIBED.load(Ordering::SeqCst)
+}
 
 /// Android TV Voice-over-BLE 服务 UUID（与 Python `atvv_record.VOICE_SERVICE_UUID` 一致）
 pub const VOICE_SERVICE_UUID: &str = "ab5e0001-5a21-4f05-bc7d-af01f617b664";
@@ -349,7 +375,9 @@ fn windows_open_and_verify(candidate: &XiaomiCandidate) -> Result<XiaomiConnecti
         candidate.interface_id
     );
 
-    // 1) 优先用枚举到的 GATT 接口 ID 打开（避免 FromBluetoothAddressAsync 返回空对象）
+    // 对齐 v1.3.3：优先用 AQS 枚举到的 ATVV 接口 FromId + OpenAsync。
+    // 跳过此步会导致后续 input_session FromId 返回空对象 (fromid_null)，
+    // 只能走地址路径并常遇到 AccessDenied，音频信号/语音键 ATVV 全部失败。
     if !candidate.interface_id.is_empty() {
         match windows_open_via_gatt_interface(candidate) {
             Ok(conn) => return Ok(conn),
@@ -359,7 +387,6 @@ fn windows_open_and_verify(candidate: &XiaomiCandidate) -> Result<XiaomiConnecti
         }
     }
 
-    // 2) 回退：按蓝牙地址打开
     windows_open_via_address(candidate)
 }
 
@@ -413,6 +440,14 @@ fn windows_open_via_gatt_interface(
 
     log::info!("CONNECTED via GATT interface remote={name} address={}", format_address(addr));
 
+    let atvv_iface = service
+        .DeviceId()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|_| candidate.interface_id.clone());
+    if atvv_iface != candidate.interface_id {
+        log::info!("ATVV service DeviceId={atvv_iface}");
+    }
+
     // 已通过 ATVV 服务接口打开，视为 ATVV 可用
     Ok(XiaomiConnection {
         name: if name.is_empty() {
@@ -422,7 +457,7 @@ fn windows_open_via_gatt_interface(
         },
         address: format_address(addr),
         address_u64: addr,
-        atvv_interface_id: candidate.interface_id.clone(),
+        atvv_interface_id: atvv_iface,
     })
 }
 
@@ -469,11 +504,15 @@ fn windows_open_via_address(candidate: &XiaomiCandidate) -> Result<XiaomiConnect
 
     let target_guid = windows::core::GUID::from_u128(0xab5e0001_5a21_4f05_bc7d_af01f617b664);
     let mut found_atvv = false;
+    let mut atvv_interface_id = String::new();
     for i in 0..count {
         let svc = services.GetAt(i).map_err(|e| format!("Service.GetAt 失败: {e}"))?;
         let uuid = svc.Uuid().map_err(|e| format!("Service.Uuid 失败: {e}"))?;
         if uuid == target_guid {
             found_atvv = true;
+            if let Ok(id) = svc.DeviceId() {
+                atvv_interface_id = id.to_string();
+            }
             break;
         }
     }
@@ -482,6 +521,12 @@ fn windows_open_via_address(candidate: &XiaomiCandidate) -> Result<XiaomiConnect
         return Err(
             "已打开蓝牙设备，但未找到 ATVV 语音服务。请确认是小米遥控器 2 Pro (MI RC)".into(),
         );
+    }
+
+    if atvv_interface_id.is_empty() {
+        atvv_interface_id = candidate.interface_id.clone();
+    } else {
+        log::info!("ATVV service DeviceId={atvv_interface_id}");
     }
 
     log::info!("ATVV DISCOVERED remote={name}");
@@ -494,97 +539,32 @@ fn windows_open_via_address(candidate: &XiaomiCandidate) -> Result<XiaomiConnect
         },
         address: candidate.address.clone(),
         address_u64: candidate.address_u64,
-        atvv_interface_id: candidate.interface_id.clone(),
+        atvv_interface_id,
     })
 }
 
 #[cfg(target_os = "windows")]
 fn windows_monitor_connection(
-    address_u64: u64,
+    _address_u64: u64,
     runtime: Arc<XiaomiRuntime>,
 ) -> Result<(), String> {
-    use std::sync::{Arc as StdArc, Condvar, Mutex};
-    use windows::Devices::Bluetooth::{BluetoothConnectionStatus, BluetoothLEDevice};
-    use windows::Foundation::TypedEventHandler;
-
-    unsafe {
-        let _ = windows::Win32::System::Com::CoInitializeEx(
-            None,
-            windows::Win32::System::Com::COINIT_MULTITHREADED,
-        );
-    }
-
-    let device = match BluetoothLEDevice::FromBluetoothAddressAsync(address_u64)
-        .map_err(|e| format!("monitor open 失败: {e}"))?
-        .get()
+    // 断连由 input_session 在同一 BLE 句柄上监听；此处不再打开第三个句柄。
+    let wait_start = std::time::Instant::now();
+    while !runtime.running.load(Ordering::SeqCst)
+        && !runtime.should_stop()
+        && wait_start.elapsed() < Duration::from_secs(30)
     {
-        Ok(d) => d,
-        Err(e) => {
-            return Err(map_winrt_null("监控时打开 BLE 设备失败", e));
-        }
-    };
-
-    // 立即检查一次，避免已断开还挂事件
-    match device.ConnectionStatus() {
-        Ok(status) if status == BluetoothConnectionStatus::Disconnected => {
-            runtime.running.store(false, Ordering::SeqCst);
-            return Err("遥控器已断开连接".into());
-        }
-        Ok(_) => {}
-        Err(e) => {
-            runtime.running.store(false, Ordering::SeqCst);
-            return Err(format!("读取连接状态失败: {e}"));
-        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 
-    #[derive(Default)]
-    struct Flag {
-        disconnected: bool,
+    while !runtime.should_stop() && runtime.running.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(200));
     }
-    let pair = StdArc::new((Mutex::new(Flag::default()), Condvar::new()));
-    let pair_cb = StdArc::clone(&pair);
-    let token = device
-        .ConnectionStatusChanged(&TypedEventHandler::new(
-            move |sender: &Option<BluetoothLEDevice>, _args| {
-                if let Some(dev) = sender {
-                    if let Ok(status) = dev.ConnectionStatus() {
-                        if status == BluetoothConnectionStatus::Disconnected {
-                            if let Ok(mut g) = pair_cb.0.lock() {
-                                g.disconnected = true;
-                                pair_cb.1.notify_all();
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            },
-        ))
-        .map_err(|e| format!("ConnectionStatusChanged: {e}"))?;
-
-    runtime.running.store(true, Ordering::SeqCst);
-    let result = loop {
-        if runtime.should_stop() {
-            break Ok(());
-        }
-        let (lock, cvar) = &*pair;
-        let Ok(guard) = lock.lock() else {
-            break Err("连接监控锁失败".into());
-        };
-        if guard.disconnected {
-            log::warn!("Xiaomi remote disconnected (event)");
-            break Err("遥控器已断开连接".into());
-        }
-        let (guard, _) = cvar
-            .wait_timeout(guard, Duration::from_millis(200))
-            .unwrap_or_else(|e| e.into_inner());
-        if guard.disconnected {
-            log::warn!("Xiaomi remote disconnected (event)");
-            break Err("遥控器已断开连接".into());
-        }
-        drop(guard);
-    };
-
-    let _ = device.RemoveConnectionStatusChanged(token);
     runtime.running.store(false, Ordering::SeqCst);
-    result
+    if runtime.should_stop() {
+        Ok(())
+    } else {
+        log::warn!("Xiaomi remote disconnected");
+        Err("遥控器已断开连接".into())
+    }
 }

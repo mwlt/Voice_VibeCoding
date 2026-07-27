@@ -1,3 +1,4 @@
+pub mod conflict_guard;
 pub mod ble_bridge;
 pub mod adpcm_decoder;
 pub mod hid_injector;

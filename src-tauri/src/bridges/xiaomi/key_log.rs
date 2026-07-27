@@ -8,7 +8,6 @@
 //! Windows 原生音量失效且 Tap 未就绪时三键全死）。
 
 use crate::bridges::xiaomi::connect::XiaomiRuntime;
-use crate::bridges::xiaomi::hid_report_tap::{ensure_started, stop_and_join};
 use crate::bridges::xiaomi::input_session::run_input_session;
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -123,6 +122,8 @@ pub fn start_key_logger(
 ) {
     #[cfg(target_os = "windows")]
     {
+        use crate::bridges::xiaomi::connect::reset_atvv_subscribed;
+        use crate::bridges::xiaomi::hid_report_tap::{ensure_started, stop_and_join};
         use crate::config::manager::ConfigManager;
         use tauri::Manager;
 
@@ -133,11 +134,14 @@ pub fn start_key_logger(
             .map(|c| (c.hid_report_tap_enabled, c.special_key_hook_enabled))
             .unwrap_or((true, true));
 
-        // 0) 特殊键 + HID Tap
         crate::bridges::xiaomi::special_keys::set_hook_enabled(hook_enabled);
+        crate::bridges::xiaomi::key_mapping::bind_voice_hook_app(app.clone());
         if hook_enabled {
             crate::bridges::xiaomi::special_keys::start_special_key_hook();
         }
+
+        // 对齐 v1.3.3：先 HID Tap，再 ATVV 输入会话（连接阶段已 FromId 打开 ATVV）
+        reset_atvv_subscribed();
 
         let mut tap_started = false;
         if tap_enabled {
@@ -151,12 +155,10 @@ pub fn start_key_logger(
                 );
             }
         } else {
-            // 配置关闭：释放进程级 hub（若曾启动）
             stop_and_join();
             emit_message(&app, "HID Tap 已按配置禁用");
         }
 
-        // Tap 未附着时启用 Raw Input 兜底（对齐 Python should_start_raw_mapping）
         crate::bridges::xiaomi::raw_mapping::maybe_start_raw_mapping(
             app.clone(),
             Arc::clone(&runtime),
@@ -172,7 +174,10 @@ pub fn start_key_logger(
             std::thread::Builder::new()
                 .name("xiaomi-gatt-input".into())
                 .spawn(move || {
-                    match run_input_session(app2.clone(), address_u64, iface, runtime2, gate2) {
+                    let result =
+                        run_input_session(app2.clone(), address_u64, iface, runtime2.clone(), gate2);
+                    runtime2.running.store(false, std::sync::atomic::Ordering::SeqCst);
+                    match result {
                         Ok(()) => {}
                         Err(e) => {
                             log::warn!("ATVV input session unavailable: {e}");
@@ -184,18 +189,20 @@ pub fn start_key_logger(
         }
 
         {
+            let app2 = app.clone();
             let runtime2 = Arc::clone(&runtime);
+            let gate2 = Arc::clone(&gate);
             std::thread::Builder::new()
                 .name("xiaomi-vk-poll".into())
                 .spawn(move || {
-                    windows_vk_poll_logger(runtime2);
+                    windows_vk_poll_logger(app2, runtime2, gate2);
                 })
                 .ok();
         }
 
         emit_message(
             &app,
-            "按键监听已启动（HID-Tap 返回/音量 + ATVV 语音/音频；对齐 Python）",
+            "按键监听已启动（HID-Tap 返回/音量 + ATVV 语音/音频）",
         );
     }
     #[cfg(not(target_os = "windows"))]
@@ -204,11 +211,9 @@ pub fn start_key_logger(
     }
 }
 
-/// VK 轮询：仅写 rust 诊断日志，不发 UI、不执行映射。
-/// 连接瞬间 Windows 常抖动 VK_HOME 等，若 `emit` 到前端会误显示成「主页：左 Win」；
-/// 真实按键仍由 HID Tap / ATVV / Raw Input 上报并映射。
+/// VK 轮询：仅作 UI/诊断兜底，不执行映射（避免与系统原生气 + HID 映射双触发）
 #[cfg(target_os = "windows")]
-fn windows_vk_poll_logger(runtime: Arc<XiaomiRuntime>) {
+fn windows_vk_poll_logger(app: AppHandle, runtime: Arc<XiaomiRuntime>, gate: Arc<KeyEmitGate>) {
     use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 
     let keys: &[(i32, &str)] = &[
@@ -228,8 +233,9 @@ fn windows_vk_poll_logger(runtime: Arc<XiaomiRuntime>) {
         for &(vk, id) in keys {
             let down = unsafe { GetAsyncKeyState(vk) as u16 } & 0x8000 != 0;
             let was = prev.get(&vk).copied().unwrap_or(false);
-            if down && !was {
-                log::debug!("XIAOMI VK observe key={id} vk=0x{vk:02X} (no map, no ui)");
+            if down && !was && gate.try_emit(id) {
+                emit_key(&app, id, button_label(id));
+                log::info!("XIAOMI VK observe key={id} vk=0x{vk:02X} (no map)");
             }
             prev.insert(vk, down);
         }
