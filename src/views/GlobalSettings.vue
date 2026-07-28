@@ -13,7 +13,7 @@ const settings = ref<GlobalSettings>({
 
 const saved = ref(true);
 const saving = ref(false);
-const appVersion = "v1.3.7";
+const appVersion = "v1.3.8";
 const updateChecking = ref(false);
 const updateHint = ref("");
 
@@ -76,7 +76,18 @@ async function checkUpdate() {
 <template>
   <div class="page">
     <header class="page-header">
-      <h2>⚙️ 全局设置</h2>
+      <div class="header-left">
+        <h2>⚙️ 全局设置</h2>
+        <button
+          class="btn btn-secondary"
+          type="button"
+          :disabled="updateChecking"
+          @click="checkUpdate"
+        >
+          {{ updateChecking ? "检查中…" : "检查更新" }}
+        </button>
+        <span v-if="updateHint" class="header-update-hint">{{ updateHint }}</span>
+      </div>
       <button
         class="btn btn-primary"
         :disabled="saved || saving"
@@ -149,20 +160,6 @@ async function checkUpdate() {
           <div class="about-item">
             <span class="about-label">版本</span>
             <span class="about-value">{{ appVersion }}</span>
-          </div>
-          <div class="about-item about-update">
-            <span class="about-label">检查更新</span>
-            <div class="about-update-row">
-              <button
-                class="btn btn-secondary"
-                type="button"
-                :disabled="updateChecking"
-                @click="checkUpdate"
-              >
-                {{ updateChecking ? "检查中…" : "检查更新" }}
-              </button>
-              <span v-if="updateHint" class="about-update-hint">{{ updateHint }}</span>
-            </div>
           </div>
           <div class="about-item">
             <span class="about-label">技术栈</span>
@@ -257,9 +254,28 @@ async function checkUpdate() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   margin-bottom: 20px;
 }
-.page-header h2 { font-size: 20px; font-weight: 600; }
+.page-header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+.header-update-hint {
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
 .page-body {
   display: flex;
   flex-direction: column;
@@ -363,18 +379,6 @@ async function checkUpdate() {
 .about-item { display: flex; flex-direction: column; gap: 4px; }
 .about-label { font-size: 12px; color: var(--text-secondary); }
 .about-value { font-size: 13px; font-weight: 500; }
-.about-update { grid-column: 1 / -1; }
-.about-update-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-}
-.about-update-hint {
-  font-size: 12px;
-  color: var(--text-secondary);
-  line-height: 1.45;
-}
 
 .credit-layout {
   display: flex;
