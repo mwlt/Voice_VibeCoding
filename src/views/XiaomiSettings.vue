@@ -6,8 +6,9 @@ import { useBridgeStore } from "../stores/bridge";
 import { useConfigStore } from "../stores/config";
 import DeviceStatus from "../components/DeviceStatus.vue";
 import KeyMappingStage from "../components/KeyMappingStage.vue";
-import type { DeviceConfig, KeyAction } from "../types";
+import type { DeviceConfig, KeyAction, AppUpdateInfo } from "../types";
 import wechatImeHotkeysImg from "../assets/guides/wechat-ime-hotkeys.png";
+import { open as openUrl } from "@tauri-apps/plugin-shell";
 
 const bridge = useBridgeStore();
 const configStore = useConfigStore();
@@ -39,7 +40,12 @@ const voiceRepairing = ref(false);
 const atvvRepairing = ref(false);
 const showVoiceChoice = ref(false);
 const voiceChoiceMsg = ref("");
+const showVoiceReboot = ref(false);
+const voiceRebootMsg = ref("");
 const showLogModal = ref(false);
+const showUpdateModal = ref(false);
+const updateInfo = ref<AppUpdateInfo | null>(null);
+let unlistenUpdate: UnlistenFn | null = null;
 const showSetupTips = ref(false);
 const setupApplyHint = ref("");
 const logText = ref("");
@@ -722,6 +728,45 @@ interface AtvvRepairResult {
   hadConflicts: boolean;
 }
 
+function applyUpdateInfo(info: AppUpdateInfo | null) {
+  if (info?.updateAvailable) {
+    updateInfo.value = info;
+  } else if (info && !info.updateAvailable) {
+    updateInfo.value = null;
+    showUpdateModal.value = false;
+  }
+}
+
+async function openUpdateLink(kind: "setup" | "gitee" | "github") {
+  const info = updateInfo.value;
+  if (!info) return;
+  const url =
+    kind === "setup"
+      ? info.setupUrl
+      : kind === "gitee"
+        ? info.giteePage
+        : info.githubPage;
+  if (!url) return;
+  try {
+    await openUrl(url);
+  } catch (e) {
+    console.warn("open update url failed:", e);
+    window.open(url, "_blank");
+  }
+}
+
+async function ignoreCurrentUpdate() {
+  const ver = updateInfo.value?.latestVersion;
+  if (!ver) return;
+  try {
+    const result = await invoke<AppUpdateInfo>("ignore_app_update", { version: ver });
+    applyUpdateInfo(result);
+    prependLog(`已忽略版本 v${ver}`);
+  } catch (e) {
+    prependLog(`忽略更新失败: ${e}`);
+  }
+}
+
 async function repairAtvv() {
   if (atvvRepairing.value || restarting.value || voiceRepairing.value) return;
   atvvRepairing.value = true;
@@ -806,9 +851,23 @@ interface VoiceEnvActionResult {
   reportPath?: string | null;
 }
 
+function applyVoiceEnvResult(result: VoiceEnvActionResult) {
+  host.value = {
+    ...host.value,
+    detail: result.message,
+    tone: result.ready ? "ok" : result.needsReboot ? "warn" : result.ok ? "warn" : "error",
+  };
+  prependLog(result.message);
+  if (result.needsReboot) {
+    voiceRebootMsg.value = result.message;
+    showVoiceReboot.value = true;
+  }
+}
+
 async function voiceDetectAndRepair() {
   voiceRepairing.value = true;
   showVoiceChoice.value = false;
+  showVoiceReboot.value = false;
   try {
     const result = await invoke<VoiceEnvActionResult>("check_xiaomi_voice_env");
     if (result.needsChoice) {
@@ -816,12 +875,7 @@ async function voiceDetectAndRepair() {
       showVoiceChoice.value = true;
       return;
     }
-    host.value = {
-      ...host.value,
-      detail: result.message,
-      tone: result.ready ? "ok" : result.needsReboot ? "warn" : "error",
-    };
-    prependLog(result.message);
+    applyVoiceEnvResult(result);
     await refreshHost();
   } catch (e) {
     const msg = `虚拟声卡检测失败: ${e}`;
@@ -835,16 +889,12 @@ async function voiceDetectAndRepair() {
 async function chooseVoiceSource(source: "embedded" | "download_page" | "download_zip") {
   voiceRepairing.value = true;
   showVoiceChoice.value = false;
+  showVoiceReboot.value = false;
   try {
     const result = await invoke<VoiceEnvActionResult>("repair_xiaomi_voice_env", {
       source,
     });
-    host.value = {
-      ...host.value,
-      detail: result.message,
-      tone: result.ready ? "ok" : result.ok ? "warn" : "error",
-    };
-    prependLog(result.message);
+    applyVoiceEnvResult(result);
     await refreshHost();
   } catch (e) {
     const msg = `语音修复失败: ${e}`;
@@ -945,6 +995,24 @@ onMounted(async () => {
   } catch (e) {
     console.warn("listen xiaomi-atvv-repair-cancelled failed:", e);
   }
+
+  try {
+    unlistenUpdate = await listen<AppUpdateInfo>("app-update-available", (event) => {
+      applyUpdateInfo(event.payload);
+      if (event.payload?.updateAvailable) {
+        prependLog(`发现新版本 v${event.payload.latestVersion}`);
+      }
+    });
+  } catch (e) {
+    console.warn("listen app-update-available failed:", e);
+  }
+
+  try {
+    const cached = await invoke<AppUpdateInfo>("get_app_update_state");
+    applyUpdateInfo(cached);
+  } catch {
+    /* ignore */
+  }
 });
 
 onUnmounted(() => {
@@ -952,6 +1020,7 @@ onUnmounted(() => {
   unlistenMeter?.();
   unlistenAtvvRepair?.();
   unlistenAtvvCancel?.();
+  unlistenUpdate?.();
   if (hostPollTimer) clearInterval(hostPollTimer);
   if (devicePollTimer) clearInterval(devicePollTimer);
   if (voiceTipCloseTimer) clearTimeout(voiceTipCloseTimer);
@@ -997,6 +1066,14 @@ function toggleConnection() {
     <header class="page-header">
       <div class="title-row">
         <h2>小米遥控器 2 Pro</h2>
+        <button
+          v-if="updateInfo?.updateAvailable"
+          type="button"
+          class="update-chip"
+          @click="showUpdateModal = true"
+        >
+          更新（V{{ updateInfo.latestVersion }}）
+        </button>
       </div>
       <DeviceStatus
         :status="device.status"
@@ -1146,7 +1223,7 @@ function toggleConnection() {
                     </ul>
                   </div>
                   <p class="tip-foot">
-                    平时语音正常就不必反复点；装完驱动若提示重启电脑，按提示重启后再试。
+                    平时语音正常就不必反复点；若提示必须重启电脑，按提示重启后再试。结果会写在右侧状态日志。
                   </p>
                 </div>
               </Teleport>
@@ -1381,6 +1458,8 @@ function toggleConnection() {
         <div class="voice-modal" role="dialog" aria-modal="true">
           <h3>未检测到 VB-CABLE</h3>
           <p>{{ voiceChoiceMsg || "请选择安装方式：" }}</p>
+          <p class="voice-modal-uac-tip">如弹出 Windows 管理员确认（UAC），点同意</p>
+          <p class="voice-modal-reboot-tip">安装完成必须重启系统</p>
           <div class="voice-modal-actions">
             <button
               class="btn btn-primary"
@@ -1396,7 +1475,7 @@ function toggleConnection() {
               :disabled="voiceRepairing"
               @click="chooseVoiceSource('download_zip')"
             >
-              下载最新驱动包
+              下载最新驱动包手动安装
             </button>
             <button
               class="btn btn-secondary"
@@ -1404,15 +1483,73 @@ function toggleConnection() {
               :disabled="voiceRepairing"
               @click="chooseVoiceSource('download_page')"
             >
-              打开官网说明
+              打开VB-CABLE官网
             </button>
             <button class="btn btn-secondary" type="button" @click="showVoiceChoice = false">
               取消
             </button>
           </div>
           <p class="voice-modal-note">
-            内嵌为已校验的 VB-CABLE 4.5；安装时会弹出 Windows 管理员确认。官网下载适合需要更新版本时。
+            内嵌为已校验的 VB-CABLE 4.5；安装时会弹出 Windows 管理员确认。官网下载适合需要更新版本时使用。
           </p>
+        </div>
+      </div>
+
+      <div
+        v-if="showVoiceReboot"
+        class="voice-modal-backdrop"
+        @click.self="showVoiceReboot = false"
+      >
+        <div
+          class="voice-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="voice-reboot-title"
+        >
+          <h3 id="voice-reboot-title">需要重启 Windows</h3>
+          <p>{{ voiceRebootMsg || "驱动已安装，必须重启系统后虚拟声卡才会生效。" }}</p>
+          <p class="voice-modal-reboot-tip">安装完成必须重启系统</p>
+          <div class="voice-modal-actions">
+            <button class="btn btn-primary" type="button" @click="showVoiceReboot = false">
+              知道了
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div
+        v-if="showUpdateModal && updateInfo?.updateAvailable"
+        class="voice-modal-backdrop"
+        @click.self="showUpdateModal = false"
+      >
+        <div
+          class="voice-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="app-update-title"
+        >
+          <h3 id="app-update-title">发现新版本 V{{ updateInfo.latestVersion }}</h3>
+          <p>
+            当前版本 V{{ updateInfo.currentVersion }}。下载安装包后按提示安装即可（安装时请先退出本软件）。
+          </p>
+          <p v-if="updateInfo.notes" class="update-notes">{{ updateInfo.notes }}</p>
+          <div class="voice-modal-actions">
+            <button class="btn btn-primary" type="button" @click="openUpdateLink('setup')">
+              直接下载
+            </button>
+            <button class="btn btn-secondary" type="button" @click="openUpdateLink('gitee')">
+              去 Gitee 下载
+            </button>
+            <button class="btn btn-secondary" type="button" @click="openUpdateLink('github')">
+              去 GitHub 下载
+            </button>
+            <button class="btn btn-secondary" type="button" @click="ignoreCurrentUpdate">
+              忽略此版本
+            </button>
+            <button class="btn btn-secondary" type="button" @click="showUpdateModal = false">
+              关闭
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1740,6 +1877,24 @@ function toggleConnection() {
   min-width: 0;
 }
 .page-header h2 { font-size: 20px; font-weight: 600; margin: 0; }
+.update-chip {
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #2563eb;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  line-height: 1.2;
+}
+.update-chip:hover {
+  text-decoration: underline;
+}
+.update-notes {
+  color: #64748b !important;
+  font-size: 12px !important;
+}
 .title-info {
   position: relative;
   flex-shrink: 0;
@@ -2068,6 +2223,21 @@ function toggleConnection() {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.voice-modal-uac-tip {
+  margin: -8px 0 8px !important;
+  font-size: 13px !important;
+  font-weight: 600;
+  color: #ea580c !important;
+  line-height: 1.45;
+}
+.voice-modal-reboot-tip {
+  margin: 0 0 16px !important;
+  font-size: 14px !important;
+  font-weight: 700;
+  color: #dc2626 !important;
+  text-align: center;
+  line-height: 1.45;
 }
 .voice-modal-note {
   margin-top: 14px !important;

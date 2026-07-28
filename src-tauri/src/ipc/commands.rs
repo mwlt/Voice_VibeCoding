@@ -345,6 +345,12 @@ pub async fn save_global_settings(
     // 再读一遍注册表，把真实结果写回配置文件
     let mut synced = settings;
     synced.autostart = crate::bridges::xiaomi::autostart::is_autostart_enabled();
+    // 前端关于页保存时可能不带忽略版本字段，避免被清空
+    if synced.ignored_update_version.is_none() {
+        if let Ok(existing) = config_manager.get_global_settings() {
+            synced.ignored_update_version = existing.ignored_update_version;
+        }
+    }
     config_manager.save_global_settings(&synced)?;
     Ok(())
 }

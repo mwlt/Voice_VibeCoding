@@ -1,0 +1,8 @@
+{
+  "version": "1.3.7",
+  "notes": "v1.3.7：虚拟声卡修复体验优化、HID 注入无黑框、轻量更新检查。",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/latest"
+}

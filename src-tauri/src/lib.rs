@@ -3,6 +3,7 @@ pub mod config;
 pub mod ipc;
 pub mod audio;
 pub mod logging;
+pub mod app_update;
 
 use tauri::{Manager, RunEvent};
 
@@ -141,6 +142,9 @@ pub fn run() {
                     }
                 })?;
 
+            // 启动后静默检查更新（有新版才向前端发事件）
+            app_update::spawn_startup_check(app.handle().clone());
+
             log::info!("Voice VibeCoding started successfully");
             Ok(())
         })
@@ -175,6 +179,9 @@ pub fn run() {
             ipc::commands::kill_xiaomi_conflicts,
             ipc::commands::retry_xiaomi_after_conflict_clear,
             ipc::commands::repair_xiaomi_atvv,
+            ipc::update_cmds::check_app_update,
+            ipc::update_cmds::get_app_update_state,
+            ipc::update_cmds::ignore_app_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

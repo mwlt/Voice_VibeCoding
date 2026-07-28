@@ -172,19 +172,60 @@ pub fn voice_env_status() -> VoiceEnvStatus {
     }
 }
 
-fn desktop_report_path() -> PathBuf {
-    let desktop = std::env::var("USERPROFILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("Desktop");
-    desktop.join("XiaomiRemoteBridge-audio-check.txt")
-}
-
 fn app_path_for_script() -> PathBuf {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn script_result_line(text: &str) -> Option<&str> {
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix("Result: ").map(str::trim))
+}
+
+fn humanize_script_result(raw: &str, ready: bool, needs_reboot: bool) -> String {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("restart required") || raw.contains("需要重启") {
+        return "驱动已安装，必须重启 Windows 后虚拟声卡才会生效。重启后再点一次「虚拟声卡检测与修复」。"
+            .into();
+    }
+    if let Some(rest) = raw.strip_prefix("WARNING:") {
+        let detail = rest.trim();
+        let detail_cn = if detail.is_empty() {
+            "原因未知，请查看应用日志。".into()
+        } else if detail.to_ascii_lowercase().contains("uac")
+            || detail.to_ascii_lowercase().contains("cancelled")
+            || detail.contains("did not start")
+        {
+            "未获得管理员授权（UAC），安装已取消。".into()
+        } else if detail.to_ascii_lowercase().contains("hash mismatch") {
+            "内嵌驱动包校验失败，请改用官网驱动或重装本软件。".into()
+        } else if detail.to_ascii_lowercase().contains("not available")
+            || detail.to_ascii_lowercase().contains("not ready")
+        {
+            "仍未检测到 CABLE Output，请重启电脑后再试。".into()
+        } else {
+            detail.to_string()
+        };
+        return format!("虚拟声卡修复未完成：{detail_cn}");
+    }
+    if raw.eq_ignore_ascii_case("OK") || raw.is_empty() {
+        if ready {
+            return "语音环境已就绪：VB-CABLE 可用，默认麦克风已设为 CABLE Output。".into();
+        }
+        if needs_reboot {
+            return "驱动已安装，必须重启 Windows 后虚拟声卡才会生效。重启后再点一次「虚拟声卡检测与修复」。"
+                .into();
+        }
+        return "脚本已执行，但尚未检测到 CABLE Input/Output。若刚装驱动请重启后再试。"
+            .into();
+    }
+    if ready {
+        format!("语音环境已就绪（{raw}）。")
+    } else {
+        format!("虚拟声卡处理结束：{raw}")
+    }
 }
 
 fn run_configure_script(mode: &str, zip: &Path) -> Result<VoiceEnvActionResult, String> {
@@ -196,42 +237,47 @@ fn run_configure_script(mode: &str, zip: &Path) -> Result<VoiceEnvActionResult, 
         app_path.display()
     );
 
-    let output = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            &script.display().to_string(),
-            "-Mode",
-            mode,
-            "-AppPath",
-            &app_path.display().to_string(),
-            "-DriverZipPath",
-            &zip.display().to_string(),
-        ])
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args([
+        "-NoProfile",
+        "-WindowStyle",
+        "Hidden",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        &script.display().to_string(),
+        "-Mode",
+        mode,
+        "-AppPath",
+        &app_path.display().to_string(),
+        "-DriverZipPath",
+        &zip.display().to_string(),
+    ]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = cmd
         .output()
         .map_err(|e| format!("启动语音环境脚本失败: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if !stdout.is_empty() {
-        log::info!("XIAOMI VOICE ENV stdout: {stdout}");
+        log::info!("XIAOMI VOICE ENV stdout:\n{stdout}");
     }
     if !stderr.is_empty() {
-        log::warn!("XIAOMI VOICE ENV stderr: {stderr}");
+        log::warn!("XIAOMI VOICE ENV stderr:\n{stderr}");
     }
 
-    // 脚本多数情况 exit 0，结果写在桌面报告里
-    let report = desktop_report_path();
-    let report_text = std::fs::read_to_string(&report).unwrap_or_default();
-    let needs_reboot = report_text.to_ascii_lowercase().contains("restart required")
-        || report_text.contains("需要重启")
+    let result_raw = script_result_line(&stdout).unwrap_or("").to_string();
+    let needs_reboot = result_raw.to_ascii_lowercase().contains("restart required")
+        || result_raw.contains("需要重启")
+        || stdout.to_ascii_lowercase().contains("restart required")
         || output.status.code() == Some(3010);
-    let warning = report_text
-        .lines()
-        .find(|l| l.starts_with("Result: WARNING"))
-        .map(|l| l.trim_start_matches("Result: ").to_string());
 
     // 稍等端点出现
     for _ in 0..15 {
@@ -244,23 +290,26 @@ fn run_configure_script(mode: &str, zip: &Path) -> Result<VoiceEnvActionResult, 
     let (cable_input, cable_output) = probe_cable_endpoints();
     let ready = cable_input && cable_output;
 
-    let message = if let Some(w) = warning {
-        w
-    } else if needs_reboot {
-        "驱动已安装，但可能需要重启 Windows 后端点才会出现。重启后再点一次「虚拟声卡检测与修复」。"
-            .into()
-    } else if ready {
-        "语音环境已就绪：VB-CABLE 可用，默认麦克风已尝试设为 CABLE Output。".into()
-    } else if !output.status.success() {
+    let message = if !output.status.success() && !needs_reboot {
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !result_raw.is_empty() {
+            result_raw.clone()
+        } else {
+            stdout
+        };
         format!(
-            "脚本执行失败 (code={:?})。{}",
+            "虚拟声卡脚本执行失败 (code={:?})。{}",
             output.status.code(),
-            if stderr.is_empty() { stdout } else { stderr }
+            detail
         )
     } else {
-        "脚本已执行，但尚未检测到 CABLE Input/Output。若刚装驱动请重启后再试，或改用官网最新包。"
-            .into()
+        humanize_script_result(&result_raw, ready, needs_reboot)
     };
+
+    log::info!(
+        "XIAOMI VOICE ENV done ready={ready} needs_reboot={needs_reboot} result={result_raw} msg={message}"
+    );
 
     Ok(VoiceEnvActionResult {
         ok: ready || needs_reboot,
@@ -268,11 +317,7 @@ fn run_configure_script(mode: &str, zip: &Path) -> Result<VoiceEnvActionResult, 
         needs_choice: false,
         needs_reboot,
         message,
-        report_path: if report.is_file() {
-            Some(report.display().to_string())
-        } else {
-            None
-        },
+        report_path: None,
     })
 }
 

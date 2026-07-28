@@ -130,6 +130,9 @@ pub struct GlobalSettings {
     pub language: String,
     /// 最小化到托盘
     pub minimize_to_tray: bool,
+    /// 用户忽略的更新版本（直到更高版本再提示）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignored_update_version: Option<String>,
 }
 
 impl Default for GlobalSettings {
@@ -138,6 +141,7 @@ impl Default for GlobalSettings {
             autostart: false,
             language: "zh-CN".to_string(),
             minimize_to_tray: true,
+            ignored_update_version: None,
         }
     }
 }

@@ -4,33 +4,33 @@
 
 *gitee:* 
 
-https://gitee.com/mwlt/remote-voice-vibe-coding
+[https://gitee.com/mwlt/remote-voice-vibe-coding](https://gitee.com/mwlt/remote-voice-vibe-coding)
 
 github:
 
-https://github.com/mwlt/Voice_VibeCoding
+[https://github.com/mwlt/Voice_VibeCoding](https://github.com/mwlt/Voice_VibeCoding)
 
 
 
-python windows版，作者：[xxb26553663-star](https://github.com/xxb26553663-star)  
-https://github.com/xxb26553663-star/remote-bridge-hub
+python windows版，作者：[xxb26553663-star](https://github.com/xxb26553663-star)
 
-
-
-
+  
+[https://github.com/xxb26553663-star/remote-bridge-hub](https://github.com/xxb26553663-star/remote-bridge-hub)
 
 apple macos版 ，作者 [nijez](https://github.com/nijez)
-https://github.com/nijez/open-voice-bridge
 
-**v1.3.6** · Windows 桌面应用
+
+[https://github.com/nijez/open-voice-bridge](https://github.com/nijez/open-voice-bridge)
+
+
+
+**v1.3.7** · Windows 桌面应用
 
 把小米遥控器 2 Pro（及预留的 T1 / 汉王 V60）接到电脑：按键可映射成键盘快捷键，语音可送到输入法听写。
 
 本仓库是 **Rust + Tauri 2 + Vue 3** 实现，不是 Python 版 Remote Bridge Hub。二者功能相近，但运行时、安装包与配置目录均独立。
 
 ---
-
-
 
 ## 它能做什么
 
@@ -40,21 +40,22 @@ https://github.com/nijez/open-voice-bridge
 
 相对 Python 版（Xiaomi Remote Bridge）在体验与可靠性上的改进与增量如下。基础能力（蓝牙连接、按键映射、ATVV 语音、HID Tap、VB-CABLE 等）两端对齐，此处不重复罗列。
 
-| 能力 / 改进点 | 说明 | 相对 Python |
-| --- | --- | --- |
-| 进程 / 端口冲突弹窗 | 检测到其它桥接占用 PCM / HID Tap 端口或同名进程时弹出列表，可逐条或全部结束白名单进程，并自动重试语音路由 | 新增 |
-| 一键修复 ATVV | 「修复 ATVV 连接」：有占用先清进程，再停 HID Tap、软重启并等待语音通道恢复；文案区分有无占用 | 新增 |
-| ATVV 状态红字提示 | 桥接已运行但语音通道未订阅时，在「音频信号」旁显示「ATVV 未连接」 | 新增 |
-| ATVV 失败系统通知 | 语音通道未就绪时按语音键，右下角通知引导去点「修复 ATVV 连接」（限流，避免刷屏） | 新增 |
-| F5 抑制策略 | ATVV 正常时只吞与语音键关联的 F5，物理键盘 F5 可用；失败时放行并提示，避免「连着遥控就不能按 F5」 | 优化 |
-| ATVV / HID Tap 时序 | 订阅语音通道前暂停 HID Tap，降低 AccessDenied；订阅成功后再启 Tap | 优化 |
-| 音频信号波形 | 设置页实时显示 BLE 解码电平 / 波形，便于判断语音是否真正进机 | 增强 |
-| 虚拟声卡检测与修复 | 应用内检测 VB-CABLE，支持内嵌驱动或官网安装指引，结果写回主机状态 | 增强 |
-| 输入法设置引导 | 「输入法设置」对照微信等快捷键与映射，减少听写配对踩坑 | 增强 |
-| 单实例 | 再次启动只激活已有窗口，降低双开抢端口 | 增强 |
-| 应用内日志 | 界面直接查看 / 复制 / 打开日志，不必只翻 `%APPDATA%` 文件 | 增强 |
-| 统一桌面壳 | Rust + Tauri 2 + Vue 单安装包、托盘与设置页一体，免 Python 运行时 | 增强 |
-| 项目与致谢 | 设置页标明本版与 Python / macOS 相关仓库来源 | 新增 |
+
+| 能力 / 改进点          | 说明                                                           | 相对 Python |
+| ----------------- | ------------------------------------------------------------ | --------- |
+| 进程 / 端口冲突弹窗       | 检测到其它桥接占用 PCM / HID Tap 端口或同名进程时弹出列表，可逐条或全部结束白名单进程，并自动重试语音路由 | 新增        |
+| 一键修复 ATVV         | 「修复 ATVV 连接」：有占用先清进程，再停 HID Tap、软重启并等待语音通道恢复；文案区分有无占用        | 新增        |
+| ATVV 状态红字提示       | 桥接已运行但语音通道未订阅时，在「音频信号」旁显示「ATVV 未连接」                          | 新增        |
+| ATVV 失败系统通知       | 语音通道未就绪时按语音键，右下角通知引导去点「修复 ATVV 连接」（限流，避免刷屏）                  | 新增        |
+| F5 抑制策略           | ATVV 正常时只吞与语音键关联的 F5，物理键盘 F5 可用；失败时放行并提示，避免「连着遥控就不能按 F5」     | 优化        |
+| ATVV / HID Tap 时序 | 订阅语音通道前暂停 HID Tap，降低 AccessDenied；订阅成功后再启 Tap                | 优化        |
+| 音频信号波形            | 设置页实时显示 BLE 解码电平 / 波形，便于判断语音是否真正进机                           | 增强        |
+| 虚拟声卡检测与修复         | 应用内检测 VB-CABLE，支持内嵌驱动或官网安装指引，结果写回主机状态                        | 增强        |
+| 输入法设置引导           | 「输入法设置」对照微信等快捷键与映射，减少听写配对踩坑                                  | 增强        |
+| 单实例               | 再次启动只激活已有窗口，降低双开抢端口                                          | 增强        |
+| 应用内日志             | 界面直接查看 / 复制 / 打开日志，不必只翻 `%APPDATA%` 文件                       | 增强        |
+| 统一桌面壳             | Rust + Tauri 2 + Vue 单安装包、托盘与设置页一体，免 Python 运行时              | 增强        |
+| 各系统版本             | 设置页标明本版与 Python / macOS 相关仓库来源                               | 新增        |
 
 
 
@@ -64,9 +65,7 @@ https://github.com/nijez/open-voice-bridge
 - **T1 / V60**：界面与配置页已预留，我没有对应设备无法测试，需要使用的请自行二次开发
 - **托盘**：可最小化到托盘；支持开机自启
 
-
-
-![界面图](./image/1.png "系统界面预览")
+界面图
 
 ---
 
@@ -160,8 +159,11 @@ npm run tauri:build
 | 类型       | 路径                                                                          |
 | -------- | --------------------------------------------------------------------------- |
 | 可执行文件    | `src-tauri/target/release/remote-bridge-hub.exe`                            |
-| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.3.6_x64_zh-CN.msi`  |
-| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.3.6_x64-setup.exe` |
+| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.3.7_x64_zh-CN.msi`  |
+| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.3.7_x64-setup.exe` |
+
+
+发新版时请同步更新仓库根目录 `update/latest.json`（提高 `version`，填写 Gitee/GitHub 页面与安装包直链）。应用会优先读 Gitee raw，失败再读 GitHub raw；有更新时在「小米遥控器 2 Pro」标题旁显示蓝色「更新」入口。
 
 
 ---
@@ -177,10 +179,10 @@ npm run tauri:build
 │   ├── assets/xiaomi/       # VB-CABLE、Frida Gadget 等资源
 │   ├── icons/
 │   └── tauri.conf.json
+├── update/latest.json       # 轻量更新检查清单
 ├── package.json
 └── README.md
 ```
-
 ---
 
 

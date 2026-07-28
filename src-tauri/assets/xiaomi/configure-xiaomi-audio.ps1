@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
   [ValidateSet("Install", "InstallElevated", "Finish", "Repair", "Restore", "Audit")]
   [string] $Mode = "Install",
@@ -9,7 +9,6 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ProductName = "Xiaomi Remote Bridge"
 $ExpectedZipSha256 = "b950e39f01af1d04ea623c8f6d8eb9b6ea5c477c637295fabf20631c85116bfb"
 $StateRoot = Join-Path $env:LOCALAPPDATA "2655AI\BridgeAudio\XiaomiRemoteBridge"
 $DriverRoot = Join-Path $StateRoot "VB-CABLE"
@@ -17,8 +16,6 @@ $PreviousMicFile = Join-Path $StateRoot "previous-default-microphone.txt"
 $RebootFlag = Join-Path $StateRoot "reboot-required.flag"
 $RunOnceKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"
 $RunOnceName = "XiaomiRemoteBridgeAudioFinish"
-$ReportPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "XiaomiRemoteBridge-audio-check.txt"
-
 function Get-VBCableEndpoint([string] $Flow, [string] $Prefix, [string] $Pattern) {
   $root = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$Flow"
   foreach ($key in Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue) {
@@ -159,8 +156,9 @@ function Set-FinishRunOnce {
 }
 
 function Invoke-ElevatedInstall {
-  $args = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -Mode InstallElevated -AppPath "{1}" -DriverZipPath "{2}"' -f $PSCommandPath,$AppPath,$DriverZipPath
-  $process = Start-Process -FilePath "powershell.exe" -ArgumentList $args -Verb RunAs -PassThru -Wait
+  $args = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Mode InstallElevated -AppPath "{1}" -DriverZipPath "{2}"' -f $PSCommandPath,$AppPath,$DriverZipPath
+  $process = Start-Process -FilePath "powershell.exe" -ArgumentList $args -Verb RunAs -WindowStyle Hidden -PassThru -Wait
+  if ($null -eq $process) { throw "UAC cancelled or elevated install did not start" }
   if ($process.ExitCode -notin @(0, 3010)) { throw "Automatic VB-CABLE install failed with code $($process.ExitCode)" }
 }
 
@@ -209,6 +207,7 @@ try {
   $result = "WARNING: $($_.Exception.Message)"
 }
 
+# 结果仅输出到 stdout，由宿主解析并写入应用日志 / 状态日志（不再写桌面、不弹系统框）
 @(
   "Xiaomi Remote Bridge audio check",
   "Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
@@ -218,7 +217,6 @@ try {
   "VB-CABLE capture: $([bool](Get-VBCableCapture))",
   "Driver install: automatic signed root-device installation",
   "Input method or speech recognition: not included"
-) | Set-Content -LiteralPath $ReportPath -Encoding UTF8
+) | ForEach-Object { Write-Output $_ }
 
-if ($Mode -eq "Repair") { try { (New-Object -ComObject WScript.Shell).Popup($result,0,$ProductName,64)|Out-Null } catch {} }
 exit 0

@@ -2,7 +2,7 @@
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
-import type { GlobalSettings } from "../types";
+import type { GlobalSettings, AppUpdateInfo } from "../types";
 import sanodiaLogo from "../assets/mwlt_sanodia_logo.png";
 
 const settings = ref<GlobalSettings>({
@@ -13,7 +13,9 @@ const settings = ref<GlobalSettings>({
 
 const saved = ref(true);
 const saving = ref(false);
-const appVersion = "v1.3.6";
+const appVersion = "v1.3.7";
+const updateChecking = ref(false);
+const updateHint = ref("");
 
 onMounted(async () => {
   try {
@@ -46,6 +48,27 @@ async function openExternal(url: string) {
   } catch (e) {
     console.warn("open url failed:", e);
     window.open(url, "_blank");
+  }
+}
+
+async function checkUpdate() {
+  updateChecking.value = true;
+  updateHint.value = "正在检查…";
+  try {
+    const result = await invoke<AppUpdateInfo>("check_app_update");
+    if (result.error) {
+      updateHint.value = `检查失败：${result.error}`;
+    } else if (result.updateAvailable) {
+      updateHint.value = `发现新版本 V${result.latestVersion}，请到「小米遥控器 2 Pro」页标题旁点击蓝色「更新」按钮。`;
+    } else if (result.ignored) {
+      updateHint.value = `已忽略 V${result.latestVersion}，当前 V${result.currentVersion}。`;
+    } else {
+      updateHint.value = `已是最新（V${result.currentVersion}）。`;
+    }
+  } catch (e) {
+    updateHint.value = `检查失败：${e}`;
+  } finally {
+    updateChecking.value = false;
   }
 }
 </script>
@@ -126,6 +149,20 @@ async function openExternal(url: string) {
           <div class="about-item">
             <span class="about-label">版本</span>
             <span class="about-value">{{ appVersion }}</span>
+          </div>
+          <div class="about-item about-update">
+            <span class="about-label">检查更新</span>
+            <div class="about-update-row">
+              <button
+                class="btn btn-secondary"
+                type="button"
+                :disabled="updateChecking"
+                @click="checkUpdate"
+              >
+                {{ updateChecking ? "检查中…" : "检查更新" }}
+              </button>
+              <span v-if="updateHint" class="about-update-hint">{{ updateHint }}</span>
+            </div>
           </div>
           <div class="about-item">
             <span class="about-label">技术栈</span>
@@ -326,6 +363,18 @@ async function openExternal(url: string) {
 .about-item { display: flex; flex-direction: column; gap: 4px; }
 .about-label { font-size: 12px; color: var(--text-secondary); }
 .about-value { font-size: 13px; font-weight: 500; }
+.about-update { grid-column: 1 / -1; }
+.about-update-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.about-update-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
 
 .credit-layout {
   display: flex;

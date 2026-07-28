@@ -42,6 +42,21 @@ export interface GlobalSettings {
   autostart: boolean;
   language: string;
   minimize_to_tray: boolean;
+  ignored_update_version?: string | null;
+}
+
+export interface AppUpdateInfo {
+  checked: boolean;
+  updateAvailable: boolean;
+  ignored: boolean;
+  currentVersion: string;
+  latestVersion: string;
+  notes: string;
+  giteePage: string;
+  githubPage: string;
+  setupUrl: string;
+  source: string;
+  error?: string | null;
 }
 
 export interface AudioDevice {

@@ -146,7 +146,7 @@ fn windows_launch_or_inject(pid: u32) -> Result<bool, String> {
         params
     ));
 
-    // SW_SHOWNORMAL：确保 UAC 提示可见（SW_HIDE 在部分系统上会吞掉提权对话框）
+    // SW_HIDE：提权后的注入进程不闪窗口。UAC 由系统 consent UI 单独弹出，不受此标志影响。
     let result = unsafe {
         ShellExecuteW(
             None,
@@ -154,7 +154,7 @@ fn windows_launch_or_inject(pid: u32) -> Result<bool, String> {
             PCWSTR(exe_h.as_ptr()),
             PCWSTR(params_h.as_ptr()),
             PCWSTR(cwd_h.as_ptr()),
-            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+            windows::Win32::UI::WindowsAndMessaging::SW_HIDE,
         )
     };
     let code = result.0 as isize;
