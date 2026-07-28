@@ -68,6 +68,8 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 ![界面图](./image/1.png "系统界面预览")
 
+![界面图2](./image/2.png "系统界面预览 2")
+
 ---
 
 
