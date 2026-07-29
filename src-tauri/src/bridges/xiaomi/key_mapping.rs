@@ -603,6 +603,7 @@ fn is_extended(vk: u16) -> bool {
         vk,
         0x21 | 0x22 | 0x23 | 0x24 | 0x25 | 0x26 | 0x27 | 0x28 | 0x2C | 0x2D | 0x2E | 0x5B
             | 0x5C | 0x5D | 0xA3 | 0xA5 | 0xAD | 0xAE | 0xAF | 0xB0 | 0xB1 | 0xB2 | 0xB3
+            | 0xB7
     )
 }
 
@@ -616,6 +617,7 @@ fn has_alt_modifier(vks: &[u16]) -> bool {
 
 pub fn tap_vks(vks: &[u16], hold_ms: u64) {
     // 音量/静音：优先走 SendInput 的 VK_VOLUME_*（系统音量最稳）
+    // 计算器等其它键：先试 WinUHid（含 consumer），再回落 SendInput
     let is_volume = vks.len() == 1 && matches!(vks[0], 0xAD | 0xAE | 0xAF);
     if !is_volume {
         if crate::bridges::xiaomi::hid_injector::tap_vks(vks, hold_ms) {

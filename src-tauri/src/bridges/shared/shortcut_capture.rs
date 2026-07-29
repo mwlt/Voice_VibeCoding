@@ -109,6 +109,8 @@ pub fn vk_to_label(vk: u32) -> String {
         0x08 => "Backspace".into(),
         0x09 => "Tab".into(),
         0x0D => "Enter".into(),
+        0x13 => "Pause".into(),
+        0x14 => "CapsLock".into(),
         0x1B => "Esc".into(),
         0x20 => "Space".into(),
         0x21 => "PageUp".into(),
@@ -119,11 +121,38 @@ pub fn vk_to_label(vk: u32) -> String {
         0x26 => "↑".into(),
         0x27 => "→".into(),
         0x28 => "↓".into(),
+        0x2C => "PrtSc".into(),
+        0x2D => "Insert".into(),
         0x2E => "Delete".into(),
-        0xAD => "Mute".into(),
-        0xAE => "Vol-".into(),
-        0xAF => "Vol+".into(),
-        0x70..=0x7B => format!("F{}", vk - 0x6F),
+        0x5D => "Menu".into(),
+        0x90 => "NumLock".into(),
+        0x91 => "ScrLk".into(),
+        0x6A => "Num*".into(),
+        0x6B => "Num+".into(),
+        0x6D => "Num-".into(),
+        0x6E => "Num.".into(),
+        0x6F => "Num/".into(),
+        0xAD => "静音".into(),
+        0xAE => "音量-".into(),
+        0xAF => "音量+".into(),
+        0xB0 => "下一曲".into(),
+        0xB1 => "上一曲".into(),
+        0xB2 => "停止".into(),
+        0xB3 => "播放/暂停".into(),
+        0xB7 => "计算器".into(),
+        0xBA => ";".into(),
+        0xBB => "=".into(),
+        0xBC => ",".into(),
+        0xBD => "-".into(),
+        0xBE => ".".into(),
+        0xBF => "/".into(),
+        0xC0 => "`".into(),
+        0xDB => "[".into(),
+        0xDC => "\\".into(),
+        0xDD => "]".into(),
+        0xDE => "'".into(),
+        0x60..=0x69 => format!("Num{}", vk - 0x60),
+        0x70..=0x87 => format!("F{}", vk - 0x6F),
         0x30..=0x39 => format!("{}", vk - 0x30),
         0x41..=0x5A => ((vk as u8) as char).to_string(),
         _ => format!("VK_0x{vk:02X}"),
@@ -292,6 +321,18 @@ impl CaptureRuntime {
     fn take_pending(&self) -> Option<ShortcutCapturedPayload> {
         self.pending.lock().unwrap().take()
     }
+
+    fn peek_progress(&self) -> Vec<String> {
+        self.progress.lock().unwrap().clone()
+    }
+}
+
+/// 轮询快照：最终结果 + 当前进度标签（进度不依赖 Tauri emit）
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutPollSnapshot {
+    pub pending: Option<ShortcutCapturedPayload>,
+    pub progress: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +388,63 @@ pub fn is_swallow_active() -> bool {
     SWALLOW_ACTIVE.load(Ordering::SeqCst)
 }
 
+/// 喂给录入引擎（仅 LL 钩子线程调用）。
+/// 禁止在 Consumer Raw Input 线程调用：与钩子争用 Mutex 会拖慢 LL 回调，
+/// Windows 会静默卸掉 WH_KEYBOARD_LL → 普通键既不吞也不录，只剩媒体键能录。
+pub fn feed_capture_key(vk: u32, is_down: bool) {
+    if CAPTURE_SUBMITTED.load(Ordering::SeqCst) {
+        return;
+    }
+    // 绝不在 LL 回调里阻塞等待：try_lock 失败就丢这一帧，也不能卡死钩子
+    let step = {
+        let mut slot = match HOOK_ENGINE.try_lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        match slot.as_mut() {
+            Some(eng) => eng.on_event(vk, is_down),
+            None => return,
+        }
+    };
+    let runtime = match HOOK_RUNTIME.try_lock() {
+        Ok(g) => g.clone(),
+        Err(_) => return,
+    };
+    if let Some(runtime) = runtime {
+        if runtime.capturing.load(Ordering::SeqCst) {
+            match step {
+                CaptureStep::Captured(keys) => {
+                    runtime.publish_result(keys);
+                }
+                CaptureStep::Progress(mods) => {
+                    if !mods.is_empty() {
+                        let labels: Vec<String> =
+                            mods.iter().copied().map(vk_to_label).collect();
+                        runtime.publish_progress(labels);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Consumer HID 专用：直接提交单键，不碰 CaptureEngine / HOOK_ENGINE。
+fn commit_consumer_vk(vk: u32) {
+    if CAPTURE_SUBMITTED.load(Ordering::SeqCst) {
+        return;
+    }
+    let runtime = match HOOK_RUNTIME.try_lock() {
+        Ok(g) => g.clone(),
+        Err(_) => return,
+    };
+    if let Some(runtime) = runtime {
+        if runtime.capturing.load(Ordering::SeqCst) {
+            log::info!("Shortcut capture consumer commit vk=0x{vk:02X}");
+            runtime.publish_result(vec![vk]);
+        }
+    }
+}
+
 /// 由常驻 `special_keys` LL 钩子最前调用。true = 已吞掉，调用方必须 `return LRESULT(1)`。
 /// 在回调内用 vk/wParam 识别和弦；**禁止** GetAsyncKeyState（吞键后状态不更新）。
 pub fn try_swallow_capture_key(vk: u32, wparam: u32, is_injected: bool) -> bool {
@@ -374,38 +472,7 @@ pub fn try_swallow_capture_key(vk: u32, wparam: u32, is_injected: bool) -> bool 
     // 注意：钩子路径无宽限期。宽限期内吞键但不喂引擎，会重演「Ctrl+Win 只录到 Ctrl」：
     // 按下先于宽限期结束的键对引擎不可见，剩余键抬起时按纯修饰键提前提交。
     // 钩子是精确边沿：录入前已按住的键只会收到 KEYUP，引擎按 was=false 忽略，天然安全。
-    if !CAPTURE_SUBMITTED.load(Ordering::SeqCst) {
-        // 先算 step 再放锁，再 publish，避免持锁 emit / 嵌套锁丢事件
-        let step = {
-            let mut slot = match HOOK_ENGINE.lock() {
-                Ok(s) => s,
-                Err(_) => return true,
-            };
-            match slot.as_mut() {
-                Some(eng) => Some(eng.on_event(vk, is_down)),
-                None => None,
-            }
-        };
-        if let Some(step) = step {
-            let runtime = HOOK_RUNTIME.lock().ok().and_then(|g| g.clone());
-            if let Some(runtime) = runtime {
-                if runtime.capturing.load(Ordering::SeqCst) {
-                    match step {
-                        CaptureStep::Captured(keys) => {
-                            runtime.publish_result(keys);
-                        }
-                        CaptureStep::Progress(mods) => {
-                            if !mods.is_empty() {
-                                let labels: Vec<String> =
-                                    mods.iter().copied().map(vk_to_label).collect();
-                                runtime.publish_progress(labels);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    feed_capture_key(vk, is_down);
 
     if !SWALLOW_HIT_LOGGED.swap(true, Ordering::SeqCst) {
         log::info!("Shortcut capture swallow vk=0x{vk:02X} wp=0x{wparam:X}");
@@ -434,6 +501,382 @@ fn wait_swallow_inactive(timeout: Duration) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Consumer HID 旁听（仅录入会话）：音量± / 静音 / 计算器
+// Raw Input INPUTSINK 不能吞键，系统仍可能响应 —— 已与产品确认可接受。
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+mod consumer_listen {
+    use super::commit_consumer_vk;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::{LazyLock, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    const USAGE_MUTE: u16 = 0x00E2;
+    const USAGE_VOL_DOWN: u16 = 0x00EA;
+    const USAGE_VOL_UP: u16 = 0x00E9;
+    const USAGE_CALCULATOR: u16 = 0x0192;
+
+    fn usage_to_vk(usage: u16) -> Option<u32> {
+        match usage {
+            USAGE_VOL_UP => Some(0xAF),
+            USAGE_VOL_DOWN => Some(0xAE),
+            USAGE_MUTE => Some(0xAD),
+            USAGE_CALCULATOR => Some(0xB7), // VK_LAUNCH_APP2
+            _ => None,
+        }
+    }
+
+    /// 从 Consumer 报表里扫出我们关心的 Usage（兼容 Report ID / 非对齐）。
+    fn extract_usages(data: &[u8]) -> Vec<u16> {
+        let mut found = Vec::new();
+        if data.len() < 2 {
+            return found;
+        }
+        for i in 0..=data.len() - 2 {
+            let u = u16::from_le_bytes([data[i], data[i + 1]]);
+            if usage_to_vk(u).is_some() && !found.contains(&u) {
+                found.push(u);
+            }
+        }
+        found
+    }
+
+    struct ListenState {
+        stop: AtomicBool,
+        thread_id: AtomicU32,
+        join: Mutex<Option<thread::JoinHandle<()>>>,
+    }
+
+    static STATE: LazyLock<ListenState> = LazyLock::new(|| ListenState {
+        stop: AtomicBool::new(true),
+        thread_id: AtomicU32::new(0),
+        join: Mutex::new(None),
+    });
+
+    pub fn start() {
+        stop();
+        STATE.stop.store(false, Ordering::SeqCst);
+        let handle = thread::spawn(run_loop);
+        *STATE.join.lock().unwrap() = Some(handle);
+        for _ in 0..50 {
+            if STATE.thread_id.load(Ordering::SeqCst) != 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        log::info!("Shortcut capture consumer listen started");
+    }
+
+    pub fn stop() {
+        STATE.stop.store(true, Ordering::SeqCst);
+        let tid = STATE.thread_id.load(Ordering::SeqCst);
+        if tid != 0 {
+            unsafe {
+                #[link(name = "user32")]
+                extern "system" {
+                    fn PostThreadMessageW(
+                        idThread: u32,
+                        Msg: u32,
+                        wParam: usize,
+                        lParam: isize,
+                    ) -> i32;
+                }
+                PostThreadMessageW(tid, 0x0012, 0, 0); // WM_QUIT
+            }
+        }
+        if let Some(h) = STATE.join.lock().unwrap().take() {
+            let _ = h.join();
+        }
+        STATE.thread_id.store(0, Ordering::SeqCst);
+    }
+
+    fn run_loop() {
+        use std::mem;
+        use std::ptr;
+
+        type HWND = *mut std::ffi::c_void;
+        type HINSTANCE = *mut std::ffi::c_void;
+        type LRESULT = isize;
+        type WPARAM = usize;
+        type LPARAM = isize;
+        type UINT = u32;
+        type DWORD = u32;
+
+        #[repr(C)]
+        struct RAWINPUTDEVICE {
+            us_usage_page: u16,
+            us_usage: u16,
+            dw_flags: DWORD,
+            hwnd_target: HWND,
+        }
+        #[repr(C)]
+        struct RAWINPUTHEADER {
+            dw_type: DWORD,
+            dw_size: DWORD,
+            h_device: *mut std::ffi::c_void,
+            w_param: usize,
+        }
+        #[repr(C)]
+        struct RAWHID {
+            dw_size_hid: DWORD,
+            dw_count: DWORD,
+        }
+        #[repr(C)]
+        struct POINT {
+            x: i32,
+            y: i32,
+        }
+        #[repr(C)]
+        struct MSG {
+            hwnd: HWND,
+            message: UINT,
+            w_param: WPARAM,
+            l_param: LPARAM,
+            time: DWORD,
+            pt: POINT,
+        }
+        #[repr(C)]
+        struct WNDCLASSEXW {
+            cb_size: UINT,
+            style: UINT,
+            lpfn_wnd_proc:
+                Option<unsafe extern "system" fn(HWND, UINT, WPARAM, LPARAM) -> LRESULT>,
+            cb_cls_extra: i32,
+            cb_wnd_extra: i32,
+            h_instance: HINSTANCE,
+            h_icon: *mut std::ffi::c_void,
+            h_cursor: *mut std::ffi::c_void,
+            hbr_background: *mut std::ffi::c_void,
+            lpsz_menu_name: *const u16,
+            lpsz_class_name: *const u16,
+            h_icon_sm: *mut std::ffi::c_void,
+        }
+
+        #[link(name = "user32")]
+        extern "system" {
+            fn RegisterClassExW(lpWndClass: *const WNDCLASSEXW) -> u16;
+            fn CreateWindowExW(
+                dwExStyle: DWORD,
+                lpClassName: *const u16,
+                lpWindowName: *const u16,
+                dwStyle: DWORD,
+                x: i32,
+                y: i32,
+                nWidth: i32,
+                nHeight: i32,
+                hWndParent: HWND,
+                hMenu: *mut std::ffi::c_void,
+                hInstance: HINSTANCE,
+                lpParam: *mut std::ffi::c_void,
+            ) -> HWND;
+            fn DestroyWindow(hWnd: HWND) -> i32;
+            fn DefWindowProcW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) -> LRESULT;
+            fn RegisterRawInputDevices(
+                pRawInputDevices: *const RAWINPUTDEVICE,
+                uiNumDevices: UINT,
+                cbSize: UINT,
+            ) -> i32;
+            fn GetRawInputData(
+                hRawInput: *mut std::ffi::c_void,
+                uiCommand: UINT,
+                pData: *mut std::ffi::c_void,
+                pcbSize: *mut UINT,
+                cbSizeHeader: UINT,
+            ) -> UINT;
+            fn GetMessageW(
+                lpMsg: *mut MSG,
+                hWnd: HWND,
+                wMsgFilterMin: UINT,
+                wMsgFilterMax: UINT,
+            ) -> i32;
+            fn TranslateMessage(lpMsg: *const MSG) -> i32;
+            fn DispatchMessageW(lpMsg: *const MSG) -> LRESULT;
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetModuleHandleW(lpModuleName: *const u16) -> HINSTANCE;
+            fn GetCurrentThreadId() -> u32;
+        }
+
+        const WM_INPUT: u32 = 0x00FF;
+        const RIDEV_INPUTSINK: DWORD = 0x100;
+        const RID_INPUT: DWORD = 0x10000003;
+        const RIM_TYPEHID: DWORD = 2;
+        const HWND_MESSAGE: isize = -3;
+
+        STATE
+            .thread_id
+            .store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
+
+        let class_name: Vec<u16> = "ShortcutConsumerCapture\0".encode_utf16().collect();
+        let window_name: Vec<u16> = "ShortcutConsumerCapture\0".encode_utf16().collect();
+        let hinstance = unsafe { GetModuleHandleW(ptr::null()) };
+
+        let mut wc: WNDCLASSEXW = unsafe { mem::zeroed() };
+        wc.cb_size = mem::size_of::<WNDCLASSEXW>() as u32;
+        wc.lpfn_wnd_proc = Some(wndproc);
+        wc.h_instance = hinstance;
+        wc.lpsz_class_name = class_name.as_ptr();
+        unsafe { RegisterClassExW(&wc) };
+
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                window_name.as_ptr(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE as HWND,
+                ptr::null_mut(),
+                hinstance,
+                ptr::null_mut(),
+            )
+        };
+        if hwnd.is_null() {
+            log::warn!("Shortcut consumer capture: CreateWindowExW failed");
+            STATE.thread_id.store(0, Ordering::SeqCst);
+            return;
+        }
+
+        let devices = [RAWINPUTDEVICE {
+            us_usage_page: 0x0C,
+            us_usage: 0x01,
+            dw_flags: RIDEV_INPUTSINK,
+            hwnd_target: hwnd,
+        }];
+        let ok = unsafe {
+            RegisterRawInputDevices(
+                devices.as_ptr(),
+                1,
+                mem::size_of::<RAWINPUTDEVICE>() as UINT,
+            )
+        };
+        if ok == 0 {
+            log::warn!("Shortcut consumer capture: RegisterRawInputDevices failed");
+            unsafe { DestroyWindow(hwnd) };
+            STATE.thread_id.store(0, Ordering::SeqCst);
+            return;
+        }
+
+        let mut msg: MSG = unsafe { mem::zeroed() };
+        while !STATE.stop.load(Ordering::SeqCst) {
+            let ret = unsafe { GetMessageW(&mut msg, ptr::null_mut(), 0, 0) };
+            if ret <= 0 {
+                break;
+            }
+            unsafe {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        unsafe { DestroyWindow(hwnd) };
+        STATE.thread_id.store(0, Ordering::SeqCst);
+        log::info!("Shortcut capture consumer listen stopped");
+
+        unsafe extern "system" fn wndproc(
+            hwnd: HWND,
+            msg: UINT,
+            w_param: WPARAM,
+            l_param: LPARAM,
+        ) -> LRESULT {
+            if msg == WM_INPUT {
+                let header_size = mem::size_of::<RAWINPUTHEADER>() as UINT;
+                let mut size: UINT = 0;
+                if GetRawInputData(
+                    l_param as *mut _,
+                    RID_INPUT,
+                    ptr::null_mut(),
+                    &mut size,
+                    header_size,
+                ) != 0
+                    || size == 0
+                {
+                    return 0;
+                }
+                let mut buf = vec![0u8; size as usize];
+                let written = GetRawInputData(
+                    l_param as *mut _,
+                    RID_INPUT,
+                    buf.as_mut_ptr() as *mut _,
+                    &mut size,
+                    header_size,
+                );
+                if written != size {
+                    return 0;
+                }
+                let header = &*(buf.as_ptr() as *const RAWINPUTHEADER);
+                if header.dw_type != RIM_TYPEHID {
+                    return 0;
+                }
+                let hid_offset = header_size as usize;
+                if buf.len() < hid_offset + mem::size_of::<RAWHID>() {
+                    return 0;
+                }
+                let hid = &*(buf.as_ptr().add(hid_offset) as *const RAWHID);
+                let data_offset = hid_offset + mem::size_of::<RAWHID>();
+                let data_len = (hid.dw_size_hid as usize).saturating_mul(hid.dw_count as usize);
+                if buf.len() < data_offset + data_len || data_len == 0 {
+                    return 0;
+                }
+                let data = &buf[data_offset..data_offset + data_len];
+                if data.iter().all(|&b| b == 0) {
+                    return 0;
+                }
+                let usages = extract_usages(data);
+                if usages.is_empty() {
+                    // 计算器等键报表格式各异：留下 hex 便于对照
+                    log::debug!(
+                        "Shortcut capture consumer raw hid (unmapped): {}",
+                        data.iter()
+                            .map(|b| format!("{b:02X}"))
+                            .collect::<Vec<_>>()
+                            .join("-")
+                    );
+                }
+                for usage in usages {
+                    if let Some(vk) = usage_to_vk(usage) {
+                        commit_consumer_vk(vk);
+                    }
+                }
+                return 0;
+            }
+            DefWindowProcW(hwnd, msg, w_param, l_param)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn maps_volume_and_calculator_usages() {
+            assert_eq!(usage_to_vk(0xE9), Some(0xAF));
+            assert_eq!(usage_to_vk(0xEA), Some(0xAE));
+            assert_eq!(usage_to_vk(0xE2), Some(0xAD));
+            assert_eq!(usage_to_vk(0x192), Some(0xB7));
+        }
+
+        #[test]
+        fn extracts_usage_with_optional_report_id() {
+            assert_eq!(extract_usages(&[0xE9, 0x00]), vec![0xE9]);
+            assert_eq!(extract_usages(&[0x01, 0xE2, 0x00]), vec![0xE2]);
+            assert_eq!(extract_usages(&[0x92, 0x01]), vec![0x192]);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod consumer_listen {
+    pub fn start() {}
+    pub fn stop() {}
+}
+
 pub struct ShortcutCaptureSession {
     runtime: Arc<CaptureRuntime>,
 }
@@ -448,6 +891,7 @@ impl ShortcutCaptureSession {
     pub fn cancel(&self) -> Result<(), String> {
         self.runtime.stop.store(true, Ordering::SeqCst);
         self.runtime.capturing.store(false, Ordering::SeqCst);
+        consumer_listen::stop();
 
         if SWALLOW_ACTIVE.load(Ordering::SeqCst) {
             wait_swallow_inactive(Duration::from_millis(2500));
@@ -490,12 +934,21 @@ impl ShortcutCaptureSession {
 
         SWALLOW_HIT_LOGGED.store(false, Ordering::SeqCst);
         set_swallow_active(true);
-        log::info!("Shortcut capture started (special_keys detect+swallow)");
+        consumer_listen::start();
+        log::info!("Shortcut capture started (special_keys + consumer HID)");
         Ok(())
     }
 
     pub fn take_result(&self) -> Option<ShortcutCapturedPayload> {
         self.runtime.take_pending()
+    }
+
+    /// 取出最终结果（若有）并同时返回当前进度标签，供前端在 emit 丢失时刷新 live UI。
+    pub fn poll_snapshot(&self) -> ShortcutPollSnapshot {
+        ShortcutPollSnapshot {
+            pending: self.runtime.take_pending(),
+            progress: self.runtime.peek_progress(),
+        }
     }
 
     pub fn is_active(&self) -> bool {
@@ -535,6 +988,13 @@ mod tests {
         );
         assert_eq!(vk_to_label(VK_LCONTROL), "左 Ctrl");
         assert_eq!(vk_to_label(VK_LWIN), "左 Win");
+        assert_eq!(vk_to_label(0x60), "Num0");
+        assert_eq!(vk_to_label(0x6B), "Num+");
+        assert_eq!(vk_to_label(0x2C), "PrtSc");
+        assert_eq!(vk_to_label(0x91), "ScrLk");
+        assert_eq!(vk_to_label(0x13), "Pause");
+        assert_eq!(vk_to_label(0xAF), "音量+");
+        assert_eq!(vk_to_label(0xB7), "计算器");
     }
 
     #[test]
@@ -672,6 +1132,26 @@ mod tests {
     }
 
     #[test]
+    fn consumer_listen_must_not_call_feed_capture_key() {
+        // 回归：Consumer 线程若与 LL 钩子争用 HOOK_ENGINE，会拖死 WH_KEYBOARD_LL，
+        // 表现为「媒体键能录、其它键不吞不录、一直停在录入中」。
+        let src = include_str!("shortcut_capture.rs");
+        let consumer_mod = src
+            .split("mod consumer_listen {")
+            .nth(1)
+            .and_then(|s| s.split("\nmod ").next())
+            .unwrap_or("");
+        assert!(
+            !consumer_mod.contains("feed_capture_key"),
+            "consumer_listen must not call feed_capture_key (use commit_consumer_vk)"
+        );
+        assert!(
+            consumer_mod.contains("commit_consumer_vk"),
+            "consumer_listen must commit via commit_consumer_vk"
+        );
+    }
+
+    #[test]
     fn try_swallow_blocks_syskeydown_when_active() {
         set_swallow_active(false);
         assert!(!try_swallow_capture_key(0x20, 0x0104, false));
@@ -680,5 +1160,24 @@ mod tests {
         assert!(try_swallow_capture_key(0x20, 0x0104, false));
         assert!(!try_swallow_capture_key(0x53, 0x0104, true));
         set_swallow_active(false);
+    }
+
+    #[test]
+    fn poll_snapshot_exposes_progress_without_app_emit() {
+        // 进度写入 mutex 后，即使没有 AppHandle / emit，poll 也应能读到 ——
+        // 这是「没反应但已录入」机器上的 UI 兜底路径。
+        let session = ShortcutCaptureSession::new();
+        session
+            .runtime
+            .publish_progress(vec!["左 Ctrl".into(), "左 Win".into()]);
+        let snap = session.poll_snapshot();
+        assert!(snap.pending.is_none());
+        assert_eq!(snap.progress, vec!["左 Ctrl".to_string(), "左 Win".to_string()]);
+
+        session.runtime.publish_result(vec![VK_LCONTROL, VK_LWIN]);
+        let snap2 = session.poll_snapshot();
+        assert!(snap2.pending.is_some());
+        let pending = snap2.pending.unwrap();
+        assert_eq!(pending.keys, vec![VK_LCONTROL, VK_LWIN]);
     }
 }

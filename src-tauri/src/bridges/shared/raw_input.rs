@@ -142,7 +142,7 @@ mod win32 {
         pub fn DestroyWindow(hWnd: HWND) -> i32;
         pub fn DefWindowProcW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) -> LRESULT;
         pub fn RegisterRawInputDevices(
-            pRawInputDevices: *const RAWINPUTDEVICE, uiNumDevices: UINT,
+            pRawInputDevices: *const RAWINPUTDEVICE, uiNumDevices: UINT, cbSize: UINT,
         ) -> i32;
         pub fn GetRawInputData(
             hRawInput: HRAWINPUT, uiCommand: UINT, pData: LPVOID,
@@ -284,7 +284,14 @@ fn raw_input_thread_impl(running: Arc<AtomicBool>, callback: EventCallback) {
         },
     ];
 
-    if unsafe { RegisterRawInputDevices(devices.as_ptr(), devices.len() as u32) } == 0 {
+    if unsafe {
+        RegisterRawInputDevices(
+            devices.as_ptr(),
+            devices.len() as u32,
+            mem::size_of::<RAWINPUTDEVICE>() as u32,
+        )
+    } == 0
+    {
         log::error!("RegisterRawInputDevices failed");
         unsafe { DestroyWindow(hwnd); }
         return;

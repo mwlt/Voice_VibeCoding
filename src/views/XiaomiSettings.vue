@@ -9,6 +9,7 @@ import KeyMappingStage from "../components/KeyMappingStage.vue";
 import type { DeviceConfig, KeyAction, AppUpdateInfo } from "../types";
 import wechatImeHotkeysImg from "../assets/guides/wechat-ime-hotkeys.png";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
+import { vkDisplayName } from "../utils/vkDisplay";
 
 const bridge = useBridgeStore();
 const configStore = useConfigStore();
@@ -595,39 +596,6 @@ function bindingAliases(buttonId: string): string[] {
     default:
       return [buttonId];
   }
-}
-
-function vkDisplayName(vk: number): string {
-  const map: Record<number, string> = {
-    0x08: "Backspace",
-    0x09: "Tab",
-    0x0d: "Enter",
-    0x1b: "Esc",
-    0x20: "Space",
-    0x25: "←",
-    0x26: "↑",
-    0x27: "→",
-    0x28: "↓",
-    0x10: "左 Shift",
-    0xa0: "左 Shift",
-    0xa1: "右 Shift",
-    0x11: "左 Ctrl",
-    0xa2: "左 Ctrl",
-    0xa3: "右 Ctrl",
-    0x12: "左 Alt",
-    0xa4: "左 Alt",
-    0xa5: "右 Alt",
-    0x5b: "左 Win",
-    0x5c: "右 Win",
-    0xaf: "Vol+",
-    0xae: "Vol-",
-    0xad: "Mute",
-  };
-  if (map[vk]) return map[vk];
-  if (vk >= 0x41 && vk <= 0x5a) return String.fromCharCode(vk);
-  if (vk >= 0x30 && vk <= 0x39) return String(vk - 0x30);
-  if (vk >= 0x70 && vk <= 0x7b) return `F${vk - 0x6f}`;
-  return `VK_0x${vk.toString(16).toUpperCase()}`;
 }
 
 function resolveMappedActionLabel(buttonId: string): string {

@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { DeviceConfig, BridgeType, KeyAction } from "../types";
+import { MEDIA_PICK_KEYS, vkDisplayName } from "../utils/vkDisplay";
 
 const props = defineProps<{
   bridgeType: BridgeType;
@@ -121,9 +122,14 @@ function startPolling() {
   pollTimer = setInterval(async () => {
     if (!capturing.value || applied) return;
     try {
-      const result = await invoke<{ keys: number[]; labels: string[] } | null>(
-        "capture_shortcut_poll"
-      );
+      const snap = await invoke<{
+        pending: { keys: number[]; labels: string[] } | null;
+        progress: string[];
+      }>("capture_shortcut_poll");
+      if (Array.isArray(snap?.progress) && snap.progress.length > 0) {
+        liveLabels.value = snap.progress;
+      }
+      const result = snap?.pending;
       if (result && Array.isArray(result.keys) && result.keys.length > 0) {
         onCaptured(result.keys, result.labels || []);
       }
@@ -142,7 +148,7 @@ async function onCaptured(keys: number[], labels: string[]) {
   const buttonId = editingKey.value;
   if (buttonId && keys?.length) {
     applyCapturedKeys(buttonId, keys);
-    captureStatus.value = `已录入 ${labels.join(" + ") || keys.map(vkName).join(" + ")}，已保存`;
+    captureStatus.value = `已录入 ${labels.join(" + ") || keys.map(vkDisplayName).join(" + ")}，已保存`;
   } else {
     captureStatus.value = "录入结束";
   }
@@ -261,53 +267,19 @@ function vksToHotkeyNames(vks: number[]): string[] {
 
 function actionLabel(action: KeyAction): string {
   if (!action || action.type === "None") return "未绑定";
-  if (action.type === "SingleKey") return vkName(Number(action.value));
+  if (action.type === "SingleKey") return vkDisplayName(Number(action.value));
   if (action.type === "ComboKey") {
     const arr = Array.isArray(action.value) ? action.value : [];
-    return arr.map((v) => vkName(Number(v))).join(" + ");
+    return arr.map((v) => vkDisplayName(Number(v))).join(" + ");
   }
   if (action.type === "TextInput") return `文字: ${action.value}`;
   if (action.type === "LaunchApp") return `启动: ${action.value}`;
   return "—";
 }
 
-function vkName(vk: number): string {
-  const map: Record<number, string> = {
-    0x08: "Backspace",
-    0x09: "Tab",
-    0x0d: "Enter",
-    0x1b: "Esc",
-    0x20: "Space",
-    0x21: "PageUp",
-    0x22: "PageDown",
-    0x23: "End",
-    0x24: "Home",
-    0x25: "←",
-    0x26: "↑",
-    0x27: "→",
-    0x28: "↓",
-    0x2d: "Insert",
-    0x2e: "Delete",
-    0x10: "左 Shift",
-    0xa0: "左 Shift",
-    0xa1: "右 Shift",
-    0x11: "左 Ctrl",
-    0xa2: "左 Ctrl",
-    0xa3: "右 Ctrl",
-    0x12: "左 Alt",
-    0xa4: "左 Alt",
-    0xa5: "右 Alt",
-    0x5b: "左 Win",
-    0x5c: "右 Win",
-    0xaf: "Vol+",
-    0xae: "Vol-",
-    0xad: "Mute",
-  };
-  if (map[vk]) return map[vk];
-  if (vk >= 0x41 && vk <= 0x5a) return String.fromCharCode(vk);
-  if (vk >= 0x30 && vk <= 0x39) return String(vk - 0x30);
-  if (vk >= 0x70 && vk <= 0x7b) return `F${vk - 0x6f}`;
-  return `VK_0x${vk.toString(16).toUpperCase()}`;
+function pickMediaKey(vk: number) {
+  if (!capturing.value) return;
+  onCaptured([vk], [vkDisplayName(vk)]);
 }
 </script>
 
@@ -359,14 +331,31 @@ function vkName(vk: number): string {
     <div v-if="capturing" class="capture-overlay">
       <div class="capture-box">
         <p class="capture-title">正在录入</p>
-        <p class="capture-live">
+        <p
+          class="capture-live"
+          :class="{ 'capture-hint-blink': !liveLabels.length }"
+        >
           {{
             liveLabels.length
               ? liveLabels.join(" + ") + " …"
               : "请按目标键或组合键"
           }}
         </p>
-        <p class="capture-note">松开后自动完成并保存</p>
+        <p class="capture-note">
+          松开后自动完成并保存。媒体键若录不上，可点下方按钮。
+        </p>
+        <div class="media-pick">
+          <span class="media-pick-label">设置为：</span>
+          <button
+            v-for="k in MEDIA_PICK_KEYS"
+            :key="k.vk"
+            type="button"
+            class="btn-sm btn-media"
+            @click="pickMediaKey(k.vk)"
+          >
+            {{ k.label }}
+          </button>
+        </div>
         <button class="btn btn-primary" @click="cancelCapture">取消录入</button>
       </div>
     </div>
@@ -517,9 +506,50 @@ function vkName(vk: number): string {
   margin-bottom: 8px;
 }
 
+.capture-live.capture-hint-blink {
+  text-align: center;
+  color: #ea580c;
+  font-weight: 600;
+  animation: capture-hint-blink 1s ease-in-out infinite;
+}
+
+@keyframes capture-hint-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
 .capture-note {
   font-size: 12px;
   color: var(--text-secondary);
-  margin-bottom: 20px;
+  margin-bottom: 12px;
+}
+
+.media-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.media-pick-label {
+  font-size: 13px;
+  color: #64748b;
+  flex-shrink: 0;
+}
+
+.btn-media {
+  color: #0f766e;
+  border-color: #99f6e4;
+  background: #f0fdfa;
+}
+.btn-media:hover:not(:disabled) {
+  background: #ccfbf1;
 }
 </style>

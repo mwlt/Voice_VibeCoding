@@ -282,12 +282,13 @@ pub async fn capture_shortcut_stop(
     Ok(vec![])
 }
 
-/// 轮询取出录制结果（事件可能丢失时的兜底；取出后清空）
+/// 轮询录制快照：最终结果（若有）+ 当前进度标签。
+/// 进度走 IPC 兜底，避免仅依赖 `shortcut-capture-progress` emit（部分机器上会丢/延迟）。
 #[tauri::command]
 pub async fn capture_shortcut_poll(
     session: State<'_, crate::bridges::shared::shortcut_capture::ShortcutCaptureSession>,
-) -> Result<Option<crate::bridges::shared::shortcut_capture::ShortcutCapturedPayload>, String> {
-    Ok(session.take_result())
+) -> Result<crate::bridges::shared::shortcut_capture::ShortcutPollSnapshot, String> {
+    Ok(session.poll_snapshot())
 }
 
 /// 获取音频设备列表

@@ -13,7 +13,7 @@ const settings = ref<GlobalSettings>({
 
 const saved = ref(true);
 const saving = ref(false);
-const appVersion = "v1.3.8";
+const appVersion = "v1.3.9";
 const updateChecking = ref(false);
 const updateHint = ref("");
 

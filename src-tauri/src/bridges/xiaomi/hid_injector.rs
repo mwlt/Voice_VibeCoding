@@ -117,6 +117,7 @@ fn consumer_usage(vk: u16) -> Option<u16> {
         0xB1 => Some(0x00B5),
         0xB2 => Some(0x00B7),
         0xB3 => Some(0x00CD),
+        0xB7 => Some(0x0192), // VK_LAUNCH_APP2 → AL Calculator
         _ => None,
     }
 }
@@ -450,5 +451,6 @@ mod tests {
     #[test]
     fn consumer_volume() {
         assert_eq!(consumer_usage(0xAF), Some(0xE9));
+        assert_eq!(consumer_usage(0xB7), Some(0x0192));
     }
 }

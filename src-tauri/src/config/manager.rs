@@ -51,8 +51,7 @@ pub enum TriggerMode {
 
 impl Default for TriggerMode {
     fn default() -> Self {
-        // 对齐 Python DEFAULT：voice_trigger_mode=toggle
-        TriggerMode::Toggle
+        TriggerMode::Hold
     }
 }
 
@@ -109,7 +108,7 @@ impl DeviceConfig {
             button_aliases: HashMap::new(),
             button_bindings: HashMap::new(),
             voice_hotkey: Some(vec!["rightalt".into()]),
-            trigger_mode: TriggerMode::Toggle,
+            trigger_mode: TriggerMode::Hold,
             bluetooth_address: None,
             gain_db: default_gain_db(),
             retry_delay: default_retry_delay(),
@@ -303,7 +302,7 @@ impl ConfigManager {
                 button_aliases: Self::xiaomi_button_aliases(),
                 button_bindings: Self::xiaomi_default_bindings(),
                 voice_hotkey: Some(vec!["rightalt".into()]),
-                trigger_mode: TriggerMode::Toggle,
+                trigger_mode: TriggerMode::Hold,
                 bluetooth_address: None,
                 gain_db: 10.0,
                 retry_delay: 3.0,
@@ -316,7 +315,7 @@ impl ConfigManager {
                 button_aliases: Self::t1_button_aliases(),
                 button_bindings: Self::t1_default_bindings(),
                 voice_hotkey: Some(vec!["rightalt".into()]),
-                trigger_mode: TriggerMode::Toggle,
+                trigger_mode: TriggerMode::Hold,
                 bluetooth_address: None,
                 ..DeviceConfig::new()
             },
@@ -324,7 +323,7 @@ impl ConfigManager {
                 button_aliases: Self::hanvon_button_aliases(),
                 button_bindings: Self::hanvon_default_bindings(),
                 voice_hotkey: Some(vec!["rightalt".into()]),
-                trigger_mode: TriggerMode::Toggle,
+                trigger_mode: TriggerMode::Hold,
                 bluetooth_address: None,
                 ..DeviceConfig::new()
             },

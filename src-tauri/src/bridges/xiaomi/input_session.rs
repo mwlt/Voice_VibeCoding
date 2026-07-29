@@ -955,7 +955,7 @@ fn voice_trigger_is_toggle(app: &AppHandle) -> bool {
     app.try_state::<ConfigManager>()
         .and_then(|m| m.get_device_config("xiaomi").ok())
         .map(|c| matches!(c.trigger_mode, TriggerMode::Toggle))
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "windows")]

@@ -25,7 +25,7 @@ const deviceItems = [
   { path: "/v60", label: "V60 [开发中]", type: "hanvon" as const },
 ];
 
-const appVersion = "v1.3.8";
+const appVersion = "v1.3.9";
 
 function navigate(path: string) {
   router.push(path);

@@ -24,7 +24,7 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 
 
-**v1.3.8** · Windows 桌面应用
+**v1.3.9** · Windows 桌面应用
 
 把小米遥控器 2 Pro（及预留的 T1 / 汉王 V60）接到电脑：按键可映射成键盘快捷键，语音可送到输入法听写。
 
@@ -47,7 +47,7 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 | 一键修复 ATVV | 「修复 ATVV 连接」：有占用先清进程，再停 HID Tap、软重启并等待语音通道恢复；文案区分有无占用 | 新增 |
 | ATVV 状态红字提示 | 桥接已运行但语音通道未订阅时，在「音频信号」旁显示「ATVV 未连接」 | 新增 |
 | ATVV 失败系统通知 | 语音通道未就绪时按语音键，右下角通知引导去点「修复 ATVV 连接」（限流，避免刷屏） | 新增 |
-| 轻量更新检查 | 启动静默检查 `update/latest.json`（先 Gitee raw，失败再 GitHub）；有新版在标题旁显示蓝色「更新（Vx.x.x）」，弹窗可直链下载或打开两侧发行页，可忽略此版本 | 新增 |
+| 按键录入扩展 | 对齐常见 108 键显示名；录入会话旁听 Consumer 媒体键（音量±/静音）；常驻「设置为：」按钮兜底计算器等；默认语音触发为「按住」 | 增强 |
 | F5 抑制策略 | ATVV 正常时只吞与语音键关联的 F5，物理键盘 F5 可用；失败时放行并提示，避免「连着遥控就不能按 F5」 | 优化 |
 | ATVV / HID Tap 时序 | 订阅语音通道前暂停 HID Tap，降低 AccessDenied；订阅成功后再启 Tap | 优化 |
 | 虚拟声卡修复体验 | 「虚拟声卡检测与修复」隐藏 PowerShell 黑框与系统 OK 弹窗；结果进状态日志；仅需重启 Windows 时弹醒目提示 | 优化 |
@@ -76,15 +76,15 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 ## 下载安装包
 
-正式安装包在两边的 Release 页（当前 **v1.3.8**）：
+正式安装包在两边的 Release 页（当前 **v1.3.9**）：
 
-- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.3.8)（国内优先）
-- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.3.8)
+- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.3.9)（国内优先）
+- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.3.9)
 
 常用文件：
 
-- `Voice VibeCoding_1.3.8_x64-setup.exe`（NSIS）
-- `Voice VibeCoding_1.3.8_x64_zh-CN.msi`
+- `Voice VibeCoding_1.3.9_x64-setup.exe`（NSIS）
+- `Voice VibeCoding_1.3.9_x64_zh-CN.msi`
 
 安装时若提示无法覆盖 `remote-bridge-hub.exe`，请先退出本软件（含托盘）再重试。
 
@@ -180,8 +180,8 @@ npm run tauri:build
 | 类型       | 路径                                                                          |
 | -------- | --------------------------------------------------------------------------- |
 | 可执行文件    | `src-tauri/target/release/remote-bridge-hub.exe`                            |
-| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.3.8_x64_zh-CN.msi`  |
-| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.3.8_x64-setup.exe` |
+| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.3.9_x64_zh-CN.msi`  |
+| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.3.9_x64-setup.exe` |
 
 
 发新版时请同步更新仓库根目录 `update/latest.json`（提高 `version`，填写 Gitee/GitHub 页面与安装包直链）。应用会优先读 Gitee raw，失败再读 GitHub raw；有更新时在「小米遥控器 2 Pro」标题旁显示蓝色「更新」入口。
