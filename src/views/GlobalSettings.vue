@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import type { GlobalSettings, AppUpdateInfo } from "../types";
 import sanodiaLogo from "../assets/mwlt_sanodia_logo.png";
@@ -13,11 +14,16 @@ const settings = ref<GlobalSettings>({
 
 const saved = ref(true);
 const saving = ref(false);
-const appVersion = "v1.3.10";
+const appVersion = ref("…");
 const updateChecking = ref(false);
 const updateHint = ref("");
 
 onMounted(async () => {
+  try {
+    appVersion.value = `v${await getVersion()}`;
+  } catch {
+    appVersion.value = "v1.3.12";
+  }
   try {
     const s = await invoke<GlobalSettings>("get_global_settings");
     settings.value = s;

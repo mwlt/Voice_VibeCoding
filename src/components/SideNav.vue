@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { useBridgeStore } from "../stores/bridge";
 import type { BridgeStatus } from "../types";
 
@@ -25,7 +26,15 @@ const deviceItems = [
   { path: "/v60", label: "V60 [开发中]", type: "hanvon" as const },
 ];
 
-const appVersion = "v1.3.10";
+const appVersion = ref("…");
+
+onMounted(async () => {
+  try {
+    appVersion.value = `v${await getVersion()}`;
+  } catch {
+    appVersion.value = "v1.3.12";
+  }
+});
 
 function navigate(path: string) {
   router.push(path);
