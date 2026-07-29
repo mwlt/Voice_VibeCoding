@@ -1,8 +1,8 @@
 {
-  "version": "1.3.10",
-  "notes": "v1.3.10：语音路由默认 hold_device（握设备、会话才播放）；虚拟声卡状态改注册表探测并已就绪停探，缓解 audiodg 句柄上涨；修复 configure 脚本 UTF-8 编码导致的检测失败。",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.3.10",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.3.10",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.3.10/Voice%20VibeCoding_1.3.10_x64-setup.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.3.10/Voice.VibeCoding_1.3.10_x64-setup.exe"
+  "version": "1.3.12",
+  "notes": "v1.3.12：小米遥控器示意按实物重绘（丝印图标、键面层次与选中态）；布局对齐电源/语音/方向盘/音量条。",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.3.12",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.3.12",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.3.12/Voice%20VibeCoding_1.3.12_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.3.12/Voice.VibeCoding_1.3.12_x64-setup.exe"
 }
