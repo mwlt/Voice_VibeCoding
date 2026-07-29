@@ -1,4 +1,7 @@
 //! 对齐 Python `UdpPcmOutput`：16k→48k 后 UDP 送到独立 audio_router 进程
+//!
+//! - `clear()` → `CLEAR`：语音键按下，router 开 CABLE 输出流
+//! - `end_session()` / `stop()` → `END`：会话结束，router debounce 后关流
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -166,7 +169,8 @@ pub fn push_16k(samples: &[i16]) {
 pub fn stop() {
     READY.store(false, Ordering::Release);
     if let Some(c) = CLIENT.lock().take() {
-        let _ = c.sock.send_to(b"CLEAR", c.peer);
+        // END：让 router 关流，勿用 CLEAR（CLEAR = 会话开始开流）
+        let _ = c.sock.send_to(b"END", c.peer);
     }
     crate::bridges::xiaomi::voice_meter::set_session(false);
 }

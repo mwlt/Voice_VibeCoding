@@ -24,7 +24,7 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 
 
-**v1.3.9** · Windows 桌面应用
+**v1.3.10** · Windows 桌面应用
 
 把小米遥控器 2 Pro（及预留的 T1 / 汉王 V60）接到电脑：按键可映射成键盘快捷键，语音可送到输入法听写。
 
@@ -50,7 +50,9 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 | 按键录入扩展 | 对齐常见 108 键显示名；录入会话旁听 Consumer 媒体键（音量±/静音）；常驻「设置为：」按钮兜底计算器等；默认语音触发为「按住」 | 增强 |
 | F5 抑制策略 | ATVV 正常时只吞与语音键关联的 F5，物理键盘 F5 可用；失败时放行并提示，避免「连着遥控就不能按 F5」 | 优化 |
 | ATVV / HID Tap 时序 | 订阅语音通道前暂停 HID Tap，降低 AccessDenied；订阅成功后再启 Tap | 优化 |
-| 虚拟声卡修复体验 | 「虚拟声卡检测与修复」隐藏 PowerShell 黑框与系统 OK 弹窗；结果进状态日志；仅需重启 Windows 时弹醒目提示 | 优化 |
+| 语音路由占用策略 | 默认 `hold_device`：启动握 CABLE 设备，仅说话时 play；空闲不常驻写静音（见下文「VB-CABLE 占用方式」） | 优化 |
+| 虚拟声卡状态探测 | 优先读系统 MMDevices 注册表判断 CABLE 是否就绪；已就绪后停探，避免设置页轮询经 WASAPI 枚举导致 `audiodg` 句柄异常上涨 | 优化 |
+| 虚拟声卡修复体验 | 「虚拟声卡检测与修复」隐藏 PowerShell 黑框与系统 OK 弹窗；结果进状态日志；脚本 UTF-8 BOM，避免中文系统解析失败；仅需重启 Windows 时弹醒目提示 | 优化 |
 | HID 注入闪窗 | 提权注入 WUDFHost 时隐藏控制台闪窗（UAC 仍保留） | 优化 |
 | 音频信号波形 | 设置页实时显示 BLE 解码电平 / 波形，便于判断语音是否真正进机 | 增强 |
 | 虚拟声卡检测与安装 | 应用内检测 VB-CABLE，支持内嵌驱动或官网安装指引，结果写回主机状态 | 增强 |
@@ -76,15 +78,15 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 ## 下载安装包
 
-正式安装包在两边的 Release 页（当前 **v1.3.9**）：
+正式安装包在两边的 Release 页（当前 **v1.3.10**）：
 
-- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.3.9)（国内优先）
-- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.3.9)
+- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.3.10)（国内优先）
+- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.3.10)
 
 常用文件：
 
-- `Voice VibeCoding_1.3.9_x64-setup.exe`（NSIS）
-- `Voice VibeCoding_1.3.9_x64_zh-CN.msi`
+- `Voice VibeCoding_1.3.10_x64-setup.exe`（NSIS）
+- `Voice VibeCoding_1.3.10_x64_zh-CN.msi`
 
 安装时若提示无法覆盖 `remote-bridge-hub.exe`，请先退出本软件（含托盘）再重试。
 
@@ -124,6 +126,37 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 4. 输入法把「麦克风」选成 `CABLE Output` 即可听写
 
 若 ATVV 未连上：波形可能不动，语音键还可能变成系统 F5；此时用「修复 ATVV 连接」。
+
+---
+
+
+
+## VB-CABLE 占用方式（语音路由生命周期）
+
+语音路由子进程把 PCM 写到 **CABLE Input**。占用虚拟声卡的时机不同，会影响首按延迟，以及个别机器上系统音频隔离进程 `audiodg.exe` 是否异常涨句柄。本机对照测试了三种策略（空闲涨速均≈0 后按体验选型）：
+
+| 方式 | 环境变量值 | 行为（人话） | 空闲占用 | 首按 |
+| --- | --- | --- | --- | --- |
+| ① 一直播放 | `always_play` | 启动就建流并一直 play（没说话时灌静音） | 最高 | 最快 |
+| ② 握设备（**默认**） | `hold_device` | 启动先握住 CABLE 设备；**说话才 play**；说完停播但设备仍握着 | 中 | 接近① |
+| ③ 全推迟 | `deferred` | 空闲只听 UDP；按下说话才开设备+流；说完全部释放 | 最低 | 略冷启动 |
+
+**为何默认用 ② `hold_device`：**
+
+- 三档在「设置页不再狂扫声卡」之后，空闲句柄涨速都能压住；差别主要在体验与占用。
+- 比 ①：空闲不常驻「播放静音」，少占活跃音频通路。
+- 比 ③：设备已握好，按语音键只需开始播放，首字更跟手。
+- 按键映射 / HID 与此无关；设置页波形、「输送中」仍看是否真有 PCM，不依赖占用策略。
+
+开发排障可覆盖默认：
+
+```powershell
+$env:REMOTE_BRIDGE_AUDIO_LIFECYCLE = "hold_device"   # always_play | hold_device | deferred
+```
+
+更细的对照步骤见 `scripts/ab_audio_lifecycle.md`。
+
+**虚拟声卡「已安装」状态灯：** 优先读注册表 MMDevices（与安装脚本一致）；已就绪后停止自动重探；未就绪约每 60s 可再试一次；点「虚拟声卡检测与修复」强制重探。勿与波形闪烁混淆——闪烁表示正在送语音，不是探测间隔。
 
 ---
 
@@ -177,11 +210,11 @@ npm run tauri:build
 常见产物：
 
 
-| 类型       | 路径                                                                          |
-| -------- | --------------------------------------------------------------------------- |
-| 可执行文件    | `src-tauri/target/release/remote-bridge-hub.exe`                            |
-| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.3.9_x64_zh-CN.msi`  |
-| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.3.9_x64-setup.exe` |
+| 类型       | 路径                                                                            |
+| -------- | ----------------------------------------------------------------------------- |
+| 可执行文件    | `src-tauri/target/release/remote-bridge-hub.exe`                              |
+| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.3.10_x64_zh-CN.msi`  |
+| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.3.10_x64-setup.exe` |
 
 
 发新版时请同步更新仓库根目录 `update/latest.json`（提高 `version`，填写 Gitee/GitHub 页面与安装包直链）。应用会优先读 Gitee raw，失败再读 GitHub raw；有更新时在「小米遥控器 2 Pro」标题旁显示蓝色「更新」入口。
@@ -197,9 +230,10 @@ npm run tauri:build
 ├── src/                     # Vue 前端（页面、组件、状态）
 ├── src-tauri/
 │   ├── src/                 # Rust：桥接、音频、配置、IPC
-│   ├── assets/xiaomi/       # VB-CABLE、Frida Gadget 等资源
+│   ├── assets/xiaomi/       # VB-CABLE、Frida Gadget、configure 脚本等
 │   ├── icons/
 │   └── tauri.conf.json
+├── scripts/                 # 排障脚本（如 audiodg 句柄对照、生命周期 A/B）
 ├── update/latest.json       # 轻量更新检查清单
 ├── package.json
 └── README.md
@@ -211,8 +245,9 @@ npm run tauri:build
 ## 配置与端口
 
 - **配置 / 日志**：写入本机应用数据目录（不在仓库里），可在界面打开日志  
-- **PCM 语音路由**：默认 UDP `127.0.0.1:31680`（环境变量 `REMOTE_BRIDGE_PCM_PORT`）  
-- **HID Tap**：默认 TCP `127.0.0.1:30684`（环境变量 `REMOTE_BRIDGE_XIAOMI_HID_TAP_PORT`）  
+- **PCM 语音路由**：默认 UDP `127.0.0.1:31680`（`REMOTE_BRIDGE_PCM_PORT`）；生命周期默认 `hold_device`（`REMOTE_BRIDGE_AUDIO_LIFECYCLE`）  
+- **虚拟声卡探测**：注册表优先；未就绪重试间隔可用 `REMOTE_BRIDGE_CABLE_PROBE_TTL_MS`（毫秒，默认 60000；`0` 表示未就绪也不自动重试）  
+- **HID Tap**：默认 TCP `127.0.0.1:30684`（`REMOTE_BRIDGE_XIAOMI_HID_TAP_PORT`）  
 - 若同时运行旧版 Python 桥接或其它实例，可能抢端口或 BLE，应用会提示冲突
 
 输入法侧请将麦克风选为 **CABLE Output (VB-Audio Virtual Cable)**，且快捷键与本应用「语音键映射」一致（见应用内「输入法设置」）。

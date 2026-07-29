@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [ValidateSet("Install", "InstallElevated", "Finish", "Repair", "Restore", "Audit")]
   [string] $Mode = "Install",
@@ -207,7 +207,7 @@ try {
   $result = "WARNING: $($_.Exception.Message)"
 }
 
-# 结果仅输出到 stdout，由宿主解析并写入应用日志 / 状态日志（不再写桌面、不弹系统框）
+# Emit result lines on stdout for the host app to parse (no desktop file / no MessageBox).
 @(
   "Xiaomi Remote Bridge audio check",
   "Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",

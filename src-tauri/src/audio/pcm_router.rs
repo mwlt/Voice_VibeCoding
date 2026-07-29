@@ -1,6 +1,14 @@
 //! 对齐 Python `audio_router.py` PCM 侧：独立进程监听 UDP，写入 VB-CABLE
 //!
-//! 协议：PING→PONG / CLEAR / END / 原始 int16 LE PCM（48k mono）
+//! 协议：PING→PONG / CLEAR / END / STOP / 原始 int16 LE PCM（48k mono）
+//!
+//! 生命周期由 `REMOTE_BRIDGE_AUDIO_LIFECYCLE` 控制（**默认 `hold_device`**，A/B 本机结论）：
+//! - `always_play`：启动即建流并一直 play（含静音）
+//! - `hold_device`：启动即握着 CABLE Device，仅会话期 play；END 后停流但保留设备
+//! - `deferred`：空闲只绑 UDP；CLEAR/PCM 才开设备+流；END 后释放全部
+//!
+//! 探测缓存见 `vb_cable`（`REMOTE_BRIDGE_CABLE_PROBE_TTL_MS`）；设置页 1Hz 枚举是 audiodg 主因。
+//!
 //! Windows：子进程挂到 Job Object（KILL_ON_JOB_CLOSE），父进程崩溃时子进程一并退出。
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -9,9 +17,56 @@ use std::collections::VecDeque;
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const DEFAULT_PCM_PORT: u16 = 31680;
+
+/// END 后多久无活动再关掉输出（给尾包一点 drain 时间）
+const STREAM_IDLE_CLOSE_MS: u64 = 750;
+/// 已开流但长时间无 PCM 时的兜底关流（防异常未发 END）
+const STREAM_STALE_CLOSE_MS: u64 = 8_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioLifecycle {
+    /// ① 启动即 play，END 只清缓冲
+    AlwaysPlay,
+    /// ② 启动握 Device，会话才 play；END 停流留设备
+    HoldDevice,
+    /// ③ 空闲不碰 WASAPI（当前默认）
+    Deferred,
+}
+
+fn audio_lifecycle() -> AudioLifecycle {
+    let raw = std::env::var("REMOTE_BRIDGE_AUDIO_LIFECYCLE").unwrap_or_default();
+    match raw.trim().to_ascii_lowercase().as_str() {
+        // A/B 结论（本机 audiodg）：三档空闲均 ≈0/s；平局优先 hold_device
+        "" | "hold_device" | "hold-device" | "2" => AudioLifecycle::HoldDevice,
+        "deferred" | "3" => AudioLifecycle::Deferred,
+        "always_play" | "always-play" | "1" => AudioLifecycle::AlwaysPlay,
+        other => {
+            eprintln!(
+                "AUDIO ROUTER unknown REMOTE_BRIDGE_AUDIO_LIFECYCLE={other:?}; using hold_device"
+            );
+            AudioLifecycle::HoldDevice
+        }
+    }
+}
+
+fn lifecycle_label(mode: AudioLifecycle) -> &'static str {
+    match mode {
+        AudioLifecycle::AlwaysPlay => "always_play",
+        AudioLifecycle::HoldDevice => "hold_device",
+        AudioLifecycle::Deferred => "deferred",
+    }
+}
+
+/// 握着的 CABLE：设备始终在；流可空
+struct HeldCable {
+    device: cpal::Device,
+    supported: cpal::SupportedStreamConfig,
+    stream_config: cpal::StreamConfig,
+    stream: Option<cpal::Stream>,
+}
 
 fn pcm_port() -> u16 {
     std::env::var("REMOTE_BRIDGE_PCM_PORT")
@@ -57,57 +112,219 @@ pub fn run_audio_router_cli(args: &[String]) -> i32 {
     }
 }
 
-fn run_router(port: u16) -> Result<(), String> {
+fn resolve_cable_device() -> Result<(cpal::Device, cpal::SupportedStreamConfig, cpal::StreamConfig), String> {
     let host = cpal::default_host();
     let device = find_cable(&host)?;
     let supported = device
         .default_output_config()
         .map_err(|e| format!("输出配置: {e}"))?;
-    let sample_format = supported.sample_format();
     let stream_config = low_latency_stream_config(&supported);
-    eprintln!(
-        "AUDIO ROUTER device={} port={} format={:?} buffer={:?}",
-        device.name().unwrap_or_default(),
-        port,
-        sample_format,
-        stream_config.buffer_size
-    );
+    Ok((device, supported, stream_config))
+}
 
-    let buffer = Arc::new(Mutex::new(VecDeque::<i16>::new()));
-    let running = Arc::new(AtomicBool::new(true));
-    let buffer_cb = Arc::clone(&buffer);
-    let running_cb = Arc::clone(&running);
+fn build_stream_for(
+    device: &cpal::Device,
+    supported: &cpal::SupportedStreamConfig,
+    stream_config: &cpal::StreamConfig,
+    buffer: &Arc<Mutex<VecDeque<i16>>>,
+    running: &Arc<AtomicBool>,
+) -> Result<cpal::Stream, String> {
+    let sample_format = supported.sample_format();
     let channels = stream_config.channels as usize;
-
     let stream = match sample_format {
         cpal::SampleFormat::I16 => build_i16_stream(
-            &device,
-            &stream_config,
-            &supported,
-            buffer_cb,
-            running_cb,
+            device,
+            stream_config,
+            supported,
+            Arc::clone(buffer),
+            Arc::clone(running),
             channels,
         )?,
         cpal::SampleFormat::F32 => build_f32_stream(
-            &device,
-            &stream_config,
-            &supported,
-            buffer_cb,
-            running_cb,
+            device,
+            stream_config,
+            supported,
+            Arc::clone(buffer),
+            Arc::clone(running),
             channels,
         )?,
         other => return Err(format!("unsupported format {other:?}")),
     };
     stream.play().map_err(|e| e.to_string())?;
+    Ok(stream)
+}
+
+fn open_held_cable(
+    play_now: bool,
+    buffer: &Arc<Mutex<VecDeque<i16>>>,
+    running: &Arc<AtomicBool>,
+) -> Result<HeldCable, String> {
+    let (device, supported, stream_config) = resolve_cable_device()?;
+    let name = device.name().unwrap_or_default();
+    let stream = if play_now {
+        Some(build_stream_for(
+            &device,
+            &supported,
+            &stream_config,
+            buffer,
+            running,
+        )?)
+    } else {
+        None
+    };
+    log::info!(
+        "AUDIO ROUTER CABLE HELD device={} play={} format={:?} buffer={:?}",
+        name,
+        play_now,
+        supported.sample_format(),
+        stream_config.buffer_size
+    );
+    eprintln!(
+        "AUDIO ROUTER CABLE HELD device={} play={}",
+        name, play_now
+    );
+    Ok(HeldCable {
+        device,
+        supported,
+        stream_config,
+        stream,
+    })
+}
+
+fn ensure_stream_playing(
+    held: &mut HeldCable,
+    buffer: &Arc<Mutex<VecDeque<i16>>>,
+    running: &Arc<AtomicBool>,
+) -> Result<(), String> {
+    if held.stream.is_some() {
+        return Ok(());
+    }
+    held.stream = Some(build_stream_for(
+        &held.device,
+        &held.supported,
+        &held.stream_config,
+        buffer,
+        running,
+    )?);
+    log::info!("AUDIO ROUTER STREAM PLAY");
+    eprintln!("AUDIO ROUTER STREAM PLAY");
+    Ok(())
+}
+
+fn stop_stream_keep_device(held: &mut HeldCable, reason: &str) {
+    if let Some(s) = held.stream.take() {
+        let _ = s.pause();
+        drop(s);
+        log::info!("AUDIO ROUTER STREAM STOP reason={reason} (device held)");
+        eprintln!("AUDIO ROUTER STREAM STOP reason={reason} (device held)");
+    }
+}
+
+fn release_held(held: &mut Option<HeldCable>, reason: &str) {
+    if let Some(mut h) = held.take() {
+        stop_stream_keep_device(&mut h, reason);
+        drop(h);
+        log::info!("AUDIO ROUTER DEVICE+STREAM RELEASE reason={reason}");
+        eprintln!("AUDIO ROUTER DEVICE+STREAM RELEASE reason={reason}");
+    }
+}
+
+fn run_router(port: u16) -> Result<(), String> {
+    let mode = audio_lifecycle();
+    let buffer = Arc::new(Mutex::new(VecDeque::<i16>::new()));
+    let running = Arc::new(AtomicBool::new(true));
+    let mut held: Option<HeldCable> = None;
+    let mut idle_deadline: Option<Instant> = None;
+    let mut last_pcm_at: Option<Instant> = None;
+
+    match mode {
+        AudioLifecycle::AlwaysPlay => {
+            held = Some(open_held_cable(true, &buffer, &running)?);
+        }
+        AudioLifecycle::HoldDevice => {
+            held = Some(open_held_cable(false, &buffer, &running)?);
+        }
+        AudioLifecycle::Deferred => {}
+    }
 
     let sock = UdpSocket::bind(format!("127.0.0.1:{port}"))
         .map_err(|e| format!("bind pcm {port}: {e}"))?;
-    sock.set_read_timeout(Some(Duration::from_millis(500)))
+    sock.set_read_timeout(Some(Duration::from_millis(200)))
         .map_err(|e| e.to_string())?;
-    eprintln!("AUDIO ROUTER READY pcm=127.0.0.1:{port}");
+    log::info!(
+        "AUDIO ROUTER READY pcm=127.0.0.1:{port} lifecycle={}",
+        lifecycle_label(mode)
+    );
+    eprintln!(
+        "AUDIO ROUTER READY pcm=127.0.0.1:{port} lifecycle={}",
+        lifecycle_label(mode)
+    );
 
-    // 最多缓存约 60ms@48k，避免堆积导致听写「越说越慢」
     const MAX_BUFFER_SAMPLES: usize = 2_880;
+
+    let ensure_session_output = |held: &mut Option<HeldCable>,
+                                idle_deadline: &mut Option<Instant>|
+     -> Result<(), String> {
+        *idle_deadline = None;
+        match mode {
+            AudioLifecycle::AlwaysPlay => {
+                if held.is_none() {
+                    *held = Some(open_held_cable(true, &buffer, &running)?);
+                } else if let Some(h) = held.as_mut() {
+                    ensure_stream_playing(h, &buffer, &running)?;
+                }
+            }
+            AudioLifecycle::HoldDevice => {
+                if held.is_none() {
+                    *held = Some(open_held_cable(false, &buffer, &running)?);
+                }
+                ensure_stream_playing(held.as_mut().unwrap(), &buffer, &running)?;
+            }
+            AudioLifecycle::Deferred => {
+                if held.is_none() {
+                    *held = Some(open_held_cable(true, &buffer, &running)?);
+                } else if let Some(h) = held.as_mut() {
+                    ensure_stream_playing(h, &buffer, &running)?;
+                }
+            }
+        }
+        Ok(())
+    };
+
+    let on_session_end = |idle_deadline: &mut Option<Instant>| {
+        match mode {
+            AudioLifecycle::AlwaysPlay => {
+                *idle_deadline = None;
+            }
+            AudioLifecycle::HoldDevice | AudioLifecycle::Deferred => {
+                *idle_deadline =
+                    Some(Instant::now() + Duration::from_millis(STREAM_IDLE_CLOSE_MS));
+            }
+        }
+    };
+
+    let apply_idle_close = |held: &mut Option<HeldCable>,
+                            idle_deadline: &mut Option<Instant>,
+                            last_pcm_at: &mut Option<Instant>,
+                            reason: &str| {
+        match mode {
+            AudioLifecycle::AlwaysPlay => {
+                *idle_deadline = None;
+            }
+            AudioLifecycle::HoldDevice => {
+                if let Some(h) = held.as_mut() {
+                    stop_stream_keep_device(h, reason);
+                }
+                *idle_deadline = None;
+                *last_pcm_at = None;
+            }
+            AudioLifecycle::Deferred => {
+                release_held(held, reason);
+                *idle_deadline = None;
+                *last_pcm_at = None;
+            }
+        }
+    };
 
     let mut buf = [0u8; 65536];
     loop {
@@ -116,11 +333,23 @@ fn run_router(port: u16) -> Result<(), String> {
                 let data = &buf[..n];
                 if data == b"PING" {
                     let _ = sock.send_to(b"PONG", peer);
-                } else if data == b"CLEAR" || data == b"END" {
+                } else if data == b"CLEAR" {
                     buffer.lock().clear();
+                    if let Err(e) = ensure_session_output(&mut held, &mut idle_deadline) {
+                        eprintln!("AUDIO ROUTER session open failed: {e}");
+                    }
+                    last_pcm_at = Some(Instant::now());
+                } else if data == b"END" {
+                    buffer.lock().clear();
+                    on_session_end(&mut idle_deadline);
                 } else if data == b"STOP" || data.is_empty() {
                     // ignore
                 } else if n % 2 == 0 {
+                    if let Err(e) = ensure_session_output(&mut held, &mut idle_deadline) {
+                        eprintln!("AUDIO ROUTER session open failed: {e}");
+                        continue;
+                    }
+                    last_pcm_at = Some(Instant::now());
                     let mut samples = Vec::with_capacity(n / 2);
                     for chunk in data.chunks_exact(2) {
                         samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
@@ -140,7 +369,30 @@ fn run_router(port: u16) -> Result<(), String> {
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
-        // 兜底：无 Job 时仍靠 parent-pid 自检
+
+        let now = Instant::now();
+        if let Some(deadline) = idle_deadline {
+            if now >= deadline {
+                buffer.lock().clear();
+                apply_idle_close(&mut held, &mut idle_deadline, &mut last_pcm_at, "end_idle");
+            }
+        } else if mode != AudioLifecycle::AlwaysPlay {
+            let playing = held.as_ref().and_then(|h| h.stream.as_ref()).is_some();
+            if playing {
+                if let Some(t) = last_pcm_at {
+                    if now.duration_since(t) >= Duration::from_millis(STREAM_STALE_CLOSE_MS) {
+                        buffer.lock().clear();
+                        apply_idle_close(
+                            &mut held,
+                            &mut idle_deadline,
+                            &mut last_pcm_at,
+                            "stale_idle",
+                        );
+                    }
+                }
+            }
+        }
+
         if let Ok(pid_s) = std::env::var("REMOTE_BRIDGE_PARENT_PID") {
             if let Ok(pid) = pid_s.parse::<u32>() {
                 if !parent_alive(pid) {
@@ -150,6 +402,7 @@ fn run_router(port: u16) -> Result<(), String> {
         }
     }
     running.store(false, Ordering::Release);
+    release_held(&mut held, "router_exit");
     Ok(())
 }
 
@@ -339,6 +592,9 @@ pub fn spawn_audio_router_process() -> Result<(), String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    if let Ok(v) = std::env::var("REMOTE_BRIDGE_AUDIO_LIFECYCLE") {
+        cmd.env("REMOTE_BRIDGE_AUDIO_LIFECYCLE", v);
+    }
     if let Ok(log_path) = std::env::var("REMOTE_BRIDGE_LOG_PATH") {
         cmd.env("REMOTE_BRIDGE_LOG_PATH", log_path);
     }

@@ -1,12 +1,21 @@
 //! 小米语音环境：检测 VB-CABLE，并用内嵌驱动包 / 官网下载修复
 //!
 //! 安装逻辑复用 Python `configure-xiaomi-audio.ps1`（校验签名、提权安装、设默认麦）。
+//!
+//! **探测策略（长期最优）**：
+//! - 优先读 MMDevices **注册表**（与 configure 脚本一致），避免 cpal/WASAPI 枚举打爆 audiodg
+//! - 仅当注册表 **读失败** 时才 cpal 兜底一次；「没有 CABLE」不算失败
+//! - 启动实探一次；**已就绪则停探**；**未就绪**按间隔重试（默认 60s）
+//! - 「检测/修复」走 `voice_env_status_fresh` / `invalidate` 强制重探
+//! - `REMOTE_BRIDGE_CABLE_PROBE_TTL_MS`：未就绪重试间隔；`0` = 未就绪也不自动重试
 
+use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::copy;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 pub const DRIVER_ZIP_NAME: &str = "VBCABLE_Driver_Pack45.zip";
 pub const DRIVER_ZIP_SHA256: &str =
@@ -117,7 +126,7 @@ pub fn find_configure_script() -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-fn probe_cable_endpoints() -> (bool, bool) {
+fn probe_via_cpal() -> (bool, bool) {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
     let mut cable_input = false;
@@ -143,13 +152,152 @@ fn probe_cable_endpoints() -> (bool, bool) {
     (cable_input, cable_output)
 }
 
+#[cfg(target_os = "windows")]
+fn mmdevices_endpoint_label(props: &winreg::RegKey) -> String {
+    // 对齐 configure-xiaomi-audio.ps1 / Python native_audio
+    const PKEY_DEVICE: &str = "{a45c254e-df1c-4efd-8020-67d146a850e0},2";
+    const PKEY_ENDPOINT: &str = "{b3f8fa53-0004-438e-9003-51a46e139bfc},6";
+    let mut parts: Vec<String> = Vec::new();
+    for key in [PKEY_DEVICE, PKEY_ENDPOINT] {
+        if let Ok(v) = props.get_value::<String, _>(key) {
+            let t = v.trim();
+            if !t.is_empty() && !parts.iter().any(|p| p.eq_ignore_ascii_case(t)) {
+                parts.push(t.to_string());
+            }
+        }
+    }
+    parts.join(" ")
+}
+
+/// 对齐脚本：只认 DeviceState==1（Active）且名称匹配的端点。
+#[cfg(target_os = "windows")]
+fn registry_flow_has_cable(flow: &str, needle: &str) -> Result<bool, String> {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
+    use winreg::RegKey;
+
+    let path = format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{flow}");
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let root = hklm
+        .open_subkey_with_flags(&path, KEY_READ)
+        .map_err(|e| format!("open {path}: {e}"))?;
+
+    let needle = needle.to_ascii_lowercase();
+    for endpoint_id in root.enum_keys().filter_map(|k| k.ok()) {
+        let Ok(endpoint) = root.open_subkey_with_flags(&endpoint_id, KEY_READ) else {
+            continue;
+        };
+        let state: u32 = match endpoint.get_value("DeviceState") {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        // DEVICE_STATE_ACTIVE = 1
+        if state != 1 {
+            continue;
+        }
+        let Ok(props) = endpoint.open_subkey_with_flags("Properties", KEY_READ) else {
+            continue;
+        };
+        let label = mmdevices_endpoint_label(&props);
+        if label.to_ascii_lowercase().contains(&needle) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(target_os = "windows")]
+fn probe_via_registry() -> Result<(bool, bool), String> {
+    let cable_input = registry_flow_has_cable("Render", "cable input")?;
+    let cable_output = registry_flow_has_cable("Capture", "cable output")?;
+    Ok((cable_input, cable_output))
+}
+
+#[cfg(target_os = "windows")]
+fn probe_cable_endpoints_uncached() -> (bool, bool) {
+    match probe_via_registry() {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("VB-CABLE registry probe failed ({e}); cpal fallback once");
+            probe_via_cpal()
+        }
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
-fn probe_cable_endpoints() -> (bool, bool) {
+fn probe_cable_endpoints_uncached() -> (bool, bool) {
     (false, false)
 }
 
+/// 未就绪时的自动重试间隔。`REMOTE_BRIDGE_CABLE_PROBE_TTL_MS`：默认 60000；`0` = 不自动重试。
+fn not_ready_retry_interval() -> Option<Duration> {
+    match std::env::var("REMOTE_BRIDGE_CABLE_PROBE_TTL_MS") {
+        Ok(s) => {
+            let s = s.trim();
+            if s.is_empty() {
+                return Some(Duration::from_secs(60));
+            }
+            match s.parse::<u64>() {
+                Ok(0) => None,
+                Ok(ms) => Some(Duration::from_millis(ms)),
+                Err(_) => Some(Duration::from_secs(60)),
+            }
+        }
+        Err(_) => Some(Duration::from_secs(60)),
+    }
+}
+
+struct CableProbeCache {
+    at: Instant,
+    cable_input: bool,
+    cable_output: bool,
+}
+
+static CABLE_PROBE: Mutex<Option<CableProbeCache>> = Mutex::new(None);
+
+fn probe_cable_endpoints(force: bool) -> (bool, bool) {
+    if !force {
+        let g = CABLE_PROBE.lock();
+        if let Some(c) = g.as_ref() {
+            let ready = c.cable_input && c.cable_output;
+            if ready {
+                // 已就绪：停探，直到 invalidate / fresh
+                return (c.cable_input, c.cable_output);
+            }
+            match not_ready_retry_interval() {
+                None => return (c.cable_input, c.cable_output),
+                Some(interval) if c.at.elapsed() < interval => {
+                    return (c.cable_input, c.cable_output);
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    let (cable_input, cable_output) = probe_cable_endpoints_uncached();
+    *CABLE_PROBE.lock() = Some(CableProbeCache {
+        at: Instant::now(),
+        cable_input,
+        cable_output,
+    });
+    log::debug!("VB-CABLE probe input={cable_input} output={cable_output} force={force}");
+    (cable_input, cable_output)
+}
+
+/// 安装/修复后立刻失效缓存，下次 status 会重探
+pub fn invalidate_cable_probe_cache() {
+    *CABLE_PROBE.lock() = None;
+}
+
 pub fn voice_env_status() -> VoiceEnvStatus {
-    let (cable_input, cable_output) = probe_cable_endpoints();
+    voice_env_status_inner(false)
+}
+
+/// 用户主动「检测/修复」时强制重探
+pub fn voice_env_status_fresh() -> VoiceEnvStatus {
+    voice_env_status_inner(true)
+}
+
+fn voice_env_status_inner(force: bool) -> VoiceEnvStatus {
+    let (cable_input, cable_output) = probe_cable_endpoints(force);
     let ready = cable_input && cable_output;
     let zip = find_driver_zip();
     let embedded_available = zip.is_some() && find_configure_script().is_some();
@@ -279,15 +427,16 @@ fn run_configure_script(mode: &str, zip: &Path) -> Result<VoiceEnvActionResult, 
         || stdout.to_ascii_lowercase().contains("restart required")
         || output.status.code() == Some(3010);
 
-    // 稍等端点出现
+    // 稍等端点出现（强制重探，安装后缓存必须失效）
+    invalidate_cable_probe_cache();
     for _ in 0..15 {
-        let (i, o) = probe_cable_endpoints();
+        let (i, o) = probe_cable_endpoints(true);
         if i && o {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    let (cable_input, cable_output) = probe_cable_endpoints();
+    let (cable_input, cable_output) = probe_cable_endpoints(true);
     let ready = cable_input && cable_output;
 
     let message = if !output.status.success() && !needs_reboot {
@@ -323,7 +472,7 @@ fn run_configure_script(mode: &str, zip: &Path) -> Result<VoiceEnvActionResult, 
 
 /// 检测；若已就绪则直接 Repair（设默认麦）；若未就绪则返回 needs_choice
 pub fn check_or_prompt() -> VoiceEnvActionResult {
-    let status = voice_env_status();
+    let status = voice_env_status_fresh();
     if status.ready {
         match find_driver_zip() {
             Some(zip) => match run_configure_script("Repair", &zip) {

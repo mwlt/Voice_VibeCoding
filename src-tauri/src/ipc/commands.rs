@@ -581,7 +581,7 @@ pub async fn check_xiaomi_voice_env() -> Result<crate::audio::vb_cable::VoiceEnv
 
 #[tauri::command]
 pub async fn get_xiaomi_voice_env_status() -> Result<crate::audio::vb_cable::VoiceEnvStatus, String> {
-    Ok(crate::audio::vb_cable::voice_env_status())
+    Ok(crate::audio::vb_cable::voice_env_status_fresh())
 }
 
 /// source: "embedded" | "download_page" | "download_zip"
