@@ -40,6 +40,7 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let restore = MenuItemBuilder::with_id("restore", "打开状态").build(app)?;
     let settings = MenuItemBuilder::with_id("xiaomi_settings", "按键与语音设置").build(app)?;
     let restart = MenuItemBuilder::with_id("restart_bridge", "重启桥接").build(app)?;
+    let refresh = MenuItemBuilder::with_id("refresh_ui", "刷新界面（白屏自救）").build(app)?;
     let separator1 = PredefinedMenuItem::separator(app)?;
 
     let xiaomi_connect = MenuItemBuilder::with_id("xiaomi_connect", "连接小米遥控器").build(app)?;
@@ -72,6 +73,7 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .item(&restore)
         .item(&settings)
         .item(&restart)
+        .item(&refresh)
         .item(&separator1)
         .item(&xiaomi_submenu)
         .item(&t1_submenu)
@@ -84,6 +86,14 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 fn on_menu_event(app: &AppHandle, id: &str) {
     match id {
         "restore" | "show" => restore_main_window(app),
+        "refresh_ui" => {
+            // 白屏自救：强制重载主窗口（WebView2 渲染进程死亡时前端按钮已不可用，必须走后端）
+            restore_main_window(app);
+            if let Some(window) = app.get_webview_window("main") {
+                log::info!("TRAY: manual refresh UI requested");
+                let _ = window.reload();
+            }
+        }
         "xiaomi_settings" => {
             restore_main_window(app);
             let _ = app.emit("navigate", "/xiaomi");

@@ -1,8 +1,8 @@
 {
-  "version": "1.3.12",
-  "notes": "v1.3.12：小米遥控器示意按实物重绘（丝印图标、键面层次与选中态）；布局对齐电源/语音/方向盘/音量条。",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.3.12",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.3.12",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.3.12/Voice%20VibeCoding_1.3.12_x64-setup.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.3.12/Voice.VibeCoding_1.3.12_x64-setup.exe"
+  "version": "1.3.13",
+  "notes": "v1.3.13：音量键防双格（HID Tap 接管后无条件吞原生）；WebView 白屏自救（心跳超时自动 reload + 托盘「刷新界面」）；设置页致谢布局调整。",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.3.13",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.3.13",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.3.13/Voice%20VibeCoding_1.3.13_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.3.13/Voice.VibeCoding_1.3.13_x64-setup.exe"
 }

@@ -186,20 +186,30 @@ fn hook_loop() {
             let tap_ready = HID_TAP_READY.load(Ordering::Acquire);
 
             // 对齐 Python：音量仅在 Tap 就绪后抑制；其它键在 recent 信号时抑制
+            // v1.5.x 修双发：Tap 接管时无条件吞原生音量（消除 LL 先于 BLE 信号的时序窗口）
             let suppress = match vk {
-                0xAF if tap_ready
-                    && direct_signal_recent("volume_up", Duration::from_millis(200)) =>
+                0xAF if should_suppress_volume_native(
+                    0xAF,
+                    tap_ready,
+                    direct_signal_recent("volume_up", Duration::from_millis(200)),
+                ) =>
                 {
                     Some("volume_up")
                 }
-                0xAE if tap_ready
-                    && direct_signal_recent("volume_down", Duration::from_millis(200)) =>
+                0xAE if should_suppress_volume_native(
+                    0xAE,
+                    tap_ready,
+                    direct_signal_recent("volume_down", Duration::from_millis(200)),
+                ) =>
                 {
                     Some("volume_down")
                 }
-                0xAD if tap_ready
-                    && (direct_signal_recent("volume_mute", Duration::from_millis(200))
-                        || direct_signal_recent("mute", Duration::from_millis(200))) =>
+                0xAD if should_suppress_volume_native(
+                    0xAD,
+                    tap_ready,
+                    direct_signal_recent("volume_mute", Duration::from_millis(200))
+                        || direct_signal_recent("mute", Duration::from_millis(200)),
+                ) =>
                 {
                     Some("volume_mute")
                 }
@@ -295,5 +305,83 @@ fn hook_loop() {
         if !hook.is_invalid() {
             let _ = UnhookWindowsHookEx(hook);
         }
+    }
+}
+
+/// 音量键原生事件是否应被吞掉（避免与 SendInput 注入叠成系统双格）。
+///
+/// - `tap_ready`：HID Tap 已接管（应用负责注入一次）→ **无条件吞**原生音量事件，
+///   消除 LL 钩子先于 BLE/HID-Tap 信号到达时 `direct_signal_recent` 尚未标记的时序窗口；
+/// - `recent_signal`：200ms 窗口内遥控器刚按下过该音量键 → 兜底吞（Tap 未就绪时）。
+///
+/// 注意：非音量键（方向/OK/返回等）不受此判定影响。
+///
+/// ```
+/// use remote_bridge_hub_lib::bridges::xiaomi::special_keys::should_suppress_volume_native;
+///
+/// // HID Tap 接管：无条件吞（消除 LL 先于 BLE 信号的时序窗口 → 防双格）
+/// assert!(should_suppress_volume_native(0xAF, true, false));
+/// assert!(should_suppress_volume_native(0xAE, true, false));
+/// assert!(should_suppress_volume_native(0xAD, true, false));
+/// // Tap 未就绪但有近期信号：兜底吞
+/// assert!(should_suppress_volume_native(0xAF, false, true));
+/// // 两者皆无：透传（物理键盘音量键必须可用）
+/// assert!(!should_suppress_volume_native(0xAF, false, false));
+/// // 非音量键不受影响
+/// assert!(!should_suppress_volume_native(0x26, true, true));
+/// assert!(!should_suppress_volume_native(0x0D, true, false));
+/// ```
+pub fn should_suppress_volume_native(vk: u16, tap_ready: bool, recent_signal: bool) -> bool {
+    let is_volume = matches!(vk, 0xAF | 0xAE | 0xAD); // VK_VOLUME_UP / VK_VOLUME_DOWN / VK_VOLUME_MUTE
+    is_volume && (tap_ready || recent_signal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_suppress_volume_native;
+
+    #[test]
+    fn volume_up_suppressed_when_tap_ready() {
+        // HID Tap 接管时：即使 recent 信号尚未标记（LL 钩子先到），也必须吞掉原生音量，
+        // 否则固件原生 + SendInput 注入 = 两格。
+        assert!(should_suppress_volume_native(0xAF, true, false));
+        assert!(should_suppress_volume_native(0xAE, true, false));
+        assert!(should_suppress_volume_native(0xAD, true, false));
+    }
+
+    #[test]
+    fn volume_suppressed_on_recent_signal_without_tap() {
+        // Tap 未就绪但 200ms 内有遥控器信号：兜底吞（对齐旧行为）
+        assert!(should_suppress_volume_native(0xAF, false, true));
+        assert!(should_suppress_volume_native(0xAE, false, true));
+        assert!(should_suppress_volume_native(0xAD, false, true));
+    }
+
+    #[test]
+    fn volume_passthrough_when_neither_ready() {
+        // Tap 未接管且无近期信号：透传原生事件（物理键盘音量键必须可用）
+        assert!(!should_suppress_volume_native(0xAF, false, false));
+        assert!(!should_suppress_volume_native(0xAE, false, false));
+        assert!(!should_suppress_volume_native(0xAD, false, false));
+    }
+
+    #[test]
+    fn non_volume_keys_never_affected() {
+        // 方向键 0x26/0x28、OK 0x0D、返回 0xA6 不受音量判定影响
+        assert!(!should_suppress_volume_native(0x26, true, true));
+        assert!(!should_suppress_volume_native(0x28, true, true));
+        assert!(!should_suppress_volume_native(0x0D, true, false));
+        assert!(!should_suppress_volume_native(0xA6, true, false));
+    }
+
+    #[test]
+    fn tap_ready_beats_stale_recent() {
+        // tap_ready=true 且 recent=false 时必须吞（时序窗口核心场景）
+        assert!(should_suppress_volume_native(0xAF, true, false));
+        // 与 recent=true 时结果一致
+        assert_eq!(
+            should_suppress_volume_native(0xAF, true, false),
+            should_suppress_volume_native(0xAF, true, true)
+        );
     }
 }

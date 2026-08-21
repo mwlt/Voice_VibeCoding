@@ -482,15 +482,14 @@ defineExpose({ keyEl, rootRef });
   transition: background 0.15s, box-shadow 0.15s, color 0.15s;
 }
 
-/* 电源 / 语音：比壳体再淡一点 + 明显下凹 */
+/* 电源 / 语音：纯色键面 + 白色亮边（保留）+ 黑圈模拟键帽与外壳之间的缝隙 */
 .key-cap-sm {
-  background:
-    radial-gradient(120% 100% at 55% 42%, #f7f8fa 0%, #eef0f3 50%, #e4e7ec 100%);
+  background: #eef0f3;
   color: #1a1b1d;
   box-shadow:
-    inset 0 0 0 1px rgba(120, 126, 134, 0.32),
-    inset 1.2px -1.2px 3px rgba(0, 0, 0, 0.16),
-    inset -1px 1px 2px rgba(255, 255, 255, 0.7);
+    0 0 0 1px #ffffff,
+    0 0 0 2px #141518,
+    0 1px 2px rgba(0, 0, 0, 0.12);
 }
 
 .key-cap-sm .key-icon {

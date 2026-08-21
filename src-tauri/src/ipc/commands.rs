@@ -24,6 +24,12 @@ pub struct AudioDevice {
 // 命令实现
 // ============================================================
 
+/// 前端 WebView 心跳（WebView2 健康守卫用；页面 JS 存活时每 5s 调用一次）
+#[tauri::command]
+pub fn webview_ping() {
+    crate::webview_guard::ping();
+}
+
 /// 获取指定设备的连接状态
 #[tauri::command]
 pub async fn get_device_status(

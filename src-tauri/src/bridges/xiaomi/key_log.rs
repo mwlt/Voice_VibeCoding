@@ -127,7 +127,8 @@ pub fn start_key_logger(
         use crate::config::manager::ConfigManager;
         use tauri::Manager;
 
-        let gate = Arc::new(KeyEmitGate::new(90));
+        // 60ms 去抖：防固件 down-up-down 抖动，同时允许真实快速连按（人最快约 100ms/次）
+        let gate = Arc::new(KeyEmitGate::new(60));
         let (tap_enabled, hook_enabled) = app
             .try_state::<ConfigManager>()
             .and_then(|m| m.get_device_config("xiaomi").ok())

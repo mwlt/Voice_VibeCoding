@@ -22,7 +22,7 @@ onMounted(async () => {
   try {
     appVersion.value = `v${await getVersion()}`;
   } catch {
-    appVersion.value = "v1.3.12";
+    appVersion.value = "v1.3.13";
   }
   try {
     const s = await invoke<GlobalSettings>("get_global_settings");
@@ -189,58 +189,76 @@ async function checkUpdate() {
             />
           </div>
           <div class="credit-columns">
-            <div class="credit-col">
-              <p class="credit-lead">
-                本软件 : Rust+tauri2+vue3 Windows版（基于 Python 版本重构）
-              </p>
-              <p class="credit-author">作者：mwlt</p>
-              <div class="credit-block">
-                <span class="credit-k">Gitee</span>
-                <button
-                  type="button"
-                  class="credit-link"
-                  @click="openExternal('https://gitee.com/mwlt/remote-voice-vibe-coding')"
-                >
-                  https://gitee.com/mwlt/remote-voice-vibe-coding
-                </button>
+            <div class="credit-row">
+              <div class="credit-col">
+                <p class="credit-lead">
+                  本软件 : Rust+tauri2+vue3 Windows版（基于 Python 版本重构）
+                </p>
+                <p class="credit-author">作者：mwlt</p>
+                <div class="credit-block">
+                  <span class="credit-k">Gitee</span>
+                  <button
+                    type="button"
+                    class="credit-link"
+                    @click="openExternal('https://gitee.com/mwlt/remote-voice-vibe-coding')"
+                  >
+                    https://gitee.com/mwlt/remote-voice-vibe-coding
+                  </button>
+                </div>
+                <div class="credit-block">
+                  <span class="credit-k">GitHub</span>
+                  <button
+                    type="button"
+                    class="credit-link"
+                    @click="openExternal('https://github.com/mwlt/Voice_VibeCoding')"
+                  >
+                    https://github.com/mwlt/Voice_VibeCoding
+                  </button>
+                </div>
               </div>
-              <div class="credit-block">
-                <span class="credit-k">GitHub</span>
-                <button
-                  type="button"
-                  class="credit-link"
-                  @click="openExternal('https://github.com/mwlt/Voice_VibeCoding')"
-                >
-                  https://github.com/mwlt/Voice_VibeCoding
-                </button>
+              <div class="credit-col">
+                <p class="credit-lead">Python Windows 版</p>
+                <p class="credit-author">作者：xxb26553663-star</p>
+                <div class="credit-block">
+                  <span class="credit-k">GitHub</span>
+                  <button
+                    type="button"
+                    class="credit-link"
+                    @click="openExternal('https://github.com/xxb26553663-star/remote-bridge-hub')"
+                  >
+                    https://github.com/xxb26553663-star/remote-bridge-hub
+                  </button>
+                </div>
               </div>
             </div>
-            <div class="credit-col">
-              <p class="credit-lead">Python Windows 版</p>
-              <p class="credit-author">作者：xxb26553663-star</p>
-              <div class="credit-block">
-                <span class="credit-k">GitHub</span>
-                <button
-                  type="button"
-                  class="credit-link"
-                  @click="openExternal('https://github.com/xxb26553663-star/remote-bridge-hub')"
-                >
-                  https://github.com/xxb26553663-star/remote-bridge-hub
-                </button>
+            <div class="credit-row credit-row-divider">
+              <div class="credit-col">
+                <p class="credit-lead">Apple macOS 版</p>
+                <p class="credit-author">作者：nijez</p>
+                <div class="credit-block">
+                  <span class="credit-k">GitHub</span>
+                  <button
+                    type="button"
+                    class="credit-link"
+                    @click="openExternal('https://github.com/nijez/open-voice-bridge')"
+                  >
+                    https://github.com/nijez/open-voice-bridge
+                  </button>
+                </div>
               </div>
-            </div>
-            <div class="credit-col">
-              <p class="credit-lead">Apple macOS 版</p>
-              <p class="credit-author">作者：nijez</p>
-              <div class="credit-block">
-                <span class="credit-k">GitHub</span>
-                <button
-                  type="button"
-                  class="credit-link"
-                  @click="openExternal('https://github.com/nijez/open-voice-bridge')"
-                >
-                  https://github.com/nijez/open-voice-bridge
-                </button>
+              <div class="credit-col">
+                <p class="credit-lead">Rust 语言 Windows 版</p>
+                <p class="credit-author">作者：LightyearXizIl</p>
+                <div class="credit-block">
+                  <span class="credit-k">GitHub</span>
+                  <button
+                    type="button"
+                    class="credit-link"
+                    @click="openExternal('https://github.com/LightyearXizIl/Nexus-Prime')"
+                  >
+                    https://github.com/LightyearXizIl/Nexus-Prime
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -411,9 +429,22 @@ async function checkUpdate() {
 .credit-columns {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* 一行两列：本软件 | Python（第一行）、macOS | Rust Windows 版（第二行） */
+.credit-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr) minmax(0, 1fr);
-  gap: 16px 20px;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  gap: 20px;
+}
+
+/* 行间横线分隔（空间不足时新增版本放下一行的视觉分隔） */
+.credit-row-divider {
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
 }
 
 .credit-col {
@@ -475,8 +506,13 @@ async function checkUpdate() {
 }
 
 @media (max-width: 900px) {
-  .credit-columns {
+  .credit-row {
     grid-template-columns: 1fr;
+    gap: 0;
+  }
+  /* 移动端单列：行间仍保留横线分隔，行内各项用上边框区分 */
+  .credit-row-divider {
+    margin-top: 14px;
   }
   .credit-col {
     padding-left: 0;

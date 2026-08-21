@@ -98,6 +98,24 @@ function installHook() {
             kind: "gatt_read",
             raw: hex(this.output, this.outputLength)
           });
+          // HID Tap 是旁路抄送：Windows 仍会处理同一份报告 → 固件原生音量 + 应用注入 = 双格。
+          // hub 已连接时清掉全部音量 usage（键盘页 0x7F/80/81 + Consumer 0xE2/E9/EA），
+          // 改由应用 SendInput 注入一格；onLeave 在返回调用方之前执行，此处改缓冲有效。
+          if (output !== null) {
+            for (let offset = 3; offset + 1 < EXPECTED_OUTPUT_LENGTH; offset += 2) {
+              const usage = this.output.add(offset).readU16();
+              if (
+                usage === 0x007f ||
+                usage === 0x0080 ||
+                usage === 0x0081 ||
+                usage === 0x00e2 ||
+                usage === 0x00e9 ||
+                usage === 0x00ea
+              ) {
+                this.output.add(offset).writeU16(0);
+              }
+            }
+          }
         }
       } catch (error) {
         emit({ kind: "error", message: String(error) });

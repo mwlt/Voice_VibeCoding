@@ -4,6 +4,7 @@ pub mod ipc;
 pub mod audio;
 pub mod logging;
 pub mod app_update;
+pub mod webview_guard;
 
 use tauri::{Manager, RunEvent};
 
@@ -16,7 +17,22 @@ fn cleanup_on_exit(app: &tauri::AppHandle) {
     }
     bridges::xiaomi::hid_report_tap::stop_and_join();
     bridges::xiaomi::special_keys::stop_special_key_hook();
-    audio::pcm_router::stop_audio_router_process();
+}
+
+/// 自启参数解析：`--minimized`（注册表 Run 键与 Startup 快捷方式均带此参数）。
+/// 语义：自启时最小化到任务栏（保留渲染，避免 hide 造成 WebView2 白屏），
+/// 用户点任务栏/托盘即可恢复。
+///
+/// ```
+/// use remote_bridge_hub_lib::should_start_minimized;
+///
+/// assert!(should_start_minimized(&["app.exe".into(), "--minimized".into()]));
+/// assert!(!should_start_minimized(&["app.exe".into()]));
+/// assert!(!should_start_minimized(&["app.exe".into(), "xiaomi-hid-injector".into()]));
+/// assert!(should_start_minimized(&["app.exe".into(), " --minimized ".into()]));
+/// ```
+pub fn should_start_minimized(args: &[String]) -> bool {
+    args.iter().any(|a| a.trim() == "--minimized")
 }
 
 fn focus_main_window(app: &tauri::AppHandle) {
@@ -93,6 +109,19 @@ pub fn run() {
                         // else: 允许关闭 → 触发 Exit → cleanup_on_exit
                     }
                 });
+
+                // 自启（--minimized）：最小化到任务栏而非隐藏，保留 WebView2 渲染，
+                // 避免开机自启 + hide 组合造成"页面不显示/白屏"
+                if should_start_minimized(&std::env::args().collect::<Vec<_>>()) {
+                    log::info!("START: --minimized detected, minimizing window to taskbar");
+                    let win = window.clone();
+                    std::thread::Builder::new()
+                        .name("start-minimized".into())
+                        .spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(600));
+                            let _ = win.minimize();
+                        })?;
+                }
             }
 
             // 独立 audio_router 子进程（对齐 Python --role audio）
@@ -145,6 +174,22 @@ pub fn run() {
             // 启动后静默检查更新（有新版才向前端发事件）
             app_update::spawn_startup_check(app.handle().clone());
 
+            // WebView2 健康守卫：前端每 5s 心跳；检测到渲染进程死亡自动 reload（修长时间运行后白屏）
+            {
+                let guard_app = app.handle().clone();
+                std::thread::Builder::new()
+                    .name("webview-guard".into())
+                    .spawn(move || loop {
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                        if webview_guard::check_and_reload(std::time::Instant::now()) {
+                            log::warn!("WEBVIEW GUARD: reloading main window (rendering suspected dead)");
+                            if let Some(window) = guard_app.get_webview_window("main") {
+                                let _ = window.reload();
+                            }
+                        }
+                    })?;
+            }
+
             log::info!("Voice VibeCoding started successfully");
             Ok(())
         })
@@ -182,6 +227,7 @@ pub fn run() {
             ipc::update_cmds::check_app_update,
             ipc::update_cmds::get_app_update_state,
             ipc::update_cmds::ignore_app_update,
+            ipc::commands::webview_ping,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -193,4 +239,29 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_start_minimized;
+
+    #[test]
+    fn minimized_flag_detected() {
+        assert!(should_start_minimized(&["app.exe".into(), "--minimized".into()]));
+        assert!(should_start_minimized(&["--minimized".into()]));
+    }
+
+    #[test]
+    fn no_flag_when_absent() {
+        assert!(!should_start_minimized(&["app.exe".into()]));
+        assert!(!should_start_minimized(&[]));
+        assert!(!should_start_minimized(&["app.exe".into(), "--other".into()]));
+        assert!(!should_start_minimized(&["app.exe".into(), "-minimized".into()]));
+        assert!(!should_start_minimized(&["app.exe".into(), "xiaomi-hid-injector".into()]));
+    }
+
+    #[test]
+    fn whitespace_tolerated() {
+        assert!(should_start_minimized(&["app.exe".into(), " --minimized ".into()]));
+    }
 }

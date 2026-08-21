@@ -1096,7 +1096,7 @@ function toggleConnection() {
                 v-for="(v, i) in voiceMeter.waveform"
                 :key="i"
                 class="ble-wave-bar"
-                :style="{ height: `${Math.max(8, Math.round(v * 100))}%` }"
+                :style="{ height: `${Math.max(8, Math.round(Math.pow(Math.min(1, Math.max(0, v)), 0.25) * 100))}%` }"
               />
             </div>
           </div>
@@ -2477,6 +2477,8 @@ function toggleConnection() {
 }
 .info-item-audio.is-receiving .ble-wave-bar {
   background: #16a34a;
+  /* 有输入时柱子的最小占用高度：远距离小信号也保持可见波动 */
+  min-height: 20%;
 }
 .info-item-audio.is-session .ble-wave-bar {
   background: #d97706;
