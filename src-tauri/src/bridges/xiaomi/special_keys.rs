@@ -215,11 +215,22 @@ fn hook_loop() {
                 }
                 0xA6 if direct_signal_recent("back", Duration::from_millis(250)) => Some("back"),
                 0x24 | 0xAC
-                    if direct_signal_recent("home", Duration::from_millis(250)) =>
+                    if should_suppress_native_menu_home(
+                        vk as u16,
+                        tap_ready,
+                        direct_signal_recent("home", Duration::from_millis(250)),
+                    ) =>
                 {
                     Some("home")
                 }
-                0x5D if direct_signal_recent("menu", Duration::from_millis(250)) => Some("menu"),
+                0x5D if should_suppress_native_menu_home(
+                    vk as u16,
+                    tap_ready,
+                    direct_signal_recent("menu", Duration::from_millis(250)),
+                ) =>
+                {
+                    Some("menu")
+                }
                 0x0D if direct_signal_recent("ok", Duration::from_millis(200)) => Some("ok"),
                 0x25 if direct_signal_recent("left", Duration::from_millis(200))
                     || direct_signal_recent("dpad_left", Duration::from_millis(200)) =>
@@ -336,6 +347,40 @@ pub fn should_suppress_volume_native(vk: u16, tap_ready: bool, recent_signal: bo
     is_volume && (tap_ready || recent_signal)
 }
 
+/// menu/home 原生事件是否应被吞掉（与音量键 `should_suppress_volume_native` 同策略）。
+///
+/// 背景：HID Tap 是旁路抄送，LL 钩子可能先于 hub 的 HID 报文到达 →
+/// `direct_signal_recent("menu"/"home")` 尚未标记，原生气漏出：
+/// - menu 固件 usage 0x65 翻译成 VK_APPS(0x5D)：慢速点击时先弹右键菜单，
+///   再叠上注入的 Win(0x5B)，之后 Win 弹起被系统吃掉 → 菜单关不掉；
+/// - home 映射为 Space(0x20) 时，固件原生 VK_HOME(0x24)/0xAC 漏出会先跳行首。
+///
+/// - `tap_ready`：Tap 已接管（应用负责注入）→ 无条件吞原生 menu/home；
+/// - `recent_signal`：250ms 内遥控器刚按下过该键 → 兜底吞；
+/// - 两者皆无：透传（物理键盘的 Home / Menu 键必须可用）。
+///
+/// ```
+/// use remote_bridge_hub_lib::bridges::xiaomi::special_keys::should_suppress_native_menu_home;
+///
+/// // Tap 接管：无条件吞（消除 LL 先于 HID-Tap 信号的时序窗口）
+/// assert!(should_suppress_native_menu_home(0x5D, true, false));
+/// assert!(should_suppress_native_menu_home(0x24, true, false));
+/// assert!(should_suppress_native_menu_home(0xAC, true, true));
+/// // Tap 未就绪但有近期信号：兜底吞
+/// assert!(should_suppress_native_menu_home(0x5D, false, true));
+/// assert!(should_suppress_native_menu_home(0x24, false, true));
+/// // 两者皆无：透传
+/// assert!(!should_suppress_native_menu_home(0x5D, false, false));
+/// assert!(!should_suppress_native_menu_home(0x24, false, false));
+/// // 非 menu/home 键不受影响
+/// assert!(!should_suppress_native_menu_home(0x20, true, true));
+/// assert!(!should_suppress_native_menu_home(0xA6, true, true));
+/// ```
+pub fn should_suppress_native_menu_home(vk: u16, tap_ready: bool, recent_signal: bool) -> bool {
+    let is_menu_or_home = matches!(vk, 0x5D | 0x24 | 0xAC); // VK_APPS / VK_HOME / 0xAC
+    is_menu_or_home && (tap_ready || recent_signal)
+}
+
 #[cfg(test)]
 mod tests {
     use super::should_suppress_volume_native;
@@ -383,5 +428,42 @@ mod tests {
             should_suppress_volume_native(0xAF, true, false),
             should_suppress_volume_native(0xAF, true, true)
         );
+    }
+
+    // ---- menu/home：与音量键同策略（v1.3.13 时序窗口修复）----
+
+    use super::should_suppress_native_menu_home;
+
+    #[test]
+    fn menu_home_suppressed_when_tap_ready() {
+        // Tap 接管时无条件吞原生 menu(VK_APPS)/home，即使 recent 信号尚未标记
+        // （LL 钩子先于 hub HID 报文到达的时序窗口 → 慢速点击漏右键菜单/跳行首）
+        assert!(should_suppress_native_menu_home(0x5D, true, false));
+        assert!(should_suppress_native_menu_home(0x24, true, false));
+        assert!(should_suppress_native_menu_home(0xAC, true, false));
+    }
+
+    #[test]
+    fn menu_home_suppressed_on_recent_signal_without_tap() {
+        // Tap 未就绪但 250ms 内有遥控器信号：兜底吞（对齐旧行为）
+        assert!(should_suppress_native_menu_home(0x5D, false, true));
+        assert!(should_suppress_native_menu_home(0x24, false, true));
+        assert!(should_suppress_native_menu_home(0xAC, false, true));
+    }
+
+    #[test]
+    fn menu_home_passthrough_when_neither_ready() {
+        // 两者皆无：透传原生事件（物理键盘 Home / Menu 键必须可用）
+        assert!(!should_suppress_native_menu_home(0x5D, false, false));
+        assert!(!should_suppress_native_menu_home(0x24, false, false));
+        assert!(!should_suppress_native_menu_home(0xAC, false, false));
+    }
+
+    #[test]
+    fn non_menu_home_keys_never_affected() {
+        // Space 0x20（home 的注入目标）、Back 0xA6、OK 0x0D 不受此判定影响
+        assert!(!should_suppress_native_menu_home(0x20, true, true));
+        assert!(!should_suppress_native_menu_home(0xA6, true, true));
+        assert!(!should_suppress_native_menu_home(0x0D, true, false));
     }
 }

@@ -196,8 +196,10 @@ fn walkdir_shallow(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(out)
 }
 
-/// 解压并写入 Gadget DLL / config / script，返回 DLL 路径（需提升权限调用）
-pub fn prepare_secure_runtime() -> Result<PathBuf, String> {
+/// 解压并写入 Gadget DLL / config / script，返回 (DLL 路径, 是否检测到脚本变更)。
+/// `script_changed=true` 时调用方必须在注入完成后重启 RC003 宿主，
+/// 让下一次挂载加载新脚本（on_change=ignore 使 Frida 不会热重载）。
+pub fn prepare_secure_runtime() -> Result<(PathBuf, bool), String> {
     let archive = find_gadget_archive().ok_or_else(|| {
         "verified RC003 Gadget asset is missing (assets/xiaomi/frida-gadget-*.dll.xz)".to_string()
     })?;
@@ -207,6 +209,28 @@ pub fn prepare_secure_runtime() -> Result<PathBuf, String> {
         .map_err(|e| format!("mkdir runtime {}: {e}", destination.display()))?;
     if let Err(e) = lock_runtime_acl(&destination) {
         log::warn!("lock runtime ACL (pre): {e}");
+    }
+
+    // 脚本变更检测：若磁盘上的 gadget 脚本与当前内嵌版本不一致，
+    // 说明 dev 重编译 / 版本升级更新了脚本。Frida 配置是 on_change=ignore，
+    // WUDFHost 不会重载新脚本 —— 只有重启 RC003 宿主（WUDFHost）才会在挂载时
+    // 重新读取新脚本。否则脚本清除逻辑（如 menu 0x65、音量 0x80/81）永远不生效。
+    //
+    // 注意：这里只做「检测 + 写盘」，绝不在此处杀宿主 —— 本函数在注入器里
+    // `inject_library(pid)` 之前调用，此刻杀掉 pid 会让随后的注入必然失败。
+    // 正确顺序由调用方保证：先注入旧宿主 → 若本次注入前检测到脚本变化，
+    // 再重启宿主，让下一次挂载加载新脚本（见 hid_tap_injector::perform_injection）。
+    let script_path = destination.join(GADGET_SCRIPT_NAME);
+    let script_changed = !script_path.is_file()
+        || fs::read_to_string(&script_path)
+            .map(|cur| cur.trim() != GADGET_SCRIPT.trim())
+            .unwrap_or(true);
+    if script_changed {
+        log::info!(
+            "XIAOMI HID TAP script changed ({} -> {}), host restart scheduled after inject",
+            script_path.display(),
+            GADGET_SCRIPT.trim().len()
+        );
     }
 
     let dll_path = destination.join(GADGET_DLL_NAME);
@@ -239,9 +263,9 @@ pub fn prepare_secure_runtime() -> Result<PathBuf, String> {
     if let Err(e) = lock_runtime_acl(&destination) {
         log::warn!("lock runtime ACL (post): {e}");
     }
-    Ok(dll_path)
-}
 
+    Ok((dll_path, script_changed))
+}
 
 /// 查找 RC003 HidOverGatt 对应的 WUDFHost PID（对齐 Python：直接返回注册表 HostPid）
 pub fn find_rc003_hidogatt_host_pid() -> Option<u32> {

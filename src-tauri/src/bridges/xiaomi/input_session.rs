@@ -1026,26 +1026,18 @@ fn on_voice_remote_press(app: &AppHandle, gate: &KeyEmitGate, state: &Arc<Mutex<
     crate::bridges::xiaomi::voice_meter::set_session(true);
 
     if toggle {
-        // 点击模式：短按抬起再 TAP；长按阈值到再 DOWN
-        let app2 = app.clone();
-        let state2 = Arc::clone(state);
-        std::thread::Builder::new()
-            .name("xiaomi-voice-click-hold".into())
-            .spawn(move || {
-                std::thread::sleep(Duration::from_millis(CLICK_HOLD_THRESHOLD_MS));
-                let Ok(mut st) = state2.lock() else {
-                    return;
-                };
-                if st.press_gen != gen || !st.remote_pressed || st.hold_chord_armed {
-                    return;
-                }
+        // 点击模式：立即注入快捷键 DOWN（无需等待 200ms 判定，消除响应延迟）。
+        // 短按在抬起时走 UP（等效一次 tap），长按保持 DOWN 传声，行为与原语义一致。
+        {
+            let Ok(mut st) = state.lock() else {
+                return;
+            };
+            if st.press_gen == gen && st.remote_pressed {
                 st.hold_chord_armed = true;
-                drop(st);
-                key_mapping::voice_shortcut_ensure_down(&app2);
-                log::info!("XIAOMI ATVV click-mode → HOLD chord (threshold reached)");
-            })
-            .ok();
-        log::info!("XIAOMI ATVV AUDIO_START click-mode (await click vs hold)");
+            }
+        }
+        key_mapping::voice_shortcut_ensure_down(app);
+        log::info!("XIAOMI ATVV AUDIO_START click-mode → shortcut DOWN (immediate)");
     } else {
         key_mapping::on_remote_button(app, "mic", true);
         log::info!("XIAOMI ATVV AUDIO_START hold-mode → shortcut DOWN");
@@ -1087,13 +1079,12 @@ fn on_voice_remote_release(app: &AppHandle, gate: &KeyEmitGate, state: &Arc<Mute
     notify_voice_phase(app, gate, false);
 
     if toggle {
-        if hold_armed || press_ms >= CLICK_HOLD_THRESHOLD_MS {
-            key_mapping::on_remote_button(app, "mic", false);
-            log::info!("XIAOMI ATVV AUDIO_STOP click-mode HOLD release ms={press_ms}");
-        } else {
-            key_mapping::voice_shortcut_tap(app);
-            log::info!("XIAOMI ATVV AUDIO_STOP click-mode CLICK tap ms={press_ms}");
-        }
+        // 按下已立即注入 DOWN；抬起无论长短都走 UP（短按等效一次 tap，长按结束按住）
+        key_mapping::on_remote_button(app, "mic", false);
+        log::info!(
+            "XIAOMI ATVV AUDIO_STOP click-mode {} release ms={press_ms}",
+            if hold_armed || press_ms >= CLICK_HOLD_THRESHOLD_MS { "HOLD" } else { "TAP" }
+        );
     } else {
         key_mapping::on_remote_button(app, "mic", false);
         log::info!("XIAOMI ATVV AUDIO_STOP hold-mode → shortcut UP");

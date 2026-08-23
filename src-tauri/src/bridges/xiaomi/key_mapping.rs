@@ -800,6 +800,13 @@ fn key_chord(vks: &[u16], key_up: bool) {
             Box::new(vks.iter())
         };
 
+        // dwExtraInfo 策略：普通 tap 不带 'XMIR' 签名。
+        // 实测（probe esc5/esc6 双盲对照）：截图 overlay（ms-screenclip 的 XamlWindow）
+        // 会丢弃带未知 dwExtraInfo 的合成 Esc —— 电源键映射 Esc 因此关不掉截图；
+        // extraInfo=0 的普通 SendInput Esc 则正常关闭。
+        // 自家 LL hook 判定 `injected = dwExtraInfo==EXTRA_INFO || (flags & LLKHF_INJECTED)`
+        // —— 系统对所有 SendInput 注入键自动置位 0x10，抑制链路不受影响。
+        // tap_unicode_text（Unicode 文本注入）仍带 EXTRA_INFO，与按键映射互不干扰。
         let mut inputs: Vec<INPUT> = Vec::with_capacity(vks.len());
         for &vk in iter {
             let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
@@ -819,7 +826,7 @@ fn key_chord(vks: &[u16], key_up: bool) {
                         wScan: scan,
                         dwFlags: flags,
                         time: 0,
-                        dwExtraInfo: EXTRA_INFO,
+                        dwExtraInfo: 0,
                     },
                 },
             });

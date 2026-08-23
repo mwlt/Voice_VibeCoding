@@ -301,8 +301,9 @@ impl ConfigManager {
             "xiaomi" => DeviceConfig {
                 button_aliases: Self::xiaomi_button_aliases(),
                 button_bindings: Self::xiaomi_default_bindings(),
-                voice_hotkey: Some(vec!["rightalt".into()]),
-                trigger_mode: TriggerMode::Hold,
+                // 对齐用户调优配置：语音键 = Ctrl+左Win（微信输入法），点击模式
+                voice_hotkey: Some(vec!["leftctrl".into(), "leftwin".into()]),
+                trigger_mode: TriggerMode::Toggle,
                 bluetooth_address: None,
                 gain_db: 10.0,
                 retry_delay: 3.0,
@@ -358,10 +359,17 @@ impl ConfigManager {
     }
 
     fn xiaomi_default_bindings() -> HashMap<String, KeyAction> {
-        // 对齐 Python DEFAULT_BUTTON_BINDINGS
+        // v1.3.14 起对齐用户实测调优后的推荐映射（仅首次安装生成，已有用户文件不覆盖）：
+        // - menu → Shift+F10：即「鼠标右键」的键盘等价快捷键，通用性最好
+        // - home → 空格：Win+D 会最小化所有窗口，媒体/翻页场景下空格更安全
+        // - tv → PrtSc：Alt+Esc 切窗易误触，PrtSc 截图更实用
+        // - mic/voice → Ctrl+左Win：微信输入法「启动语音输入」快捷键
         let mut m = HashMap::new();
         m.insert("power".into(), KeyAction::SingleKey(0x1B)); // Esc
-        m.insert("mic".into(), KeyAction::SingleKey(0xA5)); // Right Alt
+        m.insert(
+            "mic".into(),
+            KeyAction::ComboKey(vec![0xA2, 0x5B]), // Left Ctrl + Left Win（微信语音）
+        );
         m.insert("up".into(), KeyAction::SingleKey(0x26));
         m.insert("down".into(), KeyAction::SingleKey(0x28));
         m.insert("left".into(), KeyAction::SingleKey(0x25));
@@ -370,16 +378,22 @@ impl ConfigManager {
         m.insert("back".into(), KeyAction::SingleKey(0x08));
         m.insert("volume_up".into(), KeyAction::SingleKey(0xAF));
         m.insert("volume_down".into(), KeyAction::SingleKey(0xAE));
-        m.insert("home".into(), KeyAction::ComboKey(vec![0x5B, 0x44])); // Win+D
-        m.insert("menu".into(), KeyAction::ComboKey(vec![0x10, 0x79])); // Shift+F10
-        m.insert("tv".into(), KeyAction::ComboKey(vec![0x12, 0x1B])); // Alt+Esc
+        m.insert("home".into(), KeyAction::SingleKey(0x20)); // Space
+        m.insert(
+            "menu".into(),
+            KeyAction::ComboKey(vec![0xA0, 0x79]), // Shift+F10 = 鼠标右键
+        );
+        m.insert("tv".into(), KeyAction::SingleKey(0x2C)); // PrintScreen
         m.insert("volume_mute".into(), KeyAction::SingleKey(0xAD));
         // 兼容旧 UI id
         m.insert("dpad_up".into(), KeyAction::SingleKey(0x26));
         m.insert("dpad_down".into(), KeyAction::SingleKey(0x28));
         m.insert("dpad_left".into(), KeyAction::SingleKey(0x25));
         m.insert("dpad_right".into(), KeyAction::SingleKey(0x27));
-        m.insert("voice".into(), KeyAction::SingleKey(0xA5));
+        m.insert(
+            "voice".into(),
+            KeyAction::ComboKey(vec![0xA2, 0x5B]), // 与 mic 一致
+        );
         m.insert("mute".into(), KeyAction::SingleKey(0xAD));
         m
     }
@@ -462,7 +476,71 @@ mod tests {
         let config = ConfigManager::default_config_for("xiaomi");
         assert_eq!(config.button_aliases.len(), 13);
         assert!(config.button_bindings.contains_key("volume_up"));
-        assert_eq!(config.voice_hotkey, Some(vec!["RAlt".to_string()]));
+        // v1.3.14 默认对齐用户调优配置：语音 = Ctrl+左Win，点击模式
+        assert_eq!(
+            config.voice_hotkey,
+            Some(vec!["leftctrl".to_string(), "leftwin".to_string()])
+        );
+        assert_eq!(config.trigger_mode, TriggerMode::Toggle);
+    }
+
+    #[test]
+    fn test_default_xiaomi_bindings_match_tuned_profile() {
+        // 全新安装默认映射 = 用户调优后的推荐映射
+        let b = ConfigManager::default_config_for("xiaomi").button_bindings;
+        assert_eq!(b.get("power"), Some(&KeyAction::SingleKey(0x1B))); // Esc
+        assert_eq!(
+            b.get("menu"),
+            Some(&KeyAction::ComboKey(vec![0xA0, 0x79])) // Shift+F10 = 鼠标右键
+        );
+        assert_eq!(b.get("home"), Some(&KeyAction::SingleKey(0x20))); // Space
+        assert_eq!(b.get("tv"), Some(&KeyAction::SingleKey(0x2C))); // PrtSc
+        assert_eq!(
+            b.get("mic"),
+            Some(&KeyAction::ComboKey(vec![0xA2, 0x5B])) // Ctrl+左Win
+        );
+        assert_eq!(b.get("voice"), b.get("mic"));
+    }
+
+    #[test]
+    fn test_merge_xiaomi_defaults_never_overrides_user_bindings() {
+        // 已有用户文件：改过 menu/home/tv/voice → merge 只补缺失项，绝不覆盖
+        let user_json = r#"{
+            "button_aliases": {"power": "电源"},
+            "button_bindings": {
+                "power": {"type": "SingleKey", "value": 27},
+                "menu": {"type": "SingleKey", "value": 91},
+                "home": {"type": "SingleKey", "value": 32},
+                "tv": {"type": "SingleKey", "value": 44},
+                "mic": {"type": "ComboKey", "value": [162, 91]}
+            },
+            "voice_hotkey": ["leftctrl", "leftwin"],
+            "trigger_mode": "Toggle"
+        }"#;
+        let mut config: DeviceConfig = serde_json::from_str(user_json).unwrap();
+        ConfigManager::merge_xiaomi_defaults(&mut config);
+
+        assert_eq!(
+            config.button_bindings.get("menu"),
+            Some(&KeyAction::SingleKey(0x5B)),
+            "用户的 menu=左Win 必须保留"
+        );
+        assert_eq!(
+            config.button_bindings.get("home"),
+            Some(&KeyAction::SingleKey(0x20)),
+            "用户的 home=空格 必须保留"
+        );
+        assert_eq!(
+            config.button_bindings.get("tv"),
+            Some(&KeyAction::SingleKey(0x2C)),
+            "用户的 tv=PrtSc 必须保留"
+        );
+        assert_eq!(
+            config.button_bindings.get("back"),
+            Some(&KeyAction::SingleKey(0x08)),
+            "缺失的 back 由 merge 补齐为默认 Backspace"
+        );
+        assert_eq!(config.trigger_mode, TriggerMode::Toggle);
     }
 
     #[test]

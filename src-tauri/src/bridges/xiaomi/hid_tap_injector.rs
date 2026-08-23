@@ -87,7 +87,7 @@ fn perform_injection(pid: u32) -> Result<(), String> {
                 .into(),
         );
     }
-    let dll_path = prepare_secure_runtime()?;
+    let (dll_path, script_changed) = prepare_secure_runtime()?;
     let dll_hash = sha256_file(&dll_path)?;
     if !dll_hash.eq_ignore_ascii_case(GADGET_DLL_SHA256) {
         return Err(format!("verified Gadget changed before injection: {dll_hash}"));
@@ -98,7 +98,45 @@ fn perform_injection(pid: u32) -> Result<(), String> {
         "injected pid={pid} dll={}",
         dll_path.display()
     ));
+    // 注入成功后才允许重启宿主：脚本更新需要宿主重新挂载才能加载新脚本。
+    // 顺序绝不能反 —— 先杀宿主再注入会注入到已死进程（v1.3.13 修复）。
+    if script_changed {
+        restart_rc003_host_after_inject(pid);
+    }
     Ok(())
+}
+
+/// 脚本已更新：结束刚注入的 RC003 宿主，让 Windows 重新拉起 WUDFHost 并在
+/// 挂载时加载新脚本。仅结束 `wudfhost.exe`，且是注册表精确定位的遥控器宿主。
+fn restart_rc003_host_after_inject(pid: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+        };
+        if pid == 0 {
+            return;
+        }
+        let Ok(handle) = (unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) }) else {
+            injector_log(&format!("restart host: open pid={pid} failed"));
+            return;
+        };
+        if unsafe { TerminateProcess(handle, 0) }.is_ok() {
+            injector_log(&format!(
+                "killed RC003 host pid={pid} after inject (script updated); host will reload with new script"
+            ));
+        } else {
+            injector_log(&format!("restart host: terminate pid={pid} failed"));
+        }
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = pid;
+    }
 }
 
 #[cfg(target_os = "windows")]
