@@ -22,7 +22,7 @@ onMounted(async () => {
   try {
     appVersion.value = `v${await getVersion()}`;
   } catch {
-    appVersion.value = "v1.3.13";
+    appVersion.value = "v1.3.15";
   }
   try {
     const s = await invoke<GlobalSettings>("get_global_settings");

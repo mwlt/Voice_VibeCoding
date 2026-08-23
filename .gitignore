@@ -21,6 +21,13 @@ Desktop.ini
 .reasonix/
 .codegraph/
 reasonix.toml
+.workbuddy/
+*.code-workspace
+vite.config.ts.timestamp-*.mjs
+
+# Local logs & notes (not for repo)
+logs/
+语音效率及白屏优化.md
 
 # Env & secrets
 .env
