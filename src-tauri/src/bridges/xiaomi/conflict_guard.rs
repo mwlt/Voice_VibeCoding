@@ -230,10 +230,15 @@ fn pids_holding_port(port: u16, proto: &str) -> HashSet<u32> {
         } else {
             "tcp"
         };
-        let Ok(output) = std::process::Command::new("netstat")
-            .args(["-ano", "-p", proto_arg])
-            .output()
-        else {
+        let Ok(output) = ({
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            // ponytail: 隐藏控制台，避免冲突扫描闪黑框
+            std::process::Command::new("netstat")
+                .creation_flags(CREATE_NO_WINDOW)
+                .args(["-ano", "-p", proto_arg])
+                .output()
+        }) else {
             return out;
         };
         let text = String::from_utf8_lossy(&output.stdout);
