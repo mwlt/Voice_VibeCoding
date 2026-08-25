@@ -127,7 +127,7 @@ async function checkUpdate() {
           <div class="setting-info">
             <span class="setting-label">启动后最小化到托盘</span>
             <span class="setting-desc"
-              >启动时不显示主窗口，仅托盘图标（点击托盘图标打开）</span
+              >启动时不显示主窗口，点击托盘图标即可打开</span
             >
           </div>
           <label class="toggle">
