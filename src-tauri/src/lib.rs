@@ -110,9 +110,20 @@ pub fn run() {
                     }
                 });
 
-                // 自启（--minimized）：最小化到任务栏而非隐藏，保留 WebView2 渲染，
-                // 避免开机自启 + hide 组合造成"页面不显示/白屏"
-                if should_start_minimized(&std::env::args().collect::<Vec<_>>()) {
+                // 启动后最小化到托盘（用户设置）或 --minimized（自启参数）
+                let start_hidden = app
+                    .try_state::<config::manager::ConfigManager>()
+                    .and_then(|m| m.get_global_settings().ok())
+                    .map(|s| s.start_minimized_to_tray)
+                    .unwrap_or(false);
+                let auto_minimized =
+                    should_start_minimized(&std::env::args().collect::<Vec<_>>());
+
+                if start_hidden {
+                    // 用户设置：窗口不显示，仅托盘常驻（visible:false 已使窗口隐藏）
+                    log::info!("START: start_minimized_to_tray=true, window stays hidden");
+                } else if auto_minimized {
+                    // 自启参数：最小化到任务栏
                     log::info!("START: --minimized detected, minimizing window to taskbar");
                     let win = window.clone();
                     std::thread::Builder::new()
@@ -120,6 +131,15 @@ pub fn run() {
                         .spawn(move || {
                             std::thread::sleep(std::time::Duration::from_millis(600));
                             let _ = win.minimize();
+                        })?;
+                } else {
+                    // 正常启动：等 WebView 加载完成后显示窗口（避免闪烁）
+                    let win = window.clone();
+                    std::thread::Builder::new()
+                        .name("show-main-window".into())
+                        .spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(1000));
+                            let _ = win.show();
                         })?;
                 }
             }

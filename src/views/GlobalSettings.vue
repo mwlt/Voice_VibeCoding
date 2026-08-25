@@ -10,6 +10,7 @@ const settings = ref<GlobalSettings>({
   autostart: false,
   language: "zh-CN",
   minimize_to_tray: true,
+  start_minimized_to_tray: false,
 });
 
 const saved = ref(true);
@@ -116,6 +117,23 @@ async function checkUpdate() {
             <input
               type="checkbox"
               v-model="settings.autostart"
+              @change="onSettingChange"
+            />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-info">
+            <span class="setting-label">启动后最小化到托盘</span>
+            <span class="setting-desc"
+              >启动时不显示主窗口，仅托盘图标（点击托盘图标打开）</span
+            >
+          </div>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              v-model="settings.start_minimized_to_tray"
               @change="onSettingChange"
             />
             <span class="toggle-slider"></span>
