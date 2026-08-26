@@ -45,7 +45,8 @@ fn is_modifier(vk: u32) -> bool {
     )
 }
 
-fn normalize_chord(keys: &[u32]) -> Vec<u32> {
+/// 将组合键规范为「侧别明确 + 修饰键在前」的 VK 序列（供语音注入与录入共用）。
+pub fn normalize_chord(keys: &[u32]) -> Vec<u32> {
     let set: HashSet<u32> = keys.iter().copied().collect();
     let mut out = Vec::new();
 
@@ -94,6 +95,15 @@ fn normalize_chord(keys: &[u32]) -> Vec<u32> {
     mains.sort();
     out.extend(mains);
     out
+}
+
+/// `normalize_chord` 的 u16 包装（语音 WinUHid 注入路径）。
+pub fn normalize_chord_vks(vks: &[u16]) -> Vec<u16> {
+    let raw: Vec<u32> = vks.iter().map(|&v| v as u32).collect();
+    normalize_chord(&raw)
+        .into_iter()
+        .map(|v| v as u16)
+        .collect()
 }
 
 pub fn vk_to_label(vk: u32) -> String {

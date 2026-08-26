@@ -12,6 +12,11 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { DeviceConfig, KeyAction } from "../types";
 import RemoteHotspot from "./RemoteHotspot.vue";
 import { MEDIA_PICK_KEYS, vkDisplayName } from "../utils/vkDisplay";
+import {
+  applyImePresetConfig,
+  VOICE_QUICK_PRESETS,
+  type VoiceQuickPreset,
+} from "../utils/imePreset";
 
 const props = defineProps<{
   config: DeviceConfig;
@@ -77,6 +82,67 @@ let unlistenProgress: UnlistenFn | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let applied = false;
 let resizeObs: ResizeObserver | null = null;
+let lineRaf: number | null = null;
+let micFlashTimer: ReturnType<typeof setTimeout> | null = null;
+
+const voiceQuickPresets = VOICE_QUICK_PRESETS;
+const micBindFlash = ref(false);
+const voiceQuickPressedId = ref<string | null>(null);
+
+function actionToVks(action: KeyAction): number[] | null {
+  if (!action || action.type === "None") return null;
+  if (action.type === "SingleKey") return [Number(action.value)];
+  if (action.type === "ComboKey" && Array.isArray(action.value)) {
+    return action.value.map((v) => Number(v));
+  }
+  return null;
+}
+
+function triggerMicBindFlash() {
+  micBindFlash.value = false;
+  void nextTick(() => {
+    if (micFlashTimer) clearTimeout(micFlashTimer);
+    micBindFlash.value = true;
+    micFlashTimer = setTimeout(() => {
+      micBindFlash.value = false;
+      micFlashTimer = null;
+    }, 1200);
+  });
+}
+
+function applyVoiceQuick(item: VoiceQuickPreset, e: MouseEvent) {
+  voiceQuickPressedId.value = item.id;
+  window.setTimeout(() => {
+    if (voiceQuickPressedId.value === item.id) voiceQuickPressedId.value = null;
+  }, 160);
+  const next = applyImePresetConfig(props.config, item.presetId);
+  emit("save", next);
+  (e.currentTarget as HTMLButtonElement).blur();
+  if (selectedId.value === "mic" || hoverId.value === "mic") {
+    void nextTick().then(scheduleUpdateLine);
+  }
+}
+
+function micBindingSignature(): string {
+  const mic = actionOf("mic");
+  const vks = actionToVks(mic);
+  return JSON.stringify({
+    vks,
+    mode: props.config.trigger_mode,
+    release: props.config.voice_release_behavior,
+  });
+}
+
+let lastMicBindingSig = micBindingSignature();
+
+watch(
+  () => micBindingSignature(),
+  (sig) => {
+    if (sig === lastMicBindingSig) return;
+    lastMicBindingSig = sig;
+    triggerMicBindFlash();
+  },
+);
 
 function setCardRef(id: string, el: unknown) {
   cardRefs.value[id] = (el as HTMLElement) || null;
@@ -185,23 +251,37 @@ function keyEdgeToward(
   return { x: r.right - stageBox.left, y };
 }
 
+/** 合并到下一帧，避免 ResizeObserver ↔ 改 SVG 尺寸反馈环把 WebView 卡死 */
+function scheduleUpdateLine() {
+  if (lineRaf != null) return;
+  lineRaf = requestAnimationFrame(() => {
+    lineRaf = null;
+    updateLine();
+  });
+}
+
 function updateLine() {
   const id = activeLineId.value;
   const stage = stageRef.value;
   if (!id || !stage) {
-    lineOpacity.value = 0;
-    linePath.value = "";
+    if (lineOpacity.value !== 0) lineOpacity.value = 0;
+    if (linePath.value) linePath.value = "";
     return;
   }
 
   const stageBox = stage.getBoundingClientRect();
-  svgSize.value = { w: stageBox.width, h: stageBox.height };
+  const w = Math.round(stageBox.width);
+  const h = Math.round(stageBox.height);
+  // 仅改 viewBox 坐标；SVG 用 CSS 铺满，禁止写 width/height 属性（易触发滚动条抖动环）
+  if (svgSize.value.w !== w || svgSize.value.h !== h) {
+    svgSize.value = { w, h };
+  }
 
   const card = cardRefs.value[id];
   const key = remoteRef.value?.keyEl?.(id) as HTMLElement | null;
   if (!card || !key) {
-    lineOpacity.value = 0;
-    linePath.value = "";
+    if (lineOpacity.value !== 0) lineOpacity.value = 0;
+    if (linePath.value) linePath.value = "";
     return;
   }
 
@@ -219,11 +299,14 @@ function updateLine() {
       ? { x: keyPt.x - dx * 0.25, y: keyPt.y }
       : { x: keyPt.x + dx * 0.25, y: keyPt.y };
 
-  linePath.value = `M ${cardPt.x} ${cardPt.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${keyPt.x} ${keyPt.y}`;
-  dotA.value = cardPt;
-  dotB.value = keyPt;
-  lineStrong.value = selectedId.value === id;
-  lineOpacity.value = lineStrong.value ? 1 : 0.45;
+  const nextPath = `M ${cardPt.x} ${cardPt.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${keyPt.x} ${keyPt.y}`;
+  const strong = selectedId.value === id;
+  const opacity = strong ? 1 : 0.45;
+  if (linePath.value !== nextPath) linePath.value = nextPath;
+  if (dotA.value.x !== cardPt.x || dotA.value.y !== cardPt.y) dotA.value = cardPt;
+  if (dotB.value.x !== keyPt.x || dotB.value.y !== keyPt.y) dotB.value = keyPt;
+  if (lineStrong.value !== strong) lineStrong.value = strong;
+  if (lineOpacity.value !== opacity) lineOpacity.value = opacity;
 }
 
 async function selectButton(id: string) {
@@ -373,7 +456,7 @@ function clearBinding(buttonId: string) {
 }
 
 watch([selectedId, hoverId], () => {
-  void nextTick().then(updateLine);
+  void nextTick().then(scheduleUpdateLine);
 });
 
 onMounted(async () => {
@@ -397,11 +480,11 @@ onMounted(async () => {
   }
 
   if (stageRef.value) {
-    resizeObs = new ResizeObserver(() => updateLine());
+    resizeObs = new ResizeObserver(() => scheduleUpdateLine());
     resizeObs.observe(stageRef.value);
   }
-  stageRef.value?.addEventListener("scroll", updateLine, { passive: true });
-  window.addEventListener("resize", updateLine);
+  stageRef.value?.addEventListener("scroll", scheduleUpdateLine, { passive: true });
+  window.addEventListener("resize", scheduleUpdateLine);
   window.addEventListener("keydown", blockBrowserKeysDuringCapture, true);
   window.addEventListener("keyup", blockBrowserKeysDuringCapture, true);
 });
@@ -411,8 +494,16 @@ onUnmounted(() => {
   unlistenCaptured?.();
   unlistenProgress?.();
   resizeObs?.disconnect();
-  stageRef.value?.removeEventListener("scroll", updateLine);
-  window.removeEventListener("resize", updateLine);
+  if (lineRaf != null) {
+    cancelAnimationFrame(lineRaf);
+    lineRaf = null;
+  }
+  if (micFlashTimer) {
+    clearTimeout(micFlashTimer);
+    micFlashTimer = null;
+  }
+  stageRef.value?.removeEventListener("scroll", scheduleUpdateLine);
+  window.removeEventListener("resize", scheduleUpdateLine);
   window.removeEventListener("keydown", blockBrowserKeysDuringCapture, true);
   window.removeEventListener("keyup", blockBrowserKeysDuringCapture, true);
   if (capturing.value) {
@@ -426,9 +517,7 @@ onUnmounted(() => {
     <div ref="stageRef" class="mapping-stage">
       <svg
         class="line-layer"
-        :width="svgSize.w"
-        :height="svgSize.h"
-        :viewBox="`0 0 ${svgSize.w} ${svgSize.h}`"
+        :viewBox="`0 0 ${svgSize.w || 1} ${svgSize.h || 1}`"
         aria-hidden="true"
       >
         <path
@@ -558,7 +647,13 @@ onUnmounted(() => {
           <div class="map-card-main">
             <span class="map-name">{{ btn.label }}</span>
             <span
-              :class="['map-bind', { unbound: btn.action.type === 'None' }]"
+              :class="[
+                'map-bind',
+                {
+                  unbound: btn.action.type === 'None',
+                  'mic-bind-flash': btn.id === 'mic' && micBindFlash,
+                },
+              ]"
             >
               {{ actionLabel(btn.action) }}
             </span>
@@ -612,6 +707,28 @@ onUnmounted(() => {
             </p>
           </div>
         </div>
+
+        <div class="voice-quick-setup" aria-label="语音键快速设置">
+          <p class="voice-quick-label">将语音键设置为：</p>
+          <div class="voice-quick-grid">
+            <button
+              v-for="item in voiceQuickPresets"
+              :key="item.id"
+              type="button"
+              class="voice-quick-btn"
+              :class="{ pressed: voiceQuickPressedId === item.id }"
+              :aria-label="`将语音键设置为 ${item.segments.join(' 加 ')}`"
+              @click="applyVoiceQuick(item, $event)"
+            >
+              <span class="voice-quick-chord">
+                <template v-for="(seg, segIdx) in item.segments" :key="seg">
+                  <span v-if="segIdx > 0" class="chord-plus" aria-hidden="true">+</span>
+                  <kbd class="key-cap-chip">{{ seg }}</kbd>
+                </template>
+              </span>
+            </button>
+          </div>
+        </div>
       </aside>
     </div>
   </div>
@@ -640,6 +757,8 @@ onUnmounted(() => {
 .line-layer {
   position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
   pointer-events: none;
   z-index: 5;
   overflow: visible;
@@ -730,6 +849,140 @@ onUnmounted(() => {
 .map-bind.unbound {
   background: transparent;
   color: #94a3b8;
+}
+
+@keyframes mic-bind-flash {
+  0%,
+  100% {
+    background: #f1f5f9;
+    color: #334155;
+    box-shadow: none;
+  }
+  33% {
+    background: #dbeafe;
+    color: #1d4ed8;
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.22);
+  }
+  66% {
+    background: #eff6ff;
+    color: #2563eb;
+    box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.18);
+  }
+}
+
+.map-bind.mic-bind-flash:not(.unbound) {
+  animation: mic-bind-flash 0.38s ease-in-out 3;
+}
+
+.voice-quick-setup {
+  margin-top: 4px;
+  padding: 10px 10px 11px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: linear-gradient(180deg, #fafbfd 0%, #f8fafc 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+.voice-quick-label {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+  letter-spacing: 0.01em;
+}
+
+.voice-quick-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+
+.voice-quick-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 6px 8px;
+  border: 1px solid #b8c5d6;
+  border-radius: 9px;
+  background: #eef2f7;
+  cursor: pointer;
+  transition:
+    background 0.14s ease,
+    border-color 0.14s ease,
+    box-shadow 0.14s ease,
+    transform 0.1s ease;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.65) inset,
+    0 1px 2px rgba(15, 23, 42, 0.05);
+}
+
+.voice-quick-btn:hover {
+  background: #e8eef6;
+  border-color: #9fb0c8;
+}
+
+.voice-quick-btn:focus {
+  outline: none;
+}
+
+.voice-quick-btn:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
+.voice-quick-btn:active,
+.voice-quick-btn.pressed {
+  transform: translateY(1px);
+  background: #dfe7f2;
+  border-color: #8fa3be;
+  box-shadow: inset 0 2px 4px rgba(15, 23, 42, 0.08);
+}
+
+.voice-quick-chord {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 3px;
+  max-width: 100%;
+}
+
+.chord-plus {
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  line-height: 1;
+  user-select: none;
+}
+
+.key-cap-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  border: 1px solid #dbe3ee;
+  background: #fff;
+  color: #334155;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  box-shadow:
+    0 1px 0 #edf2f7,
+    0 2px 3px rgba(15, 23, 42, 0.06);
+  transition:
+    transform 0.1s ease,
+    box-shadow 0.1s ease;
+}
+
+.voice-quick-btn:active .key-cap-chip,
+.voice-quick-btn.pressed .key-cap-chip {
+  transform: translateY(1px);
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.1);
 }
 
 .map-card-actions {

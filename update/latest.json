@@ -1,8 +1,8 @@
 {
-  "version": "1.3.16",
-  "notes": "v1.3.16：合并社区 PR——启动黑框闪烁修复、HID Tap 日志降级；新增「启动后最小化到托盘」；修正自启最小化与正常启动显示时序。",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.3.16",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.3.16",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.3.16/Voice%20VibeCoding_1.3.16_x64-setup.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.3.16/Voice.VibeCoding_1.3.16_x64-setup.exe"
+  "version": "1.5.0",
+  "notes": "v1.5.0：\n- 增加豆包、千问等语音输入法预设与设置说明\n- 新增「修复虚拟键盘」与 WinUHid 状态显示\n- 应用内更新下载（进度条）并自动启动安装程序\n- 键位页语音键快速设置，一键应用常用组合\n- WinUHid 组合键分步注入、粘键防护与内嵌运行时",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.0",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.0",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.5.0/Voice%20VibeCoding_1.5.0_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.5.0/Voice.VibeCoding_1.5.0_x64-setup.exe"
 }

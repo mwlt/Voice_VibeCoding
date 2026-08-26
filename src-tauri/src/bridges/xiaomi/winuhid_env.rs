@@ -1,0 +1,361 @@
+//! WinUHid 虚拟键盘环境：检测、部署 DLL、提权安装内嵌驱动包。
+//!
+//! 豆包/千问等输入法会过滤 SendInput；语音唤醒需要 WinUHid.dll + UMDF 驱动（`\\.\WinUHid`）。
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WinUHidEnvStatus {
+    pub ready: bool,
+    pub dll_found: bool,
+    pub dll_path: Option<String>,
+    pub driver_ready: bool,
+    pub embedded_driver_available: bool,
+    pub package_dir: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WinUHidActionResult {
+    pub ok: bool,
+    pub ready: bool,
+    pub needs_reboot: bool,
+    pub message: String,
+}
+
+fn asset_candidates(relative: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            out.push(dir.join("assets").join("winuhid").join(relative));
+            out.push(
+                dir.join("resources")
+                    .join("assets")
+                    .join("winuhid")
+                    .join(relative),
+            );
+            out.push(
+                dir.join("_up_")
+                    .join("resources")
+                    .join("assets")
+                    .join("winuhid")
+                    .join(relative),
+            );
+            if let Some(parent) = dir.parent() {
+                out.push(
+                    parent
+                        .join("resources")
+                        .join("assets")
+                        .join("winuhid")
+                        .join(relative),
+                );
+            }
+            // 旁路部署：exe 同目录
+            if relative == "WinUHid.dll" {
+                out.push(dir.join("WinUHid.dll"));
+            }
+        }
+    }
+    if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
+        out.push(
+            PathBuf::from(manifest)
+                .join("assets")
+                .join("winuhid")
+                .join(relative),
+        );
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        if relative == "WinUHid.dll" {
+            out.push(
+                PathBuf::from(local)
+                    .join("com.remote-bridge-hub.app")
+                    .join("winuhid")
+                    .join("WinUHid.dll"),
+            );
+        }
+    }
+    out
+}
+
+pub fn find_dll() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("REMOTE_BRIDGE_WINUHID_DLL") {
+        let t = p.trim();
+        if !t.is_empty() {
+            let pb = PathBuf::from(t);
+            if pb.is_file() {
+                return Some(pb);
+            }
+        }
+    }
+    asset_candidates("WinUHid.dll")
+        .into_iter()
+        .find(|p| p.is_file())
+}
+
+pub fn find_driver_package_dir() -> Option<PathBuf> {
+    for cand in asset_candidates("WinUHid.dll") {
+        let Some(winuhid) = cand.parent() else {
+            continue;
+        };
+        let base = winuhid.join("driver");
+        let inf = base.join("WinUHidDriver.inf");
+        let dll = base.join("WinUHidDriver.dll");
+        let cat = base.join("WinUHidDriver.cat");
+        if inf.is_file() && dll.is_file() && cat.is_file() {
+            return Some(base);
+        }
+    }
+    None
+}
+
+pub fn find_install_script() -> Option<PathBuf> {
+    asset_candidates("install-winuhid.ps1")
+        .into_iter()
+        .find(|p| p.is_file())
+}
+
+/// 把内嵌 WinUHid.dll 拷到 exe 旁与 LocalAppData，便于 LoadLibrary。
+pub fn deploy_dll_beside_exe() -> Result<Option<PathBuf>, String> {
+    let src = find_dll().ok_or_else(|| "内嵌 WinUHid.dll 不可用".to_string())?;
+    let mut deployed = None;
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let dst = dir.join("WinUHid.dll");
+            if should_copy(&src, &dst) {
+                fs::copy(&src, &dst).map_err(|e| format!("copy WinUHid.dll beside exe: {e}"))?;
+                log::info!("WinUHid.dll deployed beside exe: {}", dst.display());
+            }
+            deployed = Some(dst);
+        }
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let dir = PathBuf::from(local)
+            .join("com.remote-bridge-hub.app")
+            .join("winuhid");
+        fs::create_dir_all(&dir).map_err(|e| format!("create winuhid dir: {e}"))?;
+        let dst = dir.join("WinUHid.dll");
+        if should_copy(&src, &dst) {
+            fs::copy(&src, &dst).map_err(|e| format!("copy WinUHid.dll to LocalAppData: {e}"))?;
+        }
+        if deployed.is_none() {
+            deployed = Some(dst);
+        }
+    }
+    Ok(deployed)
+}
+
+fn should_copy(src: &Path, dst: &Path) -> bool {
+    if !dst.is_file() {
+        return true;
+    }
+    let Ok(sm) = fs::metadata(src) else {
+        return false;
+    };
+    let Ok(dm) = fs::metadata(dst) else {
+        return true;
+    };
+    sm.len() != dm.len()
+}
+
+#[cfg(target_os = "windows")]
+fn probe_driver_device() -> bool {
+    // Test-Path 对 \\.\WinUHid 不可靠；直接尝试打开设备句柄。
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(r"\\.\WinUHid")
+        .map(|f| {
+            drop(f);
+            true
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn probe_driver_device() -> bool {
+    false
+}
+
+pub fn env_status() -> WinUHidEnvStatus {
+    let dll = find_dll();
+    let dll_found = dll.is_some();
+    let package = find_driver_package_dir();
+    let embedded = package.is_some() && find_install_script().is_some();
+    // hid_injector 成功打开设备 = 真正可用
+    let injector_ok = crate::bridges::xiaomi::hid_injector::is_available();
+    let driver_ready = injector_ok || probe_driver_device();
+    let ready = injector_ok;
+    let message = if ready {
+        "虚拟键盘（WinUHid）已就绪，语音键可按硬件方式注入。".into()
+    } else if dll_found && !driver_ready && embedded {
+        "已找到 WinUHid.dll，但驱动未就绪。请点「修复虚拟键盘」安装内嵌驱动（需管理员确认）。".into()
+    } else if !dll_found && embedded {
+        "未找到 WinUHid.dll。请点「修复虚拟键盘」自动部署并安装驱动。".into()
+    } else if dll_found && driver_ready && !injector_ok {
+        "驱动设备可访问，但注入器未打开。可再点一次「修复虚拟键盘」或重启桥接。".into()
+    } else {
+        "虚拟键盘环境不可用：豆包/千问等输入法会忽略普通模拟按键，语音唤醒需要 WinUHid。".into()
+    };
+    WinUHidEnvStatus {
+        ready,
+        dll_found,
+        dll_path: dll.map(|p| p.display().to_string()),
+        driver_ready,
+        embedded_driver_available: embedded,
+        package_dir: package.map(|p| p.display().to_string()),
+        message,
+    }
+}
+
+fn script_result_line(text: &str) -> Option<&str> {
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix("Result: ").map(str::trim))
+}
+
+/// 启动时尽力部署 DLL 并尝试打开注入器（不弹 UAC）。
+pub fn ensure_runtime_quiet() {
+    match deploy_dll_beside_exe() {
+        Ok(Some(p)) => {
+            if let Ok(s) = p.into_os_string().into_string() {
+                std::env::set_var("REMOTE_BRIDGE_WINUHID_DLL", s);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => log::warn!("WinUHid DLL deploy skipped: {e}"),
+    }
+    crate::bridges::xiaomi::hid_injector::reset_and_retry();
+    if crate::bridges::xiaomi::hid_injector::is_available() {
+        log::info!("WinUHid runtime ready");
+    } else {
+        log::warn!(
+            "WinUHid not ready at startup — voice IME wake needs「修复虚拟键盘」: {}",
+            env_status().message
+        );
+    }
+}
+
+pub fn repair_embedded() -> Result<WinUHidActionResult, String> {
+    let _ = deploy_dll_beside_exe()?;
+    let package = find_driver_package_dir()
+        .ok_or_else(|| "内嵌 WinUHid 驱动包不可用（缺少 driver/ 下的 inf/dll/cat）".to_string())?;
+    let script = find_install_script().ok_or_else(|| "未找到 install-winuhid.ps1".to_string())?;
+    let dll = find_dll().ok_or_else(|| "未找到 WinUHid.dll".to_string())?;
+
+    log::info!(
+        "WinUHid repair: script={} package={} dll={}",
+        script.display(),
+        package.display(),
+        dll.display()
+    );
+
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args([
+        "-NoProfile",
+        "-WindowStyle",
+        "Hidden",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        &script.display().to_string(),
+        "-Mode",
+        "Install",
+        "-PackageDir",
+        &package.display().to_string(),
+        "-DllSource",
+        &dll.display().to_string(),
+    ]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("启动 WinUHid 安装脚本失败: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stdout.is_empty() {
+        log::info!("WinUHid install stdout:\n{stdout}");
+    }
+    if !stderr.is_empty() {
+        log::warn!("WinUHid install stderr:\n{stderr}");
+    }
+
+    let result_raw = script_result_line(&stdout).unwrap_or("").to_string();
+    let needs_reboot = result_raw.to_ascii_lowercase().contains("restart required")
+        || result_raw.contains("需要重启")
+        || output.status.code() == Some(3010);
+
+    // 安装后重试打开设备
+    crate::bridges::xiaomi::hid_injector::reset_and_retry();
+    for _ in 0..20 {
+        if crate::bridges::xiaomi::hid_injector::is_available() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+        crate::bridges::xiaomi::hid_injector::reset_and_retry();
+    }
+    let ready = crate::bridges::xiaomi::hid_injector::is_available();
+
+    let message = if ready {
+        "虚拟键盘已就绪：WinUHid 驱动可用，语音键将按硬件方式注入。".into()
+    } else if needs_reboot {
+        "驱动已安装，必须重启 Windows 后虚拟键盘才会生效。重启后再点一次「修复虚拟键盘」。".into()
+    } else if !output.status.success() {
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !result_raw.is_empty() {
+            result_raw.clone()
+        } else {
+            stdout
+        };
+        format!(
+            "虚拟键盘修复未完成 (code={:?})。{detail}",
+            output.status.code()
+        )
+    } else {
+        format!(
+            "脚本已执行，但 WinUHid 仍不可用。{} 可查看日志或重启后再试。",
+            if result_raw.is_empty() {
+                String::new()
+            } else {
+                format!("({result_raw})")
+            }
+        )
+    };
+
+    Ok(WinUHidActionResult {
+        ok: ready || needs_reboot,
+        ready,
+        needs_reboot,
+        message,
+    })
+}
+
+pub fn check_or_repair() -> WinUHidActionResult {
+    let status = env_status();
+    if status.ready {
+        return WinUHidActionResult {
+            ok: true,
+            ready: true,
+            needs_reboot: false,
+            message: status.message,
+        };
+    }
+    match repair_embedded() {
+        Ok(r) => r,
+        Err(e) => WinUHidActionResult {
+            ok: false,
+            ready: false,
+            needs_reboot: false,
+            message: e,
+        },
+    }
+}

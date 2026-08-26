@@ -42,7 +42,7 @@ fn focus_main_window(app: &tauri::AppHandle) {
         {
             let w = window.clone();
             let _ = w.with_webview(move |webview| unsafe {
-                webview.controller().SetIsVisible(true);
+                let _ = webview.controller().SetIsVisible(true);
             });
         }
         let _ = window.unminimize();
@@ -99,6 +99,14 @@ pub fn run() {
             bridges::xiaomi::voice_meter::bind_app(app.handle().clone());
             bridges::xiaomi::conflict_guard::bind_app(app.handle().clone());
 
+            // 部署内嵌 WinUHid.dll 并尝试打开虚拟键盘（不弹 UAC；缺驱动时提示修复）
+            std::thread::Builder::new()
+                .name("winuhid-ensure".into())
+                .spawn(|| {
+                    bridges::xiaomi::winuhid_env::ensure_runtime_quiet();
+                })
+                .ok();
+
             if let Some(window) = app.get_webview_window("main") {
                 // 关闭窗口：minimize_to_tray=true 则隐藏；false 则真正退出
                 let app_handle = app.handle().clone();
@@ -134,7 +142,7 @@ pub fn run() {
                     {
                         let w = window.clone();
                         let _ = w.with_webview(move |webview| unsafe {
-                            webview.controller().SetIsVisible(false);
+                            let _ = webview.controller().SetIsVisible(false);
                         });
                     }
                     let _ = window.hide();
@@ -150,7 +158,7 @@ pub fn run() {
                             {
                                 let w = win.clone();
                                 let _ = w.with_webview(move |webview| unsafe {
-                                    webview.controller().SetIsVisible(true);
+                                    let _ = webview.controller().SetIsVisible(true);
                                 });
                             }
                             let _ = win.show();
@@ -167,7 +175,7 @@ pub fn run() {
                             {
                                 let w = win.clone();
                                 let _ = w.with_webview(move |webview| unsafe {
-                                    webview.controller().SetIsVisible(true);
+                                    let _ = webview.controller().SetIsVisible(true);
                                 });
                             }
                             let _ = win.show();
@@ -267,6 +275,8 @@ pub fn run() {
             ipc::commands::check_xiaomi_voice_env,
             ipc::commands::get_xiaomi_voice_env_status,
             ipc::commands::repair_xiaomi_voice_env,
+            ipc::commands::get_xiaomi_winuhid_status,
+            ipc::commands::repair_xiaomi_winuhid,
             ipc::commands::open_logs_folder,
             ipc::commands::get_app_log,
             ipc::commands::open_app_log,
@@ -278,6 +288,7 @@ pub fn run() {
             ipc::update_cmds::check_app_update,
             ipc::update_cmds::get_app_update_state,
             ipc::update_cmds::ignore_app_update,
+            ipc::update_cmds::download_app_update,
             ipc::commands::webview_ping,
         ])
         .build(tauri::generate_context!())

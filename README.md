@@ -24,7 +24,7 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 
 
-**v1.3.16** · Windows 桌面应用
+**v1.5.0** · Windows 桌面应用
 
 把小米遥控器 2 Pro（及预留的 T1 / 汉王 V60）接到电脑：按键可映射成键盘快捷键，语音可送到输入法听写。
 
@@ -60,7 +60,11 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 | HID 注入闪窗 | 提权注入 WUDFHost 时隐藏控制台闪窗（UAC 仍保留） | 优化 |
 | 音频信号波形 | 设置页实时显示 BLE 解码电平 / 波形，便于判断语音是否真正进机 | 增强 |
 | 虚拟声卡检测与安装 | 应用内检测 VB-CABLE，支持内嵌驱动或官网安装指引，结果写回主机状态 | 增强 |
-| 输入法设置引导 | 「输入法设置」对照微信等快捷键与映射，减少听写配对踩坑 | 增强 |
+| 输入法设置引导 | 「输入法设置」分 Tab：微信 / 豆包 / 千问 / 常见问题；豆包、千问等语音输入法一键预设与说明 | 增强 |
+| 语音键快速设置 | 键位映射页一键设置常用语音组合（微信按住、千问 Win+Alt、豆包免按等） | 新增 |
+| 修复虚拟键盘 | 「修复虚拟键盘」修复 WinUHid 虚拟键盘；状态栏显示 WinUHid 就绪/异常 | 新增 |
+| 应用内更新 | 顶栏版本旁提示新版本；弹窗展示更新内容；软件内下载安装包（进度条）并自动启动安装程序 | 新增 |
+| 语音键注入稳态 | Hold 路径用 VoiceChordState 防粘键；WinUHid 组合键分步 press/release，内嵌运行时与驱动 | 优化 |
 | 单实例 | 再次启动只激活已有窗口，降低双开抢端口 | 增强 |
 | 应用内日志 | 界面直接查看 / 复制 / 打开日志，不必只翻 `%APPDATA%` 文件 | 增强 |
 | 统一桌面壳 | Rust + Tauri 2 + Vue 单安装包、托盘与设置页一体，免 Python 运行时 | 增强 |
@@ -82,15 +86,15 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 ## 下载安装包
 
-正式安装包在两边的 Release 页（当前 **v1.3.16**）：
+正式安装包在两边的 Release 页（当前 **v1.5.0**）：
 
-- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.3.16)（国内优先）
-- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.3.16)
+- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.0)（国内优先）
+- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.0)
 
 常用文件：
 
-- `Voice VibeCoding_1.3.16_x64-setup.exe`（NSIS）
-- `Voice VibeCoding_1.3.16_x64_zh-CN.msi`
+- `Voice VibeCoding_1.5.0_x64-setup.exe`（NSIS）
+- `Voice VibeCoding_1.5.0_x64_zh-CN.msi`
 
 安装时若提示无法覆盖 `remote-bridge-hub.exe`，请先退出本软件（含托盘）再重试。
 
@@ -217,11 +221,11 @@ npm run tauri:build
 | 类型       | 路径                                                                            |
 | -------- | ----------------------------------------------------------------------------- |
 | 可执行文件    | `src-tauri/target/release/remote-bridge-hub.exe`                              |
-| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.3.16_x64_zh-CN.msi`  |
-| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.3.16_x64-setup.exe` |
+| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.5.0_x64_zh-CN.msi`  |
+| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.5.0_x64-setup.exe` |
 
 
-发新版时请同步更新仓库根目录 `update/latest.json`（提高 `version`，填写 Gitee/GitHub 页面与安装包直链）。应用会优先读 Gitee raw，失败再读 GitHub raw；有更新时在「小米遥控器 2 Pro」标题旁显示蓝色「更新」入口。
+发新版时请同步更新仓库根目录 `update/latest.json`（提高 `version`，填写 Gitee/GitHub 页面与安装包直链）。应用会优先读 Gitee raw，失败再读 GitHub raw；有更新时在顶栏版本号旁显示「新版本」与「查看更新内容」，并支持软件内下载安装包。
 
 
 ---
@@ -255,6 +259,21 @@ npm run tauri:build
 - 若同时运行旧版 Python 桥接或其它实例，可能抢端口或 BLE，应用会提示冲突
 
 输入法侧请将麦克风选为 **CABLE Output (VB-Audio Virtual Cable)**，且快捷键与本应用「语音键映射」一致（见应用内「输入法设置」）。
+
+### 输入法预设（一键应用）
+
+首页「输入法设置」提供常用预设（与输入法内快捷键保持一致即可）：
+
+| 预设 | 本软件快捷键 | 触发 | 说明 |
+| --- | --- | --- | --- |
+| 微信 · 按住说话 | 左 Ctrl + 左 Win | 按住 | 微信输入法按住说话 |
+| 豆包 · 长按 | 右 Alt | 按住 | 长按语音 |
+| 豆包 · 免按 | 右 Alt + 空格 | 点击 | 免按/开关式 |
+| 千问 · 右 Alt | 右 Alt | 按住 | 按住说话 |
+| 千问 · Win+Alt | 左 Win + 左 Alt | 按住 | 组合键按住 |
+| 千问 · Ctrl+Win | 左 Ctrl + 左 Win | 按住 | 组合键按住 |
+
+键位映射页「语音键快速设置」可一键应用上表常用组合。其它输入法：在按键映射里设成相同组合，并选择「按住」或「点击」。详见应用内「常见问题」Tab 与 `docs/IME_PROFILE_PLAN.md`。
 
 ---
 

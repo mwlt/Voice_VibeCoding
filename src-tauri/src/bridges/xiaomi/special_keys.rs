@@ -9,6 +9,10 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use std::time::Duration;
 
+/// 钩子线程：重新 SetWindowsHookEx，把自己挂到链头（最后安装 = 最先调用）。
+#[cfg(target_os = "windows")]
+const WM_BUMP_HOOK_FRONT: u32 = 0x8000 + 71; // WM_APP + 71
+
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 static HID_TAP_READY: AtomicBool = AtomicBool::new(false);
@@ -49,6 +53,25 @@ pub fn hid_tap_ready() -> bool {
 
 pub fn set_hook_enabled(enabled: bool) {
     HOOK_ENABLED.store(enabled, Ordering::Release);
+}
+
+/// 语音注入前调用：把本进程 LL 钩子顶到链头，便于清 INJECTED 后输入法仍能看到事件。
+pub fn bump_hook_to_front() {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
+        // 语音唤起依赖钩子清 INJECTED；即使配置关掉抑制钩子也临时拉起
+        HOOK_ENABLED.store(true, Ordering::Release);
+        let tid = HOOK_THREAD_ID.load(Ordering::Acquire);
+        if tid == 0 {
+            start_special_key_hook();
+            return;
+        }
+        unsafe {
+            let _ = PostThreadMessageW(tid, WM_BUMP_HOOK_FRONT, WPARAM(0), LPARAM(0));
+        }
+    }
 }
 
 /// 诊断/录入：钩子线程是否在跑
@@ -306,6 +329,23 @@ fn hook_loop() {
             let ret = GetMessageW(&mut msg, None, 0, 0);
             if ret.0 == -1 || ret.0 == 0 {
                 break;
+            }
+            if msg.message == WM_BUMP_HOOK_FRONT {
+                let old = load_hook();
+                if !old.is_invalid() {
+                    let _ = UnhookWindowsHookEx(old);
+                }
+                match SetWindowsHookExW(WH_KEYBOARD_LL, Some(proc), None, 0) {
+                    Ok(h) => {
+                        store_hook(h);
+                        log::debug!("XIAOMI SPECIAL KEY hook bumped to chain head");
+                    }
+                    Err(e) => {
+                        store_hook(HHOOK(std::ptr::null_mut()));
+                        log::error!("XIAOMI SPECIAL KEY bump SetWindowsHookExW failed: {e}");
+                    }
+                }
+                continue;
             }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);

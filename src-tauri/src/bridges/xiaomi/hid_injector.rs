@@ -165,6 +165,31 @@ fn vk_usage(vk: u16) -> Option<u8> {
     })
 }
 
+/// 分步按下时的修饰键顺序：Ctrl → Shift → Win → Alt（Win 先于 Alt，避免先按 Alt 激活菜单栏）。
+fn modifier_stagger_rank(vk: u16) -> u8 {
+    match vk {
+        0x11 | 0xA2 | 0xA3 => 0,
+        0x10 | 0xA0 | 0xA1 => 1,
+        0x5B | 0x5C => 2,
+        0x12 | 0xA4 | 0xA5 => 3,
+        _ => 4,
+    }
+}
+
+fn split_modifiers_and_keys(vks: &[u16]) -> (Vec<u16>, Vec<u16>) {
+    let mut mods = Vec::new();
+    let mut keys = Vec::new();
+    for &vk in vks {
+        if modifier_bit(vk).is_some() {
+            mods.push(vk);
+        } else {
+            keys.push(vk);
+        }
+    }
+    mods.sort_by_key(|vk| modifier_stagger_rank(*vk));
+    (mods, keys)
+}
+
 fn build_keyboard_report(vks: &[u16]) -> Result<[u8; 8], String> {
     let mut modifier = 0u8;
     let mut usages = Vec::new();
@@ -191,6 +216,16 @@ fn build_keyboard_report(vks: &[u16]) -> Result<[u8; 8], String> {
     Ok(report)
 }
 
+/// 修复安装后允许重新探测 DLL/驱动
+pub fn reset_and_retry() {
+    {
+        let mut g = DEVICES.lock();
+        *g = None;
+    }
+    INIT_TRIED.store(false, Ordering::SeqCst);
+    let _ = ensure_init();
+}
+
 /// 尝试初始化 WinUHid（幂等）；无 DLL/驱动时保持关闭
 pub fn ensure_init() -> bool {
     if DEVICES.lock().is_some() {
@@ -208,7 +243,7 @@ pub fn ensure_init() -> bool {
                 true
             }
             Err(e) => {
-                log::warn!("WinUHid unavailable, SendInput fallback: {e}");
+                log::warn!("WinUHid unavailable: {e}");
                 false
             }
         }
@@ -221,6 +256,11 @@ pub fn ensure_init() -> bool {
 
 pub fn is_available() -> bool {
     DEVICES.lock().is_some() || ensure_init()
+}
+
+/// 仅读缓存，不触发 LoadLibrary / CreateDevice（供 UI 轮询，避免卡 UI/IPC）
+pub fn is_ready_cached() -> bool {
+    DEVICES.lock().is_some()
 }
 
 /// 对齐 Python `tap`：优先 WinUHid，失败返回 false 由调用方 SendInput
@@ -241,6 +281,60 @@ pub fn tap_vks(vks: &[u16], hold_ms: u64) -> bool {
     true
 }
 
+const MOD_STAGGER_MS: u64 = 4;
+
+fn press_keyboard(dev: &Devices, vks: &[u16]) -> Result<(), String> {
+    let (mods, keys) = split_modifiers_and_keys(vks);
+    if mods.len() <= 1 {
+        let report = build_keyboard_report(vks)?;
+        return submit(dev, dev.keyboard, &report);
+    }
+    // 多修饰键：逐步叠加，模拟真实按键时序（千问 Win+Alt / Ctrl+Win 依赖此路径）
+    for step in 1..=mods.len() {
+        let partial: Vec<u16> = mods
+            .iter()
+            .take(step)
+            .chain(keys.iter())
+            .copied()
+            .collect();
+        let report = build_keyboard_report(&partial)?;
+        submit(dev, dev.keyboard, &report)?;
+        if step < mods.len() {
+            std::thread::sleep(Duration::from_millis(MOD_STAGGER_MS));
+        }
+    }
+    Ok(())
+}
+
+fn release_keyboard(dev: &Devices, vks: &[u16]) -> Result<(), String> {
+    let (mods, keys) = split_modifiers_and_keys(vks);
+    if mods.is_empty() {
+        return submit(dev, dev.keyboard, &[0u8; 8]);
+    }
+    if mods.len() <= 1 {
+        return submit(dev, dev.keyboard, &[0u8; 8]);
+    }
+    // 逆序松开：先放 Alt/Win，最后放 Ctrl，避免 Alt 单键残留触发菜单
+    for held in (0..mods.len()).rev() {
+        if held == 0 {
+            submit(dev, dev.keyboard, &[0u8; 8])?;
+        } else {
+            let partial: Vec<u16> = mods
+                .iter()
+                .take(held)
+                .chain(keys.iter())
+                .copied()
+                .collect();
+            let report = build_keyboard_report(&partial)?;
+            submit(dev, dev.keyboard, &report)?;
+        }
+        if held > 0 {
+            std::thread::sleep(Duration::from_millis(MOD_STAGGER_MS));
+        }
+    }
+    Ok(())
+}
+
 pub fn press(vks: &[u16]) -> Result<(), String> {
     ensure_init();
     let guard = DEVICES.lock();
@@ -254,8 +348,7 @@ pub fn press(vks: &[u16]) -> Result<(), String> {
         let report = consumer_usage(usage_vk).unwrap().to_le_bytes();
         return submit(dev, dev.consumer, &report);
     }
-    let report = build_keyboard_report(vks)?;
-    submit(dev, dev.keyboard, &report)
+    press_keyboard(dev, vks)
 }
 
 pub fn release(vks: &[u16]) -> Result<(), String> {
@@ -267,7 +360,7 @@ pub fn release(vks: &[u16]) -> Result<(), String> {
     if vks.iter().any(|vk| consumer_usage(*vk).is_some()) {
         return submit(dev, dev.consumer, &[0, 0]);
     }
-    submit(dev, dev.keyboard, &[0u8; 8])
+    release_keyboard(dev, vks)
 }
 
 fn submit(dev: &Devices, handle: *mut c_void, report: &[u8]) -> Result<(), String> {
@@ -452,5 +545,23 @@ mod tests {
     fn consumer_volume() {
         assert_eq!(consumer_usage(0xAF), Some(0xE9));
         assert_eq!(consumer_usage(0xB7), Some(0x0192));
+    }
+
+    #[test]
+    fn keyboard_report_win_alt_and_ctrl_win() {
+        let win_alt = build_keyboard_report(&[0x5B, 0xA4]).unwrap();
+        assert_eq!(win_alt[0], 0x0C); // Left GUI | Left Alt
+
+        let ctrl_win = build_keyboard_report(&[0xA2, 0x5B]).unwrap();
+        assert_eq!(ctrl_win[0], 0x09); // Left Ctrl | Left GUI
+    }
+
+    #[test]
+    fn modifier_stagger_order_win_before_alt() {
+        let (mods, _) = split_modifiers_and_keys(&[0xA4, 0x5B]);
+        assert_eq!(mods, vec![0x5B, 0xA4]);
+
+        let (mods, _) = split_modifiers_and_keys(&[0x5B, 0xA2]);
+        assert_eq!(mods, vec![0xA2, 0x5B]);
     }
 }

@@ -3,12 +3,16 @@ import { ref, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import { storeToRefs } from "pinia";
 import { useBridgeStore } from "../stores/bridge";
+import { useAppUpdateStore } from "../stores/appUpdate";
 import type { BridgeStatus } from "../types";
 
 const route = useRoute();
 const router = useRouter();
 const bridge = useBridgeStore();
+const appUpdate = useAppUpdateStore();
+const { updateInfo } = storeToRefs(appUpdate);
 
 const showQuitConfirm = ref(false);
 const quitting = ref(false);
@@ -32,7 +36,7 @@ onMounted(async () => {
   try {
     appVersion.value = `v${await getVersion()}`;
   } catch {
-    appVersion.value = "v1.3.16";
+    appVersion.value = "v1.5.0";
   }
 });
 
@@ -70,6 +74,12 @@ async function confirmQuit() {
     <div class="brand">
       <span class="brand-name">Voice VibeCoding</span>
       <span class="brand-ver">{{ appVersion }}</span>
+      <template v-if="updateInfo?.updateAvailable">
+        <span class="brand-update-badge">新版本 V{{ updateInfo.latestVersion }}</span>
+        <button type="button" class="brand-update-btn" @click="appUpdate.openModal()">
+          查看更新内容
+        </button>
+      </template>
     </div>
 
     <nav class="nav-row">
@@ -141,7 +151,7 @@ async function confirmQuit() {
 
 .brand {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   flex-shrink: 0;
 }
@@ -157,6 +167,32 @@ async function confirmQuit() {
 .brand-ver {
   font-size: 11px;
   color: #94a3b8;
+}
+
+.brand-update-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: #93c5fd;
+  white-space: nowrap;
+}
+
+.brand-update-btn {
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid rgba(147, 197, 253, 0.45);
+  border-radius: 4px;
+  background: rgba(59, 130, 246, 0.15);
+  color: #bfdbfe;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.brand-update-btn:hover {
+  background: rgba(59, 130, 246, 0.28);
+  color: #fff;
 }
 
 .nav-row {

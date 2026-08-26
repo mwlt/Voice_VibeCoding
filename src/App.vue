@@ -4,6 +4,10 @@ import { RouterView, useRouter } from "vue-router";
 import { listen, emit, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import SideNav from "./components/SideNav.vue";
+import AppUpdateModal from "./components/AppUpdateModal.vue";
+import { useAppUpdateStore } from "./stores/appUpdate";
+
+const appUpdate = useAppUpdateStore();
 
 interface ConflictProcess {
   pid: number;
@@ -122,6 +126,7 @@ async function dismissConflict() {
 }
 
 onMounted(async () => {
+  await appUpdate.init();
   unlistenNav = await listen<string>("navigate", (ev) => {
     if (ev.payload) router.push(ev.payload);
   });
@@ -143,6 +148,7 @@ onMounted(async () => {
 onUnmounted(() => {
   unlistenNav?.();
   unlistenConflict?.();
+  appUpdate.dispose();
   if (heartbeatTimer) clearInterval(heartbeatTimer);
 });
 </script>
@@ -221,6 +227,8 @@ onUnmounted(() => {
       </div>
     </div>
   </Teleport>
+
+  <AppUpdateModal />
 </template>
 
 <style>

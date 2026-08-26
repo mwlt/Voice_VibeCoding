@@ -26,3 +26,13 @@ pub async fn ignore_app_update(
 ) -> Result<crate::app_update::UpdateCheckResult, String> {
     crate::app_update::ignore_version(config_manager.inner(), &version)
 }
+
+#[tauri::command]
+pub fn download_app_update(
+    app: AppHandle,
+    config_manager: State<'_, ConfigManager>,
+    url: String,
+    version: String,
+) -> Result<(), String> {
+    crate::app_update::spawn_download(app, config_manager.inner(), url, version)
+}

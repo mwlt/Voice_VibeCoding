@@ -3,8 +3,11 @@ import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
-import type { GlobalSettings, AppUpdateInfo } from "../types";
+import type { GlobalSettings } from "../types";
+import { useAppUpdateStore } from "../stores/appUpdate";
 import sanodiaLogo from "../assets/mwlt_sanodia_logo.png";
+
+const appUpdate = useAppUpdateStore();
 
 const settings = ref<GlobalSettings>({
   autostart: false,
@@ -23,7 +26,7 @@ onMounted(async () => {
   try {
     appVersion.value = `v${await getVersion()}`;
   } catch {
-    appVersion.value = "v1.3.16";
+    appVersion.value = "v1.5.0";
   }
   try {
     const s = await invoke<GlobalSettings>("get_global_settings");
@@ -62,11 +65,13 @@ async function checkUpdate() {
   updateChecking.value = true;
   updateHint.value = "正在检查…";
   try {
-    const result = await invoke<AppUpdateInfo>("check_app_update");
+    const result = await appUpdate.checkForUpdate();
+    appUpdate.applyUpdateInfo(result);
     if (result.error) {
       updateHint.value = `检查失败：${result.error}`;
     } else if (result.updateAvailable) {
-      updateHint.value = `发现新版本 V${result.latestVersion}，请到「小米遥控器 2 Pro」页标题旁点击蓝色「更新」按钮。`;
+      updateHint.value = `发现新版本 V${result.latestVersion}，可点击顶栏「查看更新内容」。`;
+      appUpdate.openModal();
     } else if (result.ignored) {
       updateHint.value = `已忽略 V${result.latestVersion}，当前 V${result.currentVersion}。`;
     } else {

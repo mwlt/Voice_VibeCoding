@@ -14,7 +14,7 @@ fn restore_main_window(app: &AppHandle) {
         {
             let w = window.clone();
             let _ = w.with_webview(move |webview| unsafe {
-                webview.controller().SetIsVisible(true);
+                let _ = webview.controller().SetIsVisible(true);
             });
         }
         let _ = window.unminimize();

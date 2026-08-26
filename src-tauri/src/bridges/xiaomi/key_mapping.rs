@@ -5,6 +5,9 @@
 use crate::bridges::xiaomi::connect;
 use crate::bridges::xiaomi::key_log::{button_label, emit_key_phase};
 use crate::bridges::xiaomi::tv_gate;
+use crate::bridges::xiaomi::voice_chord_state::VoiceChordState;
+use crate::bridges::xiaomi::voice_inject::scan_code_for_vk;
+use crate::bridges::xiaomi::voice_release::{should_tap_same_chord_after_up, VoiceReleaseDecision};
 use crate::config::manager::{ConfigManager, DeviceConfig, KeyAction};
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -15,7 +18,7 @@ use tauri::{AppHandle, Manager};
 /// 与 Python `EXTRA_INFO = 0x584D4952` ('XMIR') 一致，供 LL hook 放行虚拟键
 pub const EXTRA_INFO: usize = 0x584D_4952;
 
-static VOICE_HELD: AtomicBool = AtomicBool::new(false);
+static VOICE_CHORD: Mutex<VoiceChordState> = Mutex::new(VoiceChordState::empty());
 static DIRECT_MARKS: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 static REPEAT_GEN: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
 static ACTION_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -407,19 +410,23 @@ fn handle_voice(app: &AppHandle, pressed: bool) {
     // 点击 / 按住：快捷键都跟遥控按下/抬起走（短按≈点按，长按=按住）
     // 「点击模式」的短按点按由 input_session 在短于阈值抬起时改走 tap；此处处理按下/抬起和弦
     if pressed {
-        if !VOICE_HELD.swap(true, Ordering::SeqCst) {
-            key_chord(&vks, false);
+        let pressed_ok = {
+            let mut state = VOICE_CHORD.lock();
+            state.press_with(&vks, inject_voice_chord)
+        };
+        if pressed_ok {
             log::info!(
                 "XIAOMI VOICE SHORTCUT DOWN mode={:?} vks={vks:?}",
                 config.trigger_mode
             );
+        } else {
+            log::warn!(
+                "XIAOMI VOICE SHORTCUT DOWN failed mode={:?} vks={vks:?}",
+                config.trigger_mode
+            );
         }
-    } else if VOICE_HELD.swap(false, Ordering::SeqCst) {
-        key_chord(&vks, true);
-        log::info!(
-            "XIAOMI VOICE SHORTCUT UP mode={:?} vks={vks:?}",
-            config.trigger_mode
-        );
+    } else if force_release_voice_shortcut("remote_up") {
+        maybe_tap_after_voice_up(&config, &vks);
     }
 }
 
@@ -436,15 +443,13 @@ pub fn voice_shortcut_tap(app: &AppHandle) {
         return;
     }
     // 若已经按住 DOWN，先松开再 tap，避免粘键
-    if VOICE_HELD.swap(false, Ordering::SeqCst) {
-        key_chord(&vks, true);
-    }
+    let _ = force_release_voice_shortcut("click_tap");
     let hold = if vks.iter().any(|vk| matches!(vk, 0x5B | 0x5C)) {
         120
     } else {
         70
     };
-    tap_vks(&vks, hold);
+    voice_tap_vks(&vks, hold);
     log::info!("XIAOMI VOICE SHORTCUT TAP (click) vks={vks:?} hold_ms={hold}");
 }
 
@@ -460,10 +465,53 @@ pub fn voice_shortcut_ensure_down(app: &AppHandle) {
     if vks.is_empty() {
         return;
     }
-    if !VOICE_HELD.swap(true, Ordering::SeqCst) {
-        key_chord(&vks, false);
+    let pressed_ok = {
+        let mut state = VOICE_CHORD.lock();
+        state.press_with(&vks, inject_voice_chord)
+    };
+    if pressed_ok {
         log::info!("XIAOMI VOICE SHORTCUT DOWN (hold-after-click-threshold) vks={vks:?}");
     }
+}
+
+fn force_release_voice_shortcut(reason: &str) -> bool {
+    let mut state = VOICE_CHORD.lock();
+    let Some((keys, released)) = state.release_with(inject_voice_chord) else {
+        return false;
+    };
+    if released {
+        log::info!("XIAOMI VOICE SHORTCUT UP reason={reason} vks={keys:?}");
+    } else {
+        log::error!("XIAOMI VOICE SHORTCUT UP failed reason={reason} vks={keys:?}");
+    }
+    released
+}
+
+fn maybe_tap_after_voice_up(config: &DeviceConfig, vks: &[u16]) {
+    if should_tap_same_chord_after_up(config.voice_release_behavior)
+        != VoiceReleaseDecision::TapSameChord
+    {
+        return;
+    }
+    let hold = if vks.iter().any(|vk| matches!(vk, 0x5B | 0x5C)) {
+        120
+    } else {
+        70
+    };
+    // 稍作间隔，避免与 KEYUP 粘连导致开关式输入法吃不到第二次点按
+    std::thread::sleep(Duration::from_millis(40));
+    voice_tap_vks(vks, hold);
+    log::info!(
+        "XIAOMI VOICE SHORTCUT post-up tap behavior={:?} vks={vks:?}",
+        config.voice_release_behavior
+    );
+}
+
+/// 语音专用 tap：优先 WinUHid，再 SendInput（+ Alt 菜单抑制）。
+fn voice_tap_vks(vks: &[u16], hold_ms: u64) {
+    let _ = inject_voice_chord(vks, false);
+    std::thread::sleep(Duration::from_millis(hold_ms.max(1)));
+    let _ = inject_voice_chord(vks, true);
 }
 
 /// ATVV opcode 路径调用（对齐 VoiceShortcut.press/release/tap）
@@ -787,58 +835,131 @@ fn tap_unicode_text(text: &str) {
 }
 
 fn key_chord(vks: &[u16], key_up: bool) {
+    // 非语音映射：可走 WinUHid；失败再 SendInput(extra=0，避免截图 Esc 被丢弃)
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{
-            MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-            KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, VIRTUAL_KEY,
-        };
-
-        let iter: Box<dyn Iterator<Item = &u16>> = if key_up {
-            Box::new(vks.iter().rev())
-        } else {
-            Box::new(vks.iter())
-        };
-
-        // dwExtraInfo 策略：普通 tap 不带 'XMIR' 签名。
-        // 实测（probe esc5/esc6 双盲对照）：截图 overlay（ms-screenclip 的 XamlWindow）
-        // 会丢弃带未知 dwExtraInfo 的合成 Esc —— 电源键映射 Esc 因此关不掉截图；
-        // extraInfo=0 的普通 SendInput Esc 则正常关闭。
-        // 自家 LL hook 判定 `injected = dwExtraInfo==EXTRA_INFO || (flags & LLKHF_INJECTED)`
-        // —— 系统对所有 SendInput 注入键自动置位 0x10，抑制链路不受影响。
-        // tap_unicode_text（Unicode 文本注入）仍带 EXTRA_INFO，与按键映射互不干扰。
-        let mut inputs: Vec<INPUT> = Vec::with_capacity(vks.len());
-        for &vk in iter {
-            let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
-            let mut flags = if is_extended(vk) {
-                KEYEVENTF_EXTENDEDKEY
-            } else {
-                Default::default()
-            };
-            if key_up {
-                flags |= KEYEVENTF_KEYUP;
+        if !key_up {
+            if crate::bridges::xiaomi::hid_injector::press(vks).is_ok() {
+                return;
             }
-            inputs.push(INPUT {
-                r#type: INPUT_KEYBOARD,
-                Anonymous: INPUT_0 {
-                    ki: KEYBDINPUT {
-                        wVk: VIRTUAL_KEY(vk),
-                        wScan: scan,
-                        dwFlags: flags,
-                        time: 0,
-                        dwExtraInfo: 0,
-                    },
-                },
-            });
+        } else if crate::bridges::xiaomi::hid_injector::release(vks).is_ok() {
+            return;
         }
-        if !inputs.is_empty() {
-            unsafe {
-                let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-            }
-        }
+        let _ = key_chord_send_input_with_extra(vks, key_up, 0);
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = (vks, key_up);
     }
+}
+
+/// 注入前松开不在和弦内、却仍按下的修饰键，避免粘键污染组合。
+#[cfg(target_os = "windows")]
+fn release_sticky_foreign_modifiers(chord: &[u16]) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    const MODS: [u16; 8] = [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C];
+    for vk in MODS {
+        if chord.iter().any(|&c| c == vk || (c == 0x12 && matches!(vk, 0xA4 | 0xA5))) {
+            continue;
+        }
+        let down = (unsafe { GetAsyncKeyState(vk as i32) } as u16) & 0x8000 != 0;
+        if down {
+            let _ = key_chord_send_input_with_extra(&[vk], true, EXTRA_INFO);
+            log::info!("XIAOMI VOICE released sticky foreign mod vk=0x{vk:02X}");
+        }
+    }
+}
+
+/// 语音和弦注入 — **必须** WinUHid（虚拟硬件 HID）。
+/// SendInput 会被豆包/千问等过滤，不能作为语音唤醒修复方案。
+fn inject_voice_chord(vks: &[u16], key_up: bool) -> bool {
+    if vks.is_empty() {
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let vks = crate::bridges::xiaomi::voice_inject::normalize_voice_chord_vks(vks);
+        if !key_up {
+            release_sticky_foreign_modifiers(&vks);
+        }
+
+        if crate::bridges::xiaomi::hid_injector::is_available() {
+            let hid_ok = if !key_up {
+                crate::bridges::xiaomi::hid_injector::press(&vks).is_ok()
+            } else {
+                crate::bridges::xiaomi::hid_injector::release(&vks).is_ok()
+            };
+            if hid_ok {
+                log::info!("XIAOMI VOICE inject via WinUHid key_up={key_up} vks={vks:?}");
+                return true;
+            }
+            log::error!("XIAOMI VOICE WinUHid inject failed key_up={key_up} vks={vks:?}");
+            return false;
+        }
+        if !key_up {
+            log::error!(
+                "XIAOMI VOICE inject BLOCKED: WinUHid unavailable — 请点「修复虚拟键盘」安装驱动；SendInput 无法稳定唤醒豆包/千问 vks={vks:?}"
+            );
+        }
+        false
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (vks, key_up);
+        false
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn key_chord_send_input_with_extra(vks: &[u16], key_up: bool, extra_info: usize) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, VIRTUAL_KEY,
+    };
+
+    let iter: Box<dyn Iterator<Item = &u16>> = if key_up {
+        Box::new(vks.iter().rev())
+    } else {
+        Box::new(vks.iter())
+    };
+
+    // dwExtraInfo：语音 Alt 对齐 Nexus 使用 EXTRA_INFO；普通映射保持 0
+    //（截图 overlay 会丢弃带未知 extraInfo 的 Esc）。
+    let mut inputs: Vec<INPUT> = Vec::with_capacity(vks.len());
+    for &vk in iter {
+        let mapped = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
+        let scan = scan_code_for_vk(vk, mapped);
+        let mut flags = if is_extended(vk) {
+            KEYEVENTF_EXTENDEDKEY
+        } else {
+            Default::default()
+        };
+        if key_up {
+            flags |= KEYEVENTF_KEYUP;
+        }
+        inputs.push(INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(vk),
+                    wScan: scan,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: extra_info,
+                },
+            },
+        });
+    }
+    if inputs.is_empty() {
+        return false;
+    }
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    let ok = sent as usize == inputs.len();
+    if !ok {
+        log::warn!(
+            "XIAOMI MAPPING SendInput incomplete sent={sent} expected={} key_up={key_up} vks={vks:?}",
+            inputs.len()
+        );
+    }
+    ok
 }

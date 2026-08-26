@@ -380,6 +380,8 @@ pub struct XiaomiHostStatus {
     pub bridge_alive: bool,
     pub audio_alive: bool,
     pub cable_ready: bool,
+    /// WinUHid 虚拟键盘（语音唤醒）
+    pub winuhid_ready: bool,
     /// 输入会话在跑且 ATVV 已订阅
     pub atvv_ok: bool,
     pub status_text: String,
@@ -410,6 +412,8 @@ pub fn xiaomi_host_status_now(app: &AppHandle) -> XiaomiHostStatus {
     let audio_alive = crate::audio::pcm_router::audio_router_ready()
         || crate::audio::pcm_router::audio_router_process_alive();
     let cable_ready = crate::audio::vb_cable::voice_env_status().ready;
+    // 状态轮询禁止 ensure_init：CreateDevice 可能与窗口消息泵互相拖死
+    let winuhid_ready = crate::bridges::xiaomi::hid_injector::is_ready_cached();
     let atvv_ok = crate::bridges::xiaomi::connect::atvv_subscribed();
 
     let items = vec![
@@ -422,6 +426,20 @@ pub fn xiaomi_host_status_now(app: &AppHandle) -> XiaomiHostStatus {
                 "未检测到".into()
             },
             tone: if cable_ready {
+                "ok".into()
+            } else {
+                "error".into()
+            },
+        },
+        XiaomiHostStatusItem {
+            id: "winuhid".into(),
+            label: "虚拟键盘".into(),
+            state_label: if winuhid_ready {
+                "已就绪".into()
+            } else {
+                "未就绪".into()
+            },
+            tone: if winuhid_ready {
                 "ok".into()
             } else {
                 "error".into()
@@ -457,11 +475,17 @@ pub fn xiaomi_host_status_now(app: &AppHandle) -> XiaomiHostStatus {
         },
     ];
 
-    let (status_text, detail, tone) = if bridge_alive && audio_alive && cable_ready && atvv_ok {
+    let (status_text, detail, tone) = if bridge_alive && audio_alive && cable_ready && winuhid_ready && atvv_ok {
         (
             "运行正常".into(),
             String::new(),
             "ok".into(),
+        )
+    } else if bridge_alive && !winuhid_ready {
+        (
+            "虚拟键盘未就绪".into(),
+            "语音唤醒需要 WinUHid（硬件级按键）。可点「修复虚拟键盘」自动安装内嵌驱动（需管理员确认）。".into(),
+            "warn".into(),
         )
     } else if bridge_alive && !atvv_ok {
         (
@@ -499,6 +523,7 @@ pub fn xiaomi_host_status_now(app: &AppHandle) -> XiaomiHostStatus {
         bridge_alive,
         audio_alive,
         cable_ready,
+        winuhid_ready,
         atvv_ok,
         status_text,
         detail,
@@ -604,6 +629,26 @@ pub async fn repair_xiaomi_voice_env(
     })
     .await
     .map_err(|e| format!("voice repair task: {e}"))?
+}
+
+/// WinUHid 虚拟键盘状态（语音唤醒依赖）
+#[tauri::command]
+pub async fn get_xiaomi_winuhid_status(
+) -> Result<crate::bridges::xiaomi::winuhid_env::WinUHidEnvStatus, String> {
+    Ok(tokio::task::spawn_blocking(crate::bridges::xiaomi::winuhid_env::env_status)
+        .await
+        .map_err(|e| format!("winuhid status task: {e}"))?)
+}
+
+/// 部署 DLL + 提权安装内嵌 WinUHid 驱动
+#[tauri::command]
+pub async fn repair_xiaomi_winuhid(
+) -> Result<crate::bridges::xiaomi::winuhid_env::WinUHidActionResult, String> {
+    Ok(
+        tokio::task::spawn_blocking(crate::bridges::xiaomi::winuhid_env::check_or_repair)
+            .await
+            .map_err(|e| format!("winuhid repair task: {e}"))?,
+    )
 }
 
 /// 对齐 Python `open_logs`：打开日志目录

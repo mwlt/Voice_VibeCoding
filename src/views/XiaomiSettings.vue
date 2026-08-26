@@ -6,10 +6,20 @@ import { useBridgeStore } from "../stores/bridge";
 import { useConfigStore } from "../stores/config";
 import DeviceStatus from "../components/DeviceStatus.vue";
 import KeyMappingStage from "../components/KeyMappingStage.vue";
-import type { DeviceConfig, KeyAction, AppUpdateInfo } from "../types";
 import wechatImeHotkeysImg from "../assets/guides/wechat-ime-hotkeys.png";
-import { open as openUrl } from "@tauri-apps/plugin-shell";
 import { vkDisplayName } from "../utils/vkDisplay";
+import {
+  applyImePresetConfig,
+  getPresetsForTab,
+  IME_FAQ,
+  IME_PRESETS,
+  QIANWEN_GUIDE,
+  QIANWEN_PRESET_IDS,
+  listImeTabs,
+  type ImePresetDefinition,
+  type ImePresetId,
+  type ImeTabId,
+} from "../utils/imePreset";
 
 const bridge = useBridgeStore();
 const configStore = useConfigStore();
@@ -29,6 +39,7 @@ interface HostStatus {
   bridge_alive: boolean;
   audio_alive: boolean;
   cable_ready: boolean;
+  winuhid_ready?: boolean;
   atvv_ok?: boolean;
   status_text: string;
   detail: string;
@@ -38,17 +49,22 @@ interface HostStatus {
 
 const restarting = ref(false);
 const voiceRepairing = ref(false);
+const winuhidRepairing = ref(false);
 const atvvRepairing = ref(false);
 const showVoiceChoice = ref(false);
 const voiceChoiceMsg = ref("");
 const showVoiceReboot = ref(false);
 const voiceRebootMsg = ref("");
 const showLogModal = ref(false);
-const showUpdateModal = ref(false);
-const updateInfo = ref<AppUpdateInfo | null>(null);
-let unlistenUpdate: UnlistenFn | null = null;
 const showSetupTips = ref(false);
 const setupApplyHint = ref("");
+const setupImeTab = ref<ImeTabId>("wechat");
+const imeTabs = listImeTabs();
+const imeFaq = IME_FAQ;
+const qianwenGuide = QIANWEN_GUIDE;
+const qianwenPresets = QIANWEN_PRESET_IDS.map((id) => IME_PRESETS[id]);
+
+const activeImePresets = computed(() => getPresetsForTab(setupImeTab.value));
 const logText = ref("");
 const logPath = ref("");
 const logLoading = ref(false);
@@ -386,36 +402,52 @@ function toggleRestartTip() {
   }
 }
 
+let tipViewportRaf: number | null = null;
+
 function onViewportChange() {
-  if (showVoiceShortcutTip.value) {
-    placeInfoTip(voiceInfoBtn.value, voiceTipEl.value, voiceTipStyle);
-  }
-  if (showGainTip.value) {
-    placeInfoTip(gainInfoBtn.value, gainTipEl.value, gainTipStyle);
-  }
-  if (showTriggerTip.value) {
-    placeInfoTip(triggerInfoBtn.value, triggerTipEl.value, triggerTipStyle);
-  }
-  if (showRepairTip.value) {
-    placeInfoTip(repairInfoBtn.value, repairTipEl.value, repairTipStyle);
-  }
-  if (showAtvvTip.value) {
-    placeInfoTip(atvvInfoBtn.value, atvvTipEl.value, atvvTipStyle);
-  }
-  if (showRestartTip.value) {
-    placeInfoTip(restartInfoBtn.value, restartTipEl.value, restartTipStyle);
-  }
+  const anyTip =
+    showVoiceShortcutTip.value ||
+    showGainTip.value ||
+    showTriggerTip.value ||
+    showRepairTip.value ||
+    showAtvvTip.value ||
+    showRestartTip.value;
+  if (!anyTip) return;
+  if (tipViewportRaf != null) return;
+  tipViewportRaf = requestAnimationFrame(() => {
+    tipViewportRaf = null;
+    if (showVoiceShortcutTip.value) {
+      placeInfoTip(voiceInfoBtn.value, voiceTipEl.value, voiceTipStyle);
+    }
+    if (showGainTip.value) {
+      placeInfoTip(gainInfoBtn.value, gainTipEl.value, gainTipStyle);
+    }
+    if (showTriggerTip.value) {
+      placeInfoTip(triggerInfoBtn.value, triggerTipEl.value, triggerTipStyle);
+    }
+    if (showRepairTip.value) {
+      placeInfoTip(repairInfoBtn.value, repairTipEl.value, repairTipStyle);
+    }
+    if (showAtvvTip.value) {
+      placeInfoTip(atvvInfoBtn.value, atvvTipEl.value, atvvTipStyle);
+    }
+    if (showRestartTip.value) {
+      placeInfoTip(restartInfoBtn.value, restartTipEl.value, restartTipStyle);
+    }
+  });
 }
 const host = ref<HostStatus>({
   bridge_alive: false,
   audio_alive: false,
   cable_ready: false,
+  winuhid_ready: false,
   atvv_ok: false,
   status_text: "正在启动",
   detail: "",
   tone: "warn",
   items: [
     { id: "cable", label: "虚拟声卡", state_label: "检测中", tone: "warn" },
+    { id: "winuhid", label: "虚拟键盘", state_label: "检测中", tone: "warn" },
     { id: "audio", label: "语音路由", state_label: "检测中", tone: "warn" },
     { id: "bridge", label: "按键桥接", state_label: "检测中", tone: "warn" },
   ],
@@ -470,31 +502,28 @@ async function persistVoiceSettings() {
   await configStore.saveConfig(type, { ...config.value });
 }
 
-/** 微信输入法「启动语音输入」常用组合：左 Ctrl + 左 Win */
-const WECHAT_VOICE_VKS = [0xa2, 0x5b];
+/** 输入法一键预设（微信 / 豆包 / 千问等） */
+function isWechatPreset(id: ImePresetId): boolean {
+  return id.startsWith("wechat-");
+}
 
-async function applyWechatVoiceMapping() {
+function presetShortcutLabel(preset: ImePresetDefinition): string {
+  return preset.shortcutVks.map((vk) => vkDisplayName(vk)).join(" + ");
+}
+
+async function applyImePreset(presetId: ImePresetId) {
   if (!config.value) return;
-  const action: KeyAction = { type: "ComboKey", value: [...WECHAT_VOICE_VKS] };
-  const bindings = {
-    ...config.value.button_bindings,
-    mic: action,
-    voice: action,
-  };
-  const next: DeviceConfig = {
-    ...config.value,
-    button_bindings: bindings,
-    voice_hotkey: ["leftctrl", "leftwin"],
-    voice_shortcut_enabled: true,
-    trigger_mode: "Hold",
-  };
-  config.value.button_bindings = bindings;
+  const definition = IME_PRESETS[presetId];
+  if (!definition) return;
+  const next = applyImePresetConfig(config.value, presetId);
+  config.value.button_bindings = next.button_bindings;
   config.value.voice_hotkey = next.voice_hotkey;
   config.value.voice_shortcut_enabled = true;
-  config.value.trigger_mode = "Hold";
+  config.value.trigger_mode = next.trigger_mode;
+  config.value.voice_release_behavior = next.voice_release_behavior;
   await configStore.saveConfig(type, next);
-  setupApplyHint.value = "已应用：语音键 = 左 Ctrl + 左 Win，触发模式 = 按住";
-  prependLog("设置建议：已快速应用微信按住说话映射（左 Ctrl + 左 Win）");
+  setupApplyHint.value = definition.applyHint;
+  prependLog(definition.logMessage);
   window.setTimeout(() => {
     if (setupApplyHint.value.startsWith("已应用")) setupApplyHint.value = "";
   }, 4000);
@@ -665,6 +694,7 @@ async function refreshHost() {
       tone: "error",
       items: [
         { id: "cable", label: "虚拟声卡", state_label: "未知", tone: "error" },
+        { id: "winuhid", label: "虚拟键盘", state_label: "未知", tone: "error" },
         { id: "audio", label: "语音路由", state_label: "未知", tone: "error" },
         { id: "bridge", label: "按键桥接", state_label: "未启动", tone: "error" },
       ],
@@ -694,45 +724,6 @@ interface AtvvRepairResult {
   message: string;
   atvvOk: boolean;
   hadConflicts: boolean;
-}
-
-function applyUpdateInfo(info: AppUpdateInfo | null) {
-  if (info?.updateAvailable) {
-    updateInfo.value = info;
-  } else if (info && !info.updateAvailable) {
-    updateInfo.value = null;
-    showUpdateModal.value = false;
-  }
-}
-
-async function openUpdateLink(kind: "setup" | "gitee" | "github") {
-  const info = updateInfo.value;
-  if (!info) return;
-  const url =
-    kind === "setup"
-      ? info.setupUrl
-      : kind === "gitee"
-        ? info.giteePage
-        : info.githubPage;
-  if (!url) return;
-  try {
-    await openUrl(url);
-  } catch (e) {
-    console.warn("open update url failed:", e);
-    window.open(url, "_blank");
-  }
-}
-
-async function ignoreCurrentUpdate() {
-  const ver = updateInfo.value?.latestVersion;
-  if (!ver) return;
-  try {
-    const result = await invoke<AppUpdateInfo>("ignore_app_update", { version: ver });
-    applyUpdateInfo(result);
-    prependLog(`已忽略版本 v${ver}`);
-  } catch (e) {
-    prependLog(`忽略更新失败: ${e}`);
-  }
 }
 
 async function repairAtvv() {
@@ -873,6 +864,41 @@ async function chooseVoiceSource(source: "embedded" | "download_page" | "downloa
   }
 }
 
+interface WinUHidActionResult {
+  ok: boolean;
+  ready: boolean;
+  needsReboot: boolean;
+  message: string;
+}
+
+async function repairWinUHid() {
+  if (winuhidRepairing.value || voiceRepairing.value || atvvRepairing.value || restarting.value) {
+    return;
+  }
+  winuhidRepairing.value = true;
+  try {
+    const result = await invoke<WinUHidActionResult>("repair_xiaomi_winuhid");
+    prependLog(result.message);
+    host.value = {
+      ...host.value,
+      winuhid_ready: result.ready,
+      detail: result.message,
+      tone: result.ready ? "ok" : result.needsReboot ? "warn" : "error",
+    };
+    if (result.needsReboot) {
+      voiceRebootMsg.value = result.message;
+      showVoiceReboot.value = true;
+    }
+    await refreshHost();
+  } catch (e) {
+    const msg = `虚拟键盘修复失败: ${e}`;
+    prependLog(msg);
+    host.value = { ...host.value, detail: msg, tone: "error" };
+  } finally {
+    winuhidRepairing.value = false;
+  }
+}
+
 onMounted(async () => {
   prependLog("日志区准备就绪");
   await Promise.all([
@@ -963,24 +989,6 @@ onMounted(async () => {
   } catch (e) {
     console.warn("listen xiaomi-atvv-repair-cancelled failed:", e);
   }
-
-  try {
-    unlistenUpdate = await listen<AppUpdateInfo>("app-update-available", (event) => {
-      applyUpdateInfo(event.payload);
-      if (event.payload?.updateAvailable) {
-        prependLog(`发现新版本 v${event.payload.latestVersion}`);
-      }
-    });
-  } catch (e) {
-    console.warn("listen app-update-available failed:", e);
-  }
-
-  try {
-    const cached = await invoke<AppUpdateInfo>("get_app_update_state");
-    applyUpdateInfo(cached);
-  } catch {
-    /* ignore */
-  }
 });
 
 onUnmounted(() => {
@@ -988,7 +996,6 @@ onUnmounted(() => {
   unlistenMeter?.();
   unlistenAtvvRepair?.();
   unlistenAtvvCancel?.();
-  unlistenUpdate?.();
   if (hostPollTimer) clearInterval(hostPollTimer);
   if (devicePollTimer) clearInterval(devicePollTimer);
   if (voiceTipCloseTimer) clearTimeout(voiceTipCloseTimer);
@@ -998,6 +1005,10 @@ onUnmounted(() => {
   if (atvvTipCloseTimer) clearTimeout(atvvTipCloseTimer);
   if (restartTipCloseTimer) clearTimeout(restartTipCloseTimer);
   if (mappingFlashClearTimer) clearTimeout(mappingFlashClearTimer);
+  if (tipViewportRaf != null) {
+    cancelAnimationFrame(tipViewportRaf);
+    tipViewportRaf = null;
+  }
   window.removeEventListener("resize", onViewportChange);
   window.removeEventListener("scroll", onViewportChange, true);
 });
@@ -1034,14 +1045,6 @@ function toggleConnection() {
     <header class="page-header">
       <div class="title-row">
         <h2>小米遥控器 2 Pro</h2>
-        <button
-          v-if="updateInfo?.updateAvailable"
-          type="button"
-          class="update-chip"
-          @click="showUpdateModal = true"
-        >
-          更新（V{{ updateInfo.latestVersion }}）
-        </button>
       </div>
       <DeviceStatus
         :status="device.status"
@@ -1200,7 +1203,25 @@ function toggleConnection() {
               <button
                 class="btn btn-secondary"
                 type="button"
-                :disabled="atvvRepairing || restarting || voiceRepairing"
+                :disabled="winuhidRepairing || voiceRepairing || atvvRepairing || restarting"
+                @click="repairWinUHid"
+              >
+                {{ winuhidRepairing ? "修复中..." : "修复虚拟键盘" }}
+              </button>
+              <button
+                type="button"
+                class="title-info"
+                aria-label="修复虚拟键盘说明"
+                title="安装 WinUHid 虚拟键盘驱动，让语音键像真实硬件一样唤醒豆包/千问"
+              >
+                <span class="title-info-icon" aria-hidden="true">i</span>
+              </button>
+            </div>
+            <div class="host-action-group">
+              <button
+                class="btn btn-secondary"
+                type="button"
+                :disabled="atvvRepairing || restarting || voiceRepairing || winuhidRepairing"
                 @click="repairAtvv"
               >
                 {{ atvvRepairing ? "修复中..." : "修复 ATVV 连接" }}
@@ -1347,60 +1368,106 @@ function toggleConnection() {
             <h3 id="setup-tips-title">输入法设置</h3>
             <button class="btn btn-secondary" type="button" @click="showSetupTips = false">关闭</button>
           </div>
-          <p class="setup-tips-lead">按输入法对照设置；本软件语音键映射需与输入法快捷键一致。</p>
+          <p class="setup-tips-lead">
+            按输入法对照设置；本软件语音键映射需与输入法快捷键一致。下方可一键应用常用预设。
+          </p>
+          <p v-if="setupApplyHint" class="setup-apply-hint setup-apply-hint-global">
+            {{ setupApplyHint }}
+          </p>
 
-          <article class="setup-ime-card">
-            <header class="setup-ime-head">
-              <h4>微信输入法</h4>
-              <span class="setup-ime-tag">推荐 · 按住说话，松开输入文字</span>
-            </header>
-            <div class="setup-ime-warn" role="note">
-              <p class="setup-ime-warn-title">
-                必须先设置本软件快捷键，再设置微信输入法的快捷键；否则本软件无法录入微信输入法已设置的快捷键。
-              </p>
-              <p class="setup-ime-warn-sub">3种可行设置流程：</p>
-              <ol class="setup-ime-warn-ways">
-                <li>录入前先临时关掉或改掉微信语音快捷键（或先切到其它输入法），本软件录完后再改回。</li>
-                <li>不必现场录入：点下方「快速应用：左 Ctrl + 左 Win」，直接写好本软件映射。</li>
-                <li>先录一个微信暂未占用的组合键，录完后再把微信快捷键改成与本软件一致。</li>
+          <div class="setup-ime-tabs" role="tablist" aria-label="输入法分类">
+            <button
+              v-for="tab in imeTabs"
+              :key="tab.id"
+              type="button"
+              class="setup-ime-tab"
+              :class="{ active: setupImeTab === tab.id }"
+              role="tab"
+              :aria-selected="setupImeTab === tab.id"
+              @click="setupImeTab = tab.id"
+            >
+              {{ tab.label }}
+            </button>
+          </div>
+
+          <div v-if="setupImeTab === 'faq'" class="setup-ime-panel" role="tabpanel">
+            <div class="setup-ime-warn setup-ime-faq-warn" role="note">
+              <p class="setup-ime-warn-title">{{ imeFaq.warnTitle }}</p>
+            </div>
+            <section
+              v-for="(section, sIdx) in imeFaq.sections"
+              :key="sIdx"
+              class="setup-faq-section"
+            >
+              <h4 class="setup-faq-section-title">{{ section.title }}</h4>
+              <ol class="setup-ime-steps setup-faq-list">
+                <li v-for="(item, idx) in section.items" :key="idx">{{ item }}</li>
               </ol>
-            </div>
-            <ol class="setup-ime-steps">
-              <li>
-                本软件语音键先设为 <code>左 Ctrl + 左 Win</code>，触发模式选
-                <strong>按住</strong>（可用下方快速应用；遥控自带的 F5 会凑齐「按住说话」）
-              </li>
-              <li>再打开微信输入法 → 设置 → 快捷键 (参考下方图片设置)</li>
-              <!-- <li>
-                <strong>启动语音输入</strong>：左 Ctrl + 左 Win（点按开/关）
-              </li>
-              <li>
-                <strong>按住说话</strong>：左 Ctrl + 左 Win + F5（按住说、松手上屏）
-              </li> -->
-            </ol>
-            <div class="setup-ime-apply">
-              <button
-                class="btn btn-primary"
-                type="button"
-                :disabled="!config"
-                @click="applyWechatVoiceMapping"
-              >
-                快速设置语音键映射为：左 Ctrl + 左 Win
-              </button>
-              <span v-if="setupApplyHint" class="setup-apply-hint">{{ setupApplyHint }}</span>
-            </div>
-            <figure class="setup-ime-figure">
-              <figcaption>微信输入法 · 语音输入设置图</figcaption>
-              <img
-                :src="wechatImeHotkeysImg"
-                alt="微信输入法快捷键：启动语音输入为左Ctrl+左Win；按住说话为左Ctrl+左Win+F5"
-                class="setup-ime-img"
-              />
-             
-            </figure>
-          </article>
+            </section>
+          </div>
 
-          <!-- 预留：其他输入法卡片可按 setup-ime-card 同样结构追加 -->
+          <div v-else-if="setupImeTab === 'qianwen'" class="setup-ime-panel" role="tabpanel">
+            <article class="setup-ime-card">
+              <header class="setup-ime-head">
+                <h4>{{ qianwenGuide.title }}</h4>
+                <span class="setup-ime-tag">{{ qianwenGuide.tag }}</span>
+              </header>
+              <ol class="setup-ime-steps">
+                <li v-for="(step, idx) in qianwenGuide.steps" :key="idx">{{ step }}</li>
+              </ol>
+              <div class="setup-ime-apply setup-ime-apply-row">
+                <button
+                  v-for="preset in qianwenPresets"
+                  :key="preset.id"
+                  class="btn btn-primary"
+                  type="button"
+                  :disabled="!config"
+                  @click="applyImePreset(preset.id)"
+                >
+                  快速应用：{{ presetShortcutLabel(preset) }} · 按住
+                </button>
+              </div>
+            </article>
+          </div>
+
+          <div v-else class="setup-ime-panel" role="tabpanel">
+            <article
+              v-for="preset in activeImePresets"
+              :key="preset.id"
+              class="setup-ime-card"
+            >
+              <header class="setup-ime-head">
+                <h4>{{ preset.title }}</h4>
+                <span class="setup-ime-tag">{{ preset.tag }}</span>
+              </header>
+              <ol class="setup-ime-steps">
+                <li v-for="(step, idx) in preset.steps" :key="idx">{{ step }}</li>
+              </ol>
+              <div class="setup-ime-apply">
+                <button
+                  class="btn btn-primary"
+                  type="button"
+                  :disabled="!config"
+                  @click="applyImePreset(preset.id)"
+                >
+                  快速应用：{{ presetShortcutLabel(preset) }}
+                  ·
+                  {{ preset.triggerMode === "Hold" ? "按住" : "点击" }}
+                  <template v-if="preset.voiceReleaseBehavior === 'TapSameChord'">
+                    · 松手再点关
+                  </template>
+                </button>
+              </div>
+              <figure v-if="isWechatPreset(preset.id)" class="setup-ime-figure">
+                <figcaption>微信输入法 · 语音输入设置参考图</figcaption>
+                <img
+                  :src="wechatImeHotkeysImg"
+                  alt="微信输入法快捷键设置参考图"
+                  class="setup-ime-img"
+                />
+              </figure>
+            </article>
+          </div>
         </div>
       </div>
 
@@ -1480,42 +1547,6 @@ function toggleConnection() {
           <div class="voice-modal-actions">
             <button class="btn btn-primary" type="button" @click="showVoiceReboot = false">
               知道了
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div
-        v-if="showUpdateModal && updateInfo?.updateAvailable"
-        class="voice-modal-backdrop"
-        @click.self="showUpdateModal = false"
-      >
-        <div
-          class="voice-modal"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="app-update-title"
-        >
-          <h3 id="app-update-title">发现新版本 V{{ updateInfo.latestVersion }}</h3>
-          <p>
-            当前版本 V{{ updateInfo.currentVersion }}。下载安装包后按提示安装即可（安装时请先退出本软件）。
-          </p>
-          <p v-if="updateInfo.notes" class="update-notes">{{ updateInfo.notes }}</p>
-          <div class="voice-modal-actions">
-            <button class="btn btn-primary" type="button" @click="openUpdateLink('setup')">
-              直接下载
-            </button>
-            <button class="btn btn-secondary" type="button" @click="openUpdateLink('gitee')">
-              去 Gitee 下载
-            </button>
-            <button class="btn btn-secondary" type="button" @click="openUpdateLink('github')">
-              去 GitHub 下载
-            </button>
-            <button class="btn btn-secondary" type="button" @click="ignoreCurrentUpdate">
-              忽略此版本
-            </button>
-            <button class="btn btn-secondary" type="button" @click="showUpdateModal = false">
-              关闭
             </button>
           </div>
         </div>
@@ -1845,24 +1876,6 @@ function toggleConnection() {
   min-width: 0;
 }
 .page-header h2 { font-size: 20px; font-weight: 600; margin: 0; }
-.update-chip {
-  flex-shrink: 0;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: #2563eb;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  line-height: 1.2;
-}
-.update-chip:hover {
-  text-decoration: underline;
-}
-.update-notes {
-  color: #64748b !important;
-  font-size: 12px !important;
-}
 .title-info {
   position: relative;
   flex-shrink: 0;
@@ -2266,9 +2279,62 @@ function toggleConnection() {
   font-size: 12px;
 }
 .setup-tips-lead {
-  margin: 0 0 14px !important;
+  margin: 0 0 10px !important;
   font-size: 12px !important;
   color: #64748b !important;
+}
+.setup-ime-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 28px;
+  z-index: 1;
+  background: var(--card-bg, #fff);
+}
+.setup-ime-tab {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s,
+    color 0.15s;
+}
+.setup-ime-tab:hover {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+}
+.setup-ime-tab.active {
+  background: #eff6ff;
+  border-color: #93c5fd;
+  color: #1d4ed8;
+}
+.setup-ime-panel {
+  min-height: 120px;
+}
+.setup-faq-section + .setup-faq-section {
+  margin-top: 14px;
+}
+.setup-faq-section-title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.setup-faq-list {
+  margin-bottom: 0 !important;
+}
+.setup-ime-faq-warn {
+  margin-bottom: 14px;
 }
 .setup-ime-card {
   border: 1px solid var(--border);
@@ -2359,9 +2425,23 @@ function toggleConnection() {
   padding: 6px 12px;
   font-size: 13px;
 }
+.setup-ime-apply-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  margin-bottom: 0;
+}
+.setup-ime-apply-row .btn {
+  width: 100%;
+  text-align: center;
+  justify-content: center;
+}
 .setup-apply-hint {
   font-size: 12px;
   color: #16a34a;
+}
+.setup-apply-hint-global {
+  margin: 0 0 10px;
 }
 .setup-ime-figure {
   margin: 0;

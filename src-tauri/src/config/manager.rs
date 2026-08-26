@@ -55,6 +55,16 @@ impl Default for TriggerMode {
     }
 }
 
+/// 语音键抬起后的附加行为（适配开关式输入法）
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum VoiceReleaseBehavior {
+    /// 仅松开按住的组合键
+    #[default]
+    None,
+    /// 松开后再完整点按一次同一组合（开了再关）
+    TapSameChord,
+}
+
 /// 设备配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceConfig {
@@ -67,6 +77,9 @@ pub struct DeviceConfig {
     /// 语音触发模式
     #[serde(default)]
     pub trigger_mode: TriggerMode,
+    /// 语音键抬起后的附加行为
+    #[serde(default)]
+    pub voice_release_behavior: VoiceReleaseBehavior,
     /// 蓝牙地址（仅小米）
     pub bluetooth_address: Option<String>,
     /// 语音增益 dB（对齐 Python gain_db）
@@ -109,6 +122,7 @@ impl DeviceConfig {
             button_bindings: HashMap::new(),
             voice_hotkey: Some(vec!["rightalt".into()]),
             trigger_mode: TriggerMode::Hold,
+            voice_release_behavior: VoiceReleaseBehavior::None,
             bluetooth_address: None,
             gain_db: default_gain_db(),
             retry_delay: default_retry_delay(),
@@ -315,6 +329,7 @@ impl ConfigManager {
                 tv_action_ready_delay: 2.0,
                 special_key_hook_enabled: true,
                 hid_report_tap_enabled: true,
+                ..DeviceConfig::new()
             },
             "t1" => DeviceConfig {
                 button_aliases: Self::t1_button_aliases(),
@@ -580,5 +595,43 @@ mod tests {
         let json = serde_json::to_string(&combo).unwrap();
         let decoded: KeyAction = serde_json::from_str(&json).unwrap();
         assert_eq!(combo, decoded);
+    }
+
+    #[test]
+    fn voice_release_behavior_defaults_to_none_when_missing_from_json() {
+        let user_json = r#"{
+            "button_aliases": {},
+            "button_bindings": {},
+            "voice_hotkey": ["rightalt"],
+            "trigger_mode": "Hold",
+            "bluetooth_address": null
+        }"#;
+        let config: DeviceConfig = serde_json::from_str(user_json).unwrap();
+        assert_eq!(config.voice_release_behavior, VoiceReleaseBehavior::None);
+    }
+
+    #[test]
+    fn voice_release_behavior_roundtrips_tap_same_chord() {
+        let mut config = DeviceConfig::new();
+        config.voice_release_behavior = VoiceReleaseBehavior::TapSameChord;
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("TapSameChord"));
+        let decoded: DeviceConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            decoded.voice_release_behavior,
+            VoiceReleaseBehavior::TapSameChord
+        );
+    }
+
+    #[test]
+    fn default_configs_use_none_release_behavior() {
+        assert_eq!(
+            ConfigManager::default_config_for("xiaomi").voice_release_behavior,
+            VoiceReleaseBehavior::None
+        );
+        assert_eq!(
+            DeviceConfig::new().voice_release_behavior,
+            VoiceReleaseBehavior::None
+        );
     }
 }
