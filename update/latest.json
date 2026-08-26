@@ -1,8 +1,8 @@
 {
-  "version": "1.3.15",
-  "notes": "v1.3.15：修正电源键映射 Esc、菜单键映射左 Win 时漏出按键原始码的问题；语音快捷键按下立即响应；Esc 可正常关闭截图 overlay。",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.3.15",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.3.15",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.3.15/Voice%20VibeCoding_1.3.15_x64-setup.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.3.15/Voice.VibeCoding_1.3.15_x64-setup.exe"
+  "version": "1.3.16",
+  "notes": "v1.3.16：合并社区 PR——启动黑框闪烁修复、HID Tap 日志降级；新增「启动后最小化到托盘」；修正自启最小化与正常启动显示时序。",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.3.16",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.3.16",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.3.16/Voice%20VibeCoding_1.3.16_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.3.16/Voice.VibeCoding_1.3.16_x64-setup.exe"
 }

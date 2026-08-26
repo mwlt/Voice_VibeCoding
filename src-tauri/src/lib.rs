@@ -139,36 +139,30 @@ pub fn run() {
                     }
                     let _ = window.hide();
                 } else if auto_minimized {
-                    // 自启参数：最小化到任务栏（visible:false + with_webview(false) 防闪现）
+                    // 自启参数：先 show 再 minimize 到任务栏（visible:false 时必须先 show，否则托盘/任务栏不可见）
                     log::info!("START: --minimized detected, minimizing window to taskbar");
-                    #[cfg(target_os = "windows")]
-                    {
-                        let w = window.clone();
-                        let _ = w.with_webview(move |webview| unsafe {
-                            webview.controller().SetIsVisible(false);
-                        });
-                    }
                     let win = window.clone();
                     std::thread::Builder::new()
                         .name("start-minimized".into())
                         .spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(600));
+                            std::thread::sleep(std::time::Duration::from_millis(400));
+                            #[cfg(target_os = "windows")]
+                            {
+                                let w = win.clone();
+                                let _ = w.with_webview(move |webview| unsafe {
+                                    webview.controller().SetIsVisible(true);
+                                });
+                            }
+                            let _ = win.show();
                             let _ = win.minimize();
                         })?;
                 } else {
-                    // 正常启动：先隐藏 WebView 防闪，等待加载完成后显示
-                    #[cfg(target_os = "windows")]
-                    {
-                        let w = window.clone();
-                        let _ = w.with_webview(move |webview| unsafe {
-                            webview.controller().SetIsVisible(false);
-                        });
-                    }
+                    // 正常启动：配置为 visible:false 防闪，短延迟后显示（不宜过长）
                     let win = window.clone();
                     std::thread::Builder::new()
                         .name("show-main-window".into())
                         .spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(1000));
+                            std::thread::sleep(std::time::Duration::from_millis(200));
                             #[cfg(target_os = "windows")]
                             {
                                 let w = win.clone();

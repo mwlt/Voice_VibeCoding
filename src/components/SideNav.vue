@@ -32,7 +32,7 @@ onMounted(async () => {
   try {
     appVersion.value = `v${await getVersion()}`;
   } catch {
-    appVersion.value = "v1.3.15";
+    appVersion.value = "v1.3.16";
   }
 });
 

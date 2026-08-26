@@ -28,6 +28,7 @@ vite.config.ts.timestamp-*.mjs
 # Local logs & notes (not for repo)
 logs/
 语音效率及白屏优化.md
+bug修复.md
 
 # Env & secrets
 .env
