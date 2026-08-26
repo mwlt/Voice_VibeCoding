@@ -42,6 +42,7 @@ export interface GlobalSettings {
   autostart: boolean;
   language: string;
   minimize_to_tray: boolean;
+  start_minimized_to_tray?: boolean;
   ignored_update_version?: string | null;
 }
 

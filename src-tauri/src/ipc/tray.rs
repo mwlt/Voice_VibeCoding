@@ -9,6 +9,14 @@ use tauri::{
 
 fn restore_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        // WebView2 可能处于隐藏状态（启动时 SetIsVisible(false)），先恢复渲染再显示窗口
+        #[cfg(target_os = "windows")]
+        {
+            let w = window.clone();
+            let _ = w.with_webview(move |webview| unsafe {
+                webview.controller().SetIsVisible(true);
+            });
+        }
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();

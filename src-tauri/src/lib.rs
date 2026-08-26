@@ -37,6 +37,14 @@ pub fn should_start_minimized(args: &[String]) -> bool {
 
 fn focus_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        // WebView2 可能处于隐藏状态（启动时 SetIsVisible(false)），先恢复渲染再显示窗口
+        #[cfg(target_os = "windows")]
+        {
+            let w = window.clone();
+            let _ = w.with_webview(move |webview| unsafe {
+                webview.controller().SetIsVisible(true);
+            });
+        }
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
@@ -110,16 +118,65 @@ pub fn run() {
                     }
                 });
 
-                // 自启（--minimized）：最小化到任务栏而非隐藏，保留 WebView2 渲染，
-                // 避免开机自启 + hide 组合造成"页面不显示/白屏"
-                if should_start_minimized(&std::env::args().collect::<Vec<_>>()) {
+                // 启动后最小化到托盘（用户设置）或 --minimized（自启参数）
+                let start_hidden = app
+                    .try_state::<config::manager::ConfigManager>()
+                    .and_then(|m| m.get_global_settings().ok())
+                    .map(|s| s.start_minimized_to_tray)
+                    .unwrap_or(false);
+                let auto_minimized =
+                    should_start_minimized(&std::env::args().collect::<Vec<_>>());
+
+                if start_hidden {
+                    // 启动后最小化到托盘：visible:false + with_webview(false) 双保险，零闪烁
+                    log::info!("START: start_minimized_to_tray=true, window stays hidden");
+                    #[cfg(target_os = "windows")]
+                    {
+                        let w = window.clone();
+                        let _ = w.with_webview(move |webview| unsafe {
+                            webview.controller().SetIsVisible(false);
+                        });
+                    }
+                    let _ = window.hide();
+                } else if auto_minimized {
+                    // 自启参数：最小化到任务栏（visible:false + with_webview(false) 防闪现）
                     log::info!("START: --minimized detected, minimizing window to taskbar");
+                    #[cfg(target_os = "windows")]
+                    {
+                        let w = window.clone();
+                        let _ = w.with_webview(move |webview| unsafe {
+                            webview.controller().SetIsVisible(false);
+                        });
+                    }
                     let win = window.clone();
                     std::thread::Builder::new()
                         .name("start-minimized".into())
                         .spawn(move || {
                             std::thread::sleep(std::time::Duration::from_millis(600));
                             let _ = win.minimize();
+                        })?;
+                } else {
+                    // 正常启动：先隐藏 WebView 防闪，等待加载完成后显示
+                    #[cfg(target_os = "windows")]
+                    {
+                        let w = window.clone();
+                        let _ = w.with_webview(move |webview| unsafe {
+                            webview.controller().SetIsVisible(false);
+                        });
+                    }
+                    let win = window.clone();
+                    std::thread::Builder::new()
+                        .name("show-main-window".into())
+                        .spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(1000));
+                            #[cfg(target_os = "windows")]
+                            {
+                                let w = win.clone();
+                                let _ = w.with_webview(move |webview| unsafe {
+                                    webview.controller().SetIsVisible(true);
+                                });
+                            }
+                            let _ = win.show();
                         })?;
                 }
             }
