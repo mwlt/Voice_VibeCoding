@@ -149,10 +149,16 @@ fn set_startup_shortcut(enable: bool) -> Result<(), String> {
             .to_string()
             .replace('\'', "''"),
     );
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", &ps])
-        .output()
-        .map_err(|e| format!("powershell: {e}"))?;
+    let out = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // ponytail: 隐藏控制台，避免创建自启快捷方式时闪黑框
+        std::process::Command::new("powershell")
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(["-NoProfile", "-Command", &ps])
+            .output()
+    }
+    .map_err(|e| format!("powershell: {e}"))?;
     if !out.status.success() {
         return Err(format!(
             "create shortcut failed: {}",

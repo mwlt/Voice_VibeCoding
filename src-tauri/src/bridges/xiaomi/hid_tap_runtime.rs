@@ -150,19 +150,25 @@ fn write_verified_text(path: &Path, content: &str) -> Result<(), String> {
 fn lock_runtime_acl(path: &Path) -> Result<(), String> {
     fn apply(target: &Path, directory: bool) -> Result<(), String> {
         let suffix = if directory { "(OI)(CI)" } else { "" };
-        let output = Command::new("icacls.exe")
-            .arg(target)
-            .args([
-                "/inheritance:r",
-                "/grant:r",
-                &format!("*S-1-5-18:{suffix}F"),
-                &format!("*S-1-5-32-544:{suffix}F"),
-                &format!("*S-1-5-32-545:{suffix}RX"),
-                "/C",
-                "/Q",
-            ])
-            .output()
-            .map_err(|e| format!("icacls spawn failed: {e}"))?;
+        let output = {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            // ponytail: 隐藏控制台，避免启动时闪黑框
+            Command::new("icacls.exe")
+                .creation_flags(CREATE_NO_WINDOW)
+                .arg(target)
+                .args([
+                    "/inheritance:r",
+                    "/grant:r",
+                    &format!("*S-1-5-18:{suffix}F"),
+                    &format!("*S-1-5-32-544:{suffix}F"),
+                    &format!("*S-1-5-32-545:{suffix}RX"),
+                    "/C",
+                    "/Q",
+                ])
+                .output()
+                .map_err(|e| format!("icacls spawn failed: {e}"))?
+        };
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             return Err(format!("failed to secure Gadget runtime ACL: {}", stdout.trim()));
@@ -474,7 +480,8 @@ fn windows_find_host_pid() -> Option<u32> {
                 if pid > 0 {
                     let _ = RegCloseKey(service_key);
                     let _ = RegCloseKey(root);
-                    log::info!(
+                    // debug：hub loop 每轮重试都会调用本函数，INFO 会每秒刷屏撑爆日志文件
+                    log::debug!(
                         "XIAOMI HID TAP HostPid={pid} type={ty} service={service_name} instance={instance_name}"
                     );
                     return Some(pid);
