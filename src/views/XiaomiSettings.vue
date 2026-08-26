@@ -130,30 +130,35 @@ const showVoiceShortcutTip = ref(false);
 const showGainTip = ref(false);
 const showTriggerTip = ref(false);
 const showRepairTip = ref(false);
+const showWinuhidTip = ref(false);
 const showAtvvTip = ref(false);
 const showRestartTip = ref(false);
 const voiceInfoBtn = ref<HTMLElement | null>(null);
 const gainInfoBtn = ref<HTMLElement | null>(null);
 const triggerInfoBtn = ref<HTMLElement | null>(null);
 const repairInfoBtn = ref<HTMLElement | null>(null);
+const winuhidInfoBtn = ref<HTMLElement | null>(null);
 const atvvInfoBtn = ref<HTMLElement | null>(null);
 const restartInfoBtn = ref<HTMLElement | null>(null);
 const voiceTipEl = ref<HTMLElement | null>(null);
 const gainTipEl = ref<HTMLElement | null>(null);
 const triggerTipEl = ref<HTMLElement | null>(null);
 const repairTipEl = ref<HTMLElement | null>(null);
+const winuhidTipEl = ref<HTMLElement | null>(null);
 const atvvTipEl = ref<HTMLElement | null>(null);
 const restartTipEl = ref<HTMLElement | null>(null);
 const voiceTipStyle = ref<Record<string, string>>({});
 const gainTipStyle = ref<Record<string, string>>({});
 const triggerTipStyle = ref<Record<string, string>>({});
 const repairTipStyle = ref<Record<string, string>>({});
+const winuhidTipStyle = ref<Record<string, string>>({});
 const atvvTipStyle = ref<Record<string, string>>({});
 const restartTipStyle = ref<Record<string, string>>({});
 let voiceTipCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let gainTipCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let triggerTipCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let repairTipCloseTimer: ReturnType<typeof setTimeout> | null = null;
+let winuhidTipCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let atvvTipCloseTimer: ReturnType<typeof setTimeout> | null = null;
 let restartTipCloseTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -334,6 +339,40 @@ function toggleRepairTip() {
   }
 }
 
+async function openWinuhidTip() {
+  if (winuhidTipCloseTimer) {
+    clearTimeout(winuhidTipCloseTimer);
+    winuhidTipCloseTimer = null;
+  }
+  winuhidTipStyle.value = {
+    position: "fixed",
+    top: "0px",
+    left: "0px",
+    visibility: "hidden",
+    zIndex: "2000",
+  };
+  showWinuhidTip.value = true;
+  await nextTick();
+  requestAnimationFrame(() => {
+    placeInfoTip(winuhidInfoBtn.value, winuhidTipEl.value, winuhidTipStyle);
+  });
+}
+
+function scheduleCloseWinuhidTip() {
+  if (winuhidTipCloseTimer) clearTimeout(winuhidTipCloseTimer);
+  winuhidTipCloseTimer = setTimeout(() => {
+    showWinuhidTip.value = false;
+  }, 120);
+}
+
+function toggleWinuhidTip() {
+  if (showWinuhidTip.value) {
+    showWinuhidTip.value = false;
+  } else {
+    void openWinuhidTip();
+  }
+}
+
 async function openAtvvTip() {
   if (atvvTipCloseTimer) {
     clearTimeout(atvvTipCloseTimer);
@@ -410,6 +449,7 @@ function onViewportChange() {
     showGainTip.value ||
     showTriggerTip.value ||
     showRepairTip.value ||
+    showWinuhidTip.value ||
     showAtvvTip.value ||
     showRestartTip.value;
   if (!anyTip) return;
@@ -427,6 +467,9 @@ function onViewportChange() {
     }
     if (showRepairTip.value) {
       placeInfoTip(repairInfoBtn.value, repairTipEl.value, repairTipStyle);
+    }
+    if (showWinuhidTip.value) {
+      placeInfoTip(winuhidInfoBtn.value, winuhidTipEl.value, winuhidTipStyle);
     }
     if (showAtvvTip.value) {
       placeInfoTip(atvvInfoBtn.value, atvvTipEl.value, atvvTipStyle);
@@ -1002,6 +1045,7 @@ onUnmounted(() => {
   if (gainTipCloseTimer) clearTimeout(gainTipCloseTimer);
   if (triggerTipCloseTimer) clearTimeout(triggerTipCloseTimer);
   if (repairTipCloseTimer) clearTimeout(repairTipCloseTimer);
+  if (winuhidTipCloseTimer) clearTimeout(winuhidTipCloseTimer);
   if (atvvTipCloseTimer) clearTimeout(atvvTipCloseTimer);
   if (restartTipCloseTimer) clearTimeout(restartTipCloseTimer);
   if (mappingFlashClearTimer) clearTimeout(mappingFlashClearTimer);
@@ -1209,13 +1253,53 @@ function toggleConnection() {
                 {{ winuhidRepairing ? "修复中..." : "修复虚拟键盘" }}
               </button>
               <button
+                ref="winuhidInfoBtn"
                 type="button"
                 class="title-info"
+                :aria-expanded="showWinuhidTip"
                 aria-label="修复虚拟键盘说明"
-                title="安装 WinUHid 虚拟键盘驱动，让语音键像真实硬件一样唤醒豆包/千问"
+                @mouseenter="openWinuhidTip"
+                @mouseleave="scheduleCloseWinuhidTip"
+                @focus="openWinuhidTip"
+                @blur="scheduleCloseWinuhidTip"
+                @click.stop="toggleWinuhidTip"
               >
                 <span class="title-info-icon" aria-hidden="true">i</span>
               </button>
+              <Teleport to="body">
+                <div
+                  v-if="showWinuhidTip"
+                  ref="winuhidTipEl"
+                  class="floating-info-tip voice-info-tip"
+                  role="tooltip"
+                  :style="winuhidTipStyle"
+                  @mouseenter="openWinuhidTip"
+                  @mouseleave="scheduleCloseWinuhidTip"
+                >
+                  <p class="tip-lead">
+                    在电脑里装一块「虚拟键盘」，让豆包、千问等输入法把遥控器的语音键当成真键盘按键，而不是普通模拟点击（那种方式常被输入法忽略）。
+                  </p>
+                  <div class="tip-block tip-on">
+                    <div class="tip-badge">会做什么</div>
+                    <ul>
+                      <li>部署 WinUHid 组件，并安装内嵌的虚拟键盘驱动</li>
+                      <li>在系统里注册并启动虚拟键盘设备，让语音组合键按硬件方式注入</li>
+                      <li>完成后状态栏「虚拟键盘」应显示就绪；仍不行时会提示是否需重启</li>
+                    </ul>
+                  </div>
+                  <div class="tip-block tip-off">
+                    <div class="tip-badge">什么时候点</div>
+                    <ul>
+                      <li>首次用豆包 / 千问语音，或重装系统、换电脑后</li>
+                      <li>状态里「虚拟键盘」未就绪，或按语音键唤不醒输入法</li>
+                      <li>日志提示需要 WinUHid、语音键被拦截时</li>
+                    </ul>
+                  </div>
+                  <p class="tip-foot">
+                    会弹出 UAC 管理员确认，请点允许。这和「虚拟声卡检测与修复」「修复 ATVV 连接」不是一回事：那边管声音和蓝牙语音通道，这边管按键能不能被输入法认出来。平时虚拟键盘已就绪就不必反复点。
+                  </p>
+                </div>
+              </Teleport>
             </div>
             <div class="host-action-group">
               <button
@@ -2041,19 +2125,18 @@ function toggleConnection() {
   padding: 16px 18px;
 }
 .host-status-row {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
   align-items: stretch;
-  gap: 10px;
   margin: 0 0 12px;
 }
 .host-status-item {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 8px;
-  flex: 1 1 0;
-  min-width: 160px;
-  padding: 10px 12px;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: #fff;
@@ -2079,9 +2162,12 @@ function toggleConnection() {
   font-weight: 600;
   color: var(--text);
   white-space: nowrap;
+  flex-shrink: 0;
 }
 .host-item-state {
   margin-left: auto;
+  padding-left: 4px;
+  flex-shrink: 0;
   font-size: 12px;
   font-weight: 500;
   color: var(--text-secondary);
@@ -2099,13 +2185,18 @@ function toggleConnection() {
 .host-status-cable {
   flex-wrap: nowrap;
 }
+@media (min-width: 841px) and (max-width: 980px) {
+  /* 侧栏日志并排时内容区偏窄，改为 2×2 避免块内文字挤出 */
+  .host-status-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 .cable-meter {
-  flex: 0 0 25%;
+  flex: 0 1 25%;
   max-width: 25%;
-  min-width: 36px;
+  min-width: 12px;
   display: flex;
   align-items: center;
-  margin-left: 4px;
 }
 .cable-meter-track {
   flex: 1;

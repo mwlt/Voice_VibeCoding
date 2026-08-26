@@ -1,8 +1,8 @@
 {
-  "version": "1.5.0",
-  "notes": "v1.5.0：\n- 增加豆包、千问等语音输入法预设与设置说明\n- 新增「修复虚拟键盘」与 WinUHid 状态显示\n- 应用内更新下载（进度条）并自动启动安装程序\n- 键位页语音键快速设置，一键应用常用组合\n- WinUHid 组合键分步注入、粘键防护与内嵌运行时",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.0",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.0",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.5.0/Voice%20VibeCoding_1.5.0_x64-setup.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.5.0/Voice.VibeCoding_1.5.0_x64-setup.exe"
+  "version": "1.5.1",
+  "notes": "v1.5.1：\n- 修复 WinUHid 虚拟键盘安装流程（注册→绑定→扫描，无 devcon 也可安装）\n- 「修复虚拟键盘」增加悬浮说明，与 ATVV/声卡修复一致\n- 主机状态栏四列同排，虚拟声卡电平条与状态文字不再挤出边框\n- WinUHid 安装阶段日志与修复提示更清晰",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.1",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.1",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.5.1/Voice%20VibeCoding_1.5.1_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.5.1/Voice.VibeCoding_1.5.1_x64-setup.exe"
 }

@@ -217,6 +217,52 @@ fn script_result_line(text: &str) -> Option<&str> {
         .find_map(|l| l.trim().strip_prefix("Result: ").map(str::trim))
 }
 
+fn script_last_phase(text: &str) -> Option<String> {
+    text.lines()
+        .filter_map(|l| {
+            let t = l.trim();
+            t.strip_prefix("Phase: ").map(str::trim)
+        })
+        .map(str::to_string)
+        .last()
+}
+
+fn script_error_phase(text: &str) -> Option<String> {
+    text.lines().find_map(|l| {
+        let t = l.trim();
+        if t.starts_with("Phase: Error |") {
+            Some(t.trim_start_matches("Phase: Error |").trim().to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn format_repair_failure(output: &std::process::Output, result_raw: &str) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if let Some(err) = script_error_phase(&stdout) {
+        return format!("虚拟键盘修复失败：{err}");
+    }
+    if let Some(phase) = script_last_phase(&stdout) {
+        return format!(
+            "虚拟键盘修复未完成 (code={:?})。最后阶段：{phase}",
+            output.status.code()
+        );
+    }
+    let detail = if !stderr.is_empty() {
+        stderr.trim().to_string()
+    } else if !result_raw.is_empty() {
+        result_raw.to_string()
+    } else {
+        stdout.trim().to_string()
+    };
+    format!(
+        "虚拟键盘修复未完成 (code={:?})。{detail}",
+        output.status.code()
+    )
+}
+
 /// 启动时尽力部署 DLL 并尝试打开注入器（不弹 UAC）。
 pub fn ensure_runtime_quiet() {
     match deploy_dll_beside_exe() {
@@ -309,17 +355,7 @@ pub fn repair_embedded() -> Result<WinUHidActionResult, String> {
     } else if needs_reboot {
         "驱动已安装，必须重启 Windows 后虚拟键盘才会生效。重启后再点一次「修复虚拟键盘」。".into()
     } else if !output.status.success() {
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !result_raw.is_empty() {
-            result_raw.clone()
-        } else {
-            stdout
-        };
-        format!(
-            "虚拟键盘修复未完成 (code={:?})。{detail}",
-            output.status.code()
-        )
+        format_repair_failure(&output, &result_raw)
     } else {
         format!(
             "脚本已执行，但 WinUHid 仍不可用。{} 可查看日志或重启后再试。",
@@ -357,5 +393,29 @@ pub fn check_or_repair() -> WinUHidActionResult {
             needs_reboot: false,
             message: e,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_script_result_line() {
+        let text = "Phase: Verify | ok\nResult: OK\n";
+        assert_eq!(script_result_line(text), Some("OK"));
+    }
+
+    #[test]
+    fn parse_last_phase_and_error() {
+        let text = "Phase: BindDriver | exit=0 OK\nPhase: Error | pnputil failed\n";
+        assert_eq!(
+            script_last_phase(text).as_deref(),
+            Some("Error | pnputil failed")
+        );
+        assert_eq!(
+            script_error_phase(text).as_deref(),
+            Some("pnputil failed")
+        );
     }
 }

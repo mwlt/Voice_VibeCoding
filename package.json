@@ -1,6 +1,6 @@
 {
   "name": "xiaomi-remote-2-pro",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Voice VibeCoding — 语音氛围编程 / 小米·T1·V60 遥控器桥接 (Rust + Tauri 2 + Vue 3)",
   "type": "module",
   "scripts": {
@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:winuhid-install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-winuhid-install.ps1",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --test config_voice_release --test voice_chord_and_release --test ime_voice_wake_route",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
