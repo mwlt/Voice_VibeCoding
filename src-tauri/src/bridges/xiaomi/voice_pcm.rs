@@ -35,6 +35,32 @@ fn peer_addr() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], pcm_port()))
 }
 
+/// PING 重试间隔（冷启动首按尽量快）
+pub const PING_RETRY_INTERVAL_MS: u64 = 15;
+pub const PING_DEADLINE_SECS: u64 = 4;
+
+pub fn ping_retry_interval_ms() -> u64 {
+    PING_RETRY_INTERVAL_MS
+}
+
+pub fn ping_deadline_secs() -> u64 {
+    PING_DEADLINE_SECS
+}
+
+/// 语音键按下：未就绪时同步 ensure，避免首句才阻塞 PING。
+pub fn ensure_pcm_ready_on_press() {
+    if READY.load(Ordering::Acquire) {
+        return;
+    }
+    match ensure_started() {
+        Ok(()) => log::info!("XIAOMI VOICE PCM ready on press (sync ensure)"),
+        Err(e) => {
+            log::warn!("XIAOMI VOICE PCM sync ensure on press failed: {e}; fallback warmup_async");
+            warmup_async();
+        }
+    }
+}
+
 /// 等待 router PONG（对齐 Python 最多 ~4s）
 pub fn ensure_started() -> Result<(), String> {
     if READY.load(Ordering::Acquire) {
@@ -51,7 +77,7 @@ pub fn ensure_started() -> Result<(), String> {
     let sock = UdpSocket::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     sock.set_read_timeout(Some(Duration::from_millis(150)))
         .map_err(|e| e.to_string())?;
-    let deadline = Instant::now() + Duration::from_secs(4);
+    let deadline = Instant::now() + Duration::from_secs(PING_DEADLINE_SECS);
     let mut ok = false;
     while Instant::now() < deadline {
         let _ = sock.send_to(b"PING", peer);
@@ -62,7 +88,7 @@ pub fn ensure_started() -> Result<(), String> {
                 break;
             }
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(PING_RETRY_INTERVAL_MS));
     }
     if !ok {
         return Err(format!("audio router not ready at {peer}"));

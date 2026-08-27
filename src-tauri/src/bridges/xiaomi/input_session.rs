@@ -986,8 +986,7 @@ fn notify_voice_phase(app: &AppHandle, gate: &KeyEmitGate, pressed: bool) {
     emit_key_phase(app, "mic", button_label("mic"), pressed);
 }
 
-fn reset_pcm_session(state: &Arc<Mutex<AtvvVoiceState>>, clear_frames: bool) {
-    use crate::bridges::xiaomi::voice_pcm;
+fn arm_atvv_voice_session(state: &Arc<Mutex<AtvvVoiceState>>, clear_frames: bool) {
     if let Ok(mut st) = state.lock() {
         st.streaming = true;
         st.pending.clear();
@@ -998,11 +997,12 @@ fn reset_pcm_session(state: &Arc<Mutex<AtvvVoiceState>>, clear_frames: bool) {
             st.frames = 0;
         }
     }
-    voice_pcm::clear();
 }
 
-/// 遥控语音键按下：传声 + 按模式注入快捷键
+/// 按 `voice_press::voice_remote_press_steps` 顺序执行遥控语音键按下。
 fn on_voice_remote_press(app: &AppHandle, gate: &KeyEmitGate, state: &Arc<Mutex<AtvvVoiceState>>) {
+    use crate::bridges::xiaomi::voice_pcm;
+
     let toggle = voice_trigger_is_toggle(app);
     let gen = {
         let Ok(mut st) = state.lock() else {
@@ -1018,16 +1018,14 @@ fn on_voice_remote_press(app: &AppHandle, gate: &KeyEmitGate, state: &Arc<Mutex<
         st.press_gen
     };
 
-    reset_pcm_session(state, true);
-    notify_voice_phase(app, gate, true);
-    if !crate::bridges::xiaomi::voice_pcm::is_ready() {
-        crate::bridges::xiaomi::voice_pcm::warmup_async();
-    }
-    crate::bridges::xiaomi::voice_meter::set_session(true);
+    // ArmSessionState
+    arm_atvv_voice_session(state, true);
 
+    // EnsurePcmReady — 同步优先，避免首包才 PING
+    voice_pcm::ensure_pcm_ready_on_press();
+
+    // ShortcutDown — 输入法先于 VB-CABLE CLEAR
     if toggle {
-        // 点击模式：立即注入快捷键 DOWN（无需等待 200ms 判定，消除响应延迟）。
-        // 短按在抬起时走 UP（等效一次 tap），长按保持 DOWN 传声，行为与原语义一致。
         {
             let Ok(mut st) = state.lock() else {
                 return;
@@ -1042,6 +1040,13 @@ fn on_voice_remote_press(app: &AppHandle, gate: &KeyEmitGate, state: &Arc<Mutex<
         key_mapping::on_remote_button(app, "mic", true);
         log::info!("XIAOMI ATVV AUDIO_START hold-mode → shortcut DOWN");
     }
+
+    // PcmClear
+    voice_pcm::clear();
+
+    // NotifyUi + MeterOn
+    notify_voice_phase(app, gate, true);
+    crate::bridges::xiaomi::voice_meter::set_session(true);
 }
 
 /// 遥控语音键抬起：结束传声 + 短按 TAP / 长按 UP
