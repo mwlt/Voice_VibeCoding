@@ -3,8 +3,8 @@
 //! 运行: cargo test -p remote-bridge-hub --lib bridges::xiaomi::voice_f5_suppress -- --nocapture
 
 use crate::bridges::xiaomi::key_mapping::{
-    arm_voice_native_suppress, disarm_voice_native_suppress, voice_native_suppress_active,
-    VOICE_F5_SUPPRESS_DEADLINE_MS,
+    arm_voice_native_suppress, disarm_voice_native_suppress, should_suppress_voice_f5,
+    voice_native_suppress_active, VOICE_F5_SUPPRESS_DEADLINE_MS,
 };
 use std::time::Duration;
 
@@ -36,4 +36,24 @@ fn voice_f5_sticky_arm_stays_active_past_old_120ms_window() {
 #[test]
 fn notepad_f5_is_vk_0x74() {
     assert_eq!(0x74u16, 0x74);
+}
+
+#[test]
+fn suppress_firmware_f5_while_voice_native_armed() {
+    disarm_voice_native_suppress();
+    arm_voice_native_suppress();
+    assert!(
+        should_suppress_voice_f5(true, false),
+        "native F5 must be swallowed while voice chord is armed"
+    );
+    assert!(
+        should_suppress_voice_f5(true, false),
+        "sticky down suppress covers typematic repeats"
+    );
+    assert!(
+        should_suppress_voice_f5(false, true),
+        "F5 up should be swallowed to complete the cycle"
+    );
+    disarm_voice_native_suppress();
+    assert!(!should_suppress_voice_f5(true, false));
 }

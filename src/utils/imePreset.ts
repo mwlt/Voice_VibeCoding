@@ -37,29 +37,27 @@ export interface ImeFaqSection {
 
 export const IME_FAQ = {
   warnTitle:
-    "某些输入法（例如微信输入法）设置了某快捷键/组合快捷键后，会阻碍本软件录入相同快捷键/组合，请参考「可行设置流程」进行设置。",
+    "有些输入法占用了你要录的快捷键，本软件就录不进去。可先改输入法快捷键，或直接用「快速应用」。",
   sections: [
     {
-      title: "可行设置流程",
+      title: "怎么录快捷键",
       items: [
-        "录入前先临时关掉或改掉输入法语音快捷键（或先切到其它输入法），本软件录完后再改回。",
-        "不必现场录入：在对应输入法 Tab 点「快速应用」，直接写好本软件映射。",
-        "先录一个输入法暂未占用的组合键，录完后再把输入法快捷键改成与本软件一致。",
+        "录之前，先把输入法里的语音快捷键临时关掉或改掉。",
+        "也可以不录：点「快速应用」，本软件会自动写好。",
+        "先录别的组合键，录完再把输入法改成一样的也行。",
       ],
     },
     {
-      title: "虚拟键盘（WinUHid）",
+      title: "虚拟键盘",
       items: [
-        "豆包 / 千问语音唤醒需要虚拟键盘已就绪（状态栏「虚拟键盘 · 已就绪」）。",
-        "若未就绪，点「修复虚拟键盘」安装内嵌驱动（需管理员确认）。",
-        "千问「左 Win + 左 Alt」「左 Ctrl + 左 Win」等多修饰键组合会自动分步注入。",
+        "微信 / 豆包 / 千问的组合键唤醒，需要状态栏显示「虚拟键盘 · 已就绪」。",
+        "未就绪时点「修复虚拟键盘」安装驱动（需管理员确认）。",
+        "两边快捷键要一致；按住遥控语音键 = 按住快捷键，松手 = 松开。",
       ],
     },
     {
       title: "其它输入法",
-      items: [
-        "在「按键映射」中把语音键设成与输入法相同的组合，并选择「按住」或「点击」。",
-      ],
+      items: ["在「按键映射」里把语音键设成和输入法一样的组合键即可。"],
     },
   ] satisfies ImeFaqSection[],
 };
@@ -73,7 +71,7 @@ export const IME_TABS: ImeTabDefinition[] = [
   {
     id: "doubao",
     label: "豆包",
-    presetIds: ["doubao-hold", "doubao-hands-free"],
+    presetIds: ["doubao-hold"],
   },
   {
     id: "qianwen",
@@ -87,51 +85,48 @@ export const IME_PRESETS: Record<ImePresetId, ImePresetDefinition> = {
   "wechat-hold": {
     id: "wechat-hold",
     title: "按住说话",
-    tag: "按住 · Ctrl+Win",
+    tag: "Ctrl+Win",
     shortcutVks: [0xa2, 0x5b],
     voiceHotkey: ["leftctrl", "leftwin"],
     triggerMode: "Hold",
     voiceReleaseBehavior: "None",
-    applyHint: "已应用：语音键 = 左 Ctrl + 左 Win，触发模式 = 按住",
-    logMessage: "设置建议：已快速应用微信按住说话映射（左 Ctrl + 左 Win）",
+    applyHint: "已应用：左 Ctrl + 左 Win",
+    logMessage: "设置建议：已快速应用微信按住说话（左 Ctrl + 左 Win）",
     steps: [
-      "本软件语音键设为「左 Ctrl + 左 Win」，触发模式选「按住」（可用下方快速应用）。",
-      "打开微信输入法 → 设置 → 快捷键，将「按住说话」设为与本软件相同的组合键。",
-      "听写麦克风选 CABLE Output（VB-Audio Virtual Cable）。",
+      "点「快速应用」，或手动把语音键设成和微信一样的组合键。",
+      "微信输入法 → 设置 → 快捷键，「按住说话」改成相同组合（见下图，也可换别的键）。",
+      "麦克风选 CABLE Output。",
+      "按住遥控语音键说话，松手结束并上屏。",
     ],
   },
   "doubao-hold": {
     id: "doubao-hold",
     title: "长按语音",
-    tag: "按住 · 右 Alt",
+    tag: "右 Alt",
     shortcutVks: [0xa5],
     voiceHotkey: ["rightalt"],
     triggerMode: "Hold",
     voiceReleaseBehavior: "None",
-    applyHint: "已应用：语音键 = 右 Alt，触发模式 = 按住",
-    logMessage: "设置建议：已快速应用豆包长按语音映射（右 Alt）",
+    applyHint: "已应用：右 Alt",
+    logMessage: "设置建议：已快速应用豆包长按语音（右 Alt）",
     steps: [
-      "本软件语音键设为「右 Alt」，触发模式选「按住」。",
-      "在豆包中启用长按语音，并将快捷键设为右 Alt（与本软件一致）。",
-      "听写麦克风选 CABLE Output；焦点放在可输入的文本框。",
-      "按住遥控语音键说话，松开后豆包应结束听写并上屏。",
+      "点「快速应用」，语音键会设为右 Alt。",
+      "豆包设置里打开「长按模式」，快捷键也设为右 Alt（见下图）。",
+      "麦克风选 CABLE Output，光标放在输入框。",
+      "按住遥控语音键说话，松手结束并上屏。",
     ],
   },
   "doubao-hands-free": {
     id: "doubao-hands-free",
     title: "免按语音",
-    tag: "点击 · 右 Alt+空格",
+    tag: "右 Alt + 空格",
     shortcutVks: [0xa5, 0x20],
     voiceHotkey: ["rightalt", "space"],
     triggerMode: "Toggle",
     voiceReleaseBehavior: "None",
-    applyHint: "已应用：语音键 = 右 Alt + 空格，触发模式 = 点击",
-    logMessage: "设置建议：已快速应用豆包免按语音映射（右 Alt + 空格）",
-    steps: [
-      "本软件语音键设为「右 Alt + 空格」，触发模式选「点击」。",
-      "在豆包中开启免按/开关式语音，并将快捷键设为右 Alt + 空格。",
-      "听写麦克风选 CABLE Output。",
-    ],
+    applyHint: "已应用：右 Alt + 空格",
+    logMessage: "设置建议：已快速应用豆包免按语音（右 Alt + 空格）",
+    steps: [],
   },
   "qianwen-hold": {
     id: "qianwen-hold",
@@ -141,8 +136,8 @@ export const IME_PRESETS: Record<ImePresetId, ImePresetDefinition> = {
     voiceHotkey: ["rightalt"],
     triggerMode: "Hold",
     voiceReleaseBehavior: "None",
-    applyHint: "已应用：语音键 = 右 Alt，触发模式 = 按住",
-    logMessage: "设置建议：已快速应用千问按住说话映射（右 Alt）",
+    applyHint: "已应用：右 Alt",
+    logMessage: "设置建议：已快速应用千问（右 Alt）",
     steps: [],
   },
   "qianwen-win-alt": {
@@ -153,8 +148,8 @@ export const IME_PRESETS: Record<ImePresetId, ImePresetDefinition> = {
     voiceHotkey: ["leftwin", "leftalt"],
     triggerMode: "Hold",
     voiceReleaseBehavior: "None",
-    applyHint: "已应用：语音键 = 左 Win + 左 Alt，触发模式 = 按住",
-    logMessage: "设置建议：已快速应用千问按住说话映射（左 Win + 左 Alt）",
+    applyHint: "已应用：左 Win + 左 Alt",
+    logMessage: "设置建议：已快速应用千问（左 Win + 左 Alt）",
     steps: [],
   },
   "qianwen-ctrl-win": {
@@ -165,22 +160,22 @@ export const IME_PRESETS: Record<ImePresetId, ImePresetDefinition> = {
     voiceHotkey: ["leftctrl", "leftwin"],
     triggerMode: "Hold",
     voiceReleaseBehavior: "None",
-    applyHint: "已应用：语音键 = 左 Ctrl + 左 Win，触发模式 = 按住",
-    logMessage: "设置建议：已快速应用千问按住说话映射（左 Ctrl + 左 Win）",
+    applyHint: "已应用：左 Ctrl + 左 Win",
+    logMessage: "设置建议：已快速应用千问（左 Ctrl + 左 Win）",
     steps: [],
   },
 };
 
-/** 千问 Tab 合并展示：共用说明 + 三个快速应用按钮 */
+/** 千问 Tab：共用说明 + 三个快速应用按钮 */
 export const QIANWEN_GUIDE = {
   title: "按住说话",
-  tag: "三种快捷键任选其一",
+  tag: "三选一",
   steps: [
-    "在千问设置中，将按住语音快捷键选为「左 Ctrl + 左 Win」「左 Win + 左 Alt」或「右 Alt」之一（须与下方快速应用按钮一致）。",
-    "点下方对应「快速应用」按钮，本软件语音键与触发模式（按住）会自动写好。",
-    "听写麦克风选 CABLE Output；焦点放在可输入文本框。",
-    "若选前两种组合，需虚拟键盘（WinUHid）已就绪；多修饰键会分步注入以匹配真实按键时序。",
-    "按住遥控语音键说话，松开后结束听写并上屏。",
+    "在千问里选一个按住语音快捷键，和下方「快速应用」按钮一致。",
+    "点对应按钮，本软件会自动写好映射。",
+    "麦克风选 CABLE Output。",
+    "Ctrl+Win、Win+Alt 需要虚拟键盘就绪。",
+    "按住遥控语音键说话，松手结束并上屏。",
   ],
 } as const;
 

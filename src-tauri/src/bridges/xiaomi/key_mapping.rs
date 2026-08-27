@@ -431,6 +431,7 @@ fn handle_voice(app: &AppHandle, pressed: bool) {
         }
     } else {
         force_release_voice_shortcut("remote_up");
+        disarm_voice_native_suppress();
     }
 }
 

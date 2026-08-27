@@ -58,11 +58,12 @@ describe("applyImePresetConfig", () => {
     expect(ids).toEqual([
       "wechat-hold",
       "doubao-hold",
-      "doubao-hands-free",
       "qianwen-ctrl-win",
       "qianwen-win-alt",
       "qianwen-hold",
     ]);
-    expect(Object.keys(IME_PRESETS).sort()).toEqual([...ids].sort());
+    expect(Object.keys(IME_PRESETS).sort()).toEqual(
+      [...ids, "doubao-hands-free"].sort(),
+    );
   });
 });

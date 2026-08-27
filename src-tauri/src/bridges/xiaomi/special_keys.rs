@@ -113,7 +113,7 @@ pub fn start_special_key_hook() {
             RUNNING.store(false, Ordering::Release);
             HOOK_THREAD_ID.store(0, Ordering::Release);
         });
-    // ponytail: 线程启动失败要复位 RUNNING，否则钩子永久卡死且静默不重试
+    // 线程启动失败要复位 RUNNING，否则钩子永久卡死且静默不重试
     if spawned.is_err() {
         RUNNING.store(false, Ordering::Release);
         log::error!("XIAOMI SPECIAL KEY hook thread spawn failed");

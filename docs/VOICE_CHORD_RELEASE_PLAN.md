@@ -65,3 +65,9 @@ cargo check --manifest-path src-tauri/Cargo.toml
 - Step 3：`on_voice_remote_release` 先 `shortcut UP`，再 sleep/PCM 收尾。
 - Step 4：`recover_count()` 原子计数 + 逐键 `sanitizer cleared` 日志。
 - Step 5：2026-08-27 复跑 — `npm test` 5 passed、`test:rust` 16 passed、`cargo check` ok。
+
+## PR #8 追加（2026-08-27）
+
+- 语音 DOWN 改用 **`press_single`**（Ctrl+Win 等修饰键单 HID 报告），见 `docs/VOICE_HOLD_PR8.md`。
+- UP 路径不变：sanitizer + `disarm_voice_native_suppress` 与 `force_release_voice_shortcut` 同路径。
+- 集成测与 `voice_f5_suppress` / `voice_single_report` 单测覆盖 F5 抑制与 modifier 字节。

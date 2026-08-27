@@ -1,8 +1,8 @@
 {
-  "version": "1.5.5",
-  "notes": "v1.5.5：\n- WebView 白屏/黑屏三级恢复：reload → recreate → 托盘「重启软件」\n- 关闭到托盘改 minimize，降低 WebView2 渲染进程被回收\n- 托盘「刷新界面」reload 失败自动 recreate\n- 设置页移除冗余「关于」块\n- 含上一版：忽略更新后设置里「检查更新」仍可打开弹窗并下载",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.5",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.5",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.5.5/Voice%20VibeCoding_1.5.5_x64-setup.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.5.5/Voice.VibeCoding_1.5.5_x64-setup.exe"
+  "version": "1.5.6",
+  "notes": "v1.5.6：\n- 语音键按住说话：WinUHid 单报告注入（Ctrl+Win 等），吞遥控器泄漏 F5，微信/豆包/千问按住说话更可靠\n- 输入法设置：微信/豆包说明与参考图，口语化步骤；隐藏「触发模式」UI\n- 含 PR #8：press_single/release_single、handle_voice 纯 hold、disarm 统一、F5 抑制单测\n- 含 v1.5.5：WebView 白屏/黑屏 reload→recreate→重启；关闭到托盘改 minimize\n- 含上一版：忽略更新后设置里「检查更新」仍可打开弹窗并下载",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.6",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.6",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.5.6/Voice%20VibeCoding_1.5.6_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.5.6/Voice.VibeCoding_1.5.6_x64-setup.exe"
 }

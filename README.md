@@ -24,7 +24,7 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 
 
-**v1.5.5** · Windows 桌面应用
+**v1.5.6** · Windows 桌面应用
 
 把小米遥控器 2 Pro（及预留的 T1 / 汉王 V60）接到电脑：按键可映射成键盘快捷键，语音可送到输入法听写。
 
@@ -60,8 +60,9 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 | HID 注入闪窗 | 提权注入 WUDFHost 时隐藏控制台闪窗（UAC 仍保留） | 优化 |
 | 音频信号波形 | 设置页实时显示 BLE 解码电平 / 波形，便于判断语音是否真正进机 | 增强 |
 | 虚拟声卡检测与安装 | 应用内检测 VB-CABLE，支持内嵌驱动或官网安装指引，结果写回主机状态 | 增强 |
-| 输入法设置引导 | 「输入法设置」分 Tab：微信 / 豆包 / 千问 / 常见问题；豆包、千问等语音输入法一键预设与说明 | 增强 |
-| 语音键快速设置 | 键位映射页一键设置常用语音组合（微信按住、千问 Win+Alt、豆包免按等） | 新增 |
+| 语音键按住说话（微信等） | WinUHid 单报告注入 Ctrl+Win；吞遥控器泄漏 F5；松手统一 disarm；输入法设置说明与参考图 | 修复 |
+| 输入法设置引导 | 「输入法设置」分 Tab：微信 / 豆包 / 千问 / 常见问题；一键预设、设置参考图、口语化步骤 | 增强 |
+| 语音键快速设置 | 键位映射页一键设置常用语音组合（微信、千问 Win+Alt 等） | 新增 |
 | 修复虚拟键盘 | 「修复虚拟键盘」修复 WinUHid 虚拟键盘；支持导出/应用内下载驱动包（进度条、自选保存路径）；Release 附带 WinUHid_Manual 手动安装包 | 增强 |
 | 配置加载容错 | 按键映射区依赖配置加载；损坏 xiaomi.json 自动备份并恢复默认；失败时显示错误与重试 | 修复 |
 | 主机状态栏布局 | 四列同排显示虚拟声卡/键盘/路由/桥接；虚拟声卡电平条可收缩，状态文字不挤出边框 | 优化 |
@@ -89,16 +90,16 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 ## 下载安装包
 
-正式安装包在两边的 Release 页（当前 **v1.5.5**）：
+正式安装包在两边的 Release 页（当前 **v1.5.6**）：
 
-- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.5)（国内优先）
-- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.5)
+- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.6)（国内优先）
+- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.6)
 
 常用文件：
 
-- `Voice VibeCoding_1.5.5_x64-setup.exe`（NSIS）
-- `Voice VibeCoding_1.5.5_x64_zh-CN.msi`
-- `WinUHid_Manual_1.5.5.zip`（WinUHid 虚拟键盘手动安装包，也可在应用内「修复虚拟键盘 → 下载驱动包」下载）
+- `Voice VibeCoding_1.5.6_x64-setup.exe`（NSIS）
+- `Voice VibeCoding_1.5.6_x64_zh-CN.msi`
+- `WinUHid_Manual_1.5.6.zip`（WinUHid 虚拟键盘手动安装包，也可在应用内「修复虚拟键盘 → 下载驱动包」下载）
 
 安装时若提示无法覆盖 `remote-bridge-hub.exe`，请先退出本软件（含托盘）再重试。
 
@@ -225,8 +226,8 @@ npm run tauri:build
 | 类型       | 路径                                                                            |
 | -------- | ----------------------------------------------------------------------------- |
 | 可执行文件    | `src-tauri/target/release/remote-bridge-hub.exe`                              |
-| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.5.5_x64_zh-CN.msi`  |
-| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.5.5_x64-setup.exe` |
+| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.5.6_x64_zh-CN.msi`  |
+| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.5.6_x64-setup.exe` |
 
 
 发新版时请同步更新仓库根目录 `update/latest.json`（提高 `version`，填写 Gitee/GitHub 页面与安装包直链）。应用会优先读 Gitee raw，失败再读 GitHub raw。有新版本时在顶栏显示「新版本」与「查看更新内容」；弹窗内可选「不再提醒此版本」（仅抑制自动提醒，不影响设置页「检查更新」）。详见 [docs/UPDATE_IGNORE_PLAN.md](docs/UPDATE_IGNORE_PLAN.md)。
@@ -262,22 +263,21 @@ npm run tauri:build
 - **HID Tap**：默认 TCP `127.0.0.1:30684`（`REMOTE_BRIDGE_XIAOMI_HID_TAP_PORT`）  
 - 若同时运行旧版 Python 桥接或其它实例，可能抢端口或 BLE，应用会提示冲突
 
-输入法侧请将麦克风选为 **CABLE Output (VB-Audio Virtual Cable)**，且快捷键与本应用「语音键映射」一致（见应用内「输入法设置」）。
+输入法侧请将麦克风选为 **CABLE Output (VB-Audio Virtual Cable)**。语音键映射须与输入法内快捷键一致：**按住遥控语音键 = 按住该组合，松手 = 释放**（见应用内「输入法设置」）。
 
 ### 输入法预设（一键应用）
 
-首页「输入法设置」提供常用预设（与输入法内快捷键保持一致即可）：
+首页「输入法设置」提供常用预设。**本软件映射须与输入法内对应快捷键一致**：
 
-| 预设 | 本软件快捷键 | 触发 | 说明 |
-| --- | --- | --- | --- |
-| 微信 · 按住说话 | 左 Ctrl + 左 Win | 按住 | 微信输入法按住说话 |
-| 豆包 · 长按 | 右 Alt | 按住 | 长按语音 |
-| 豆包 · 免按 | 右 Alt + 空格 | 点击 | 免按/开关式 |
-| 千问 · 右 Alt | 右 Alt | 按住 | 按住说话 |
-| 千问 · Win+Alt | 左 Win + 左 Alt | 按住 | 组合键按住 |
-| 千问 · Ctrl+Win | 左 Ctrl + 左 Win | 按住 | 组合键按住 |
+| 预设 | 本软件快捷键 | 输入法侧须一致 |
+| --- | --- | --- |
+| 微信 · 按住说话 | 左 Ctrl + 左 Win | 微信「按住说话」（可改组合，两边相同即可） |
+| 豆包 · 长按 | 右 Alt | 豆包「长按模式」 |
+| 千问 · 右 Alt | 右 Alt | 千问按住语音 |
+| 千问 · Win+Alt | 左 Win + 左 Alt | 千问按住语音（需 WinUHid） |
+| 千问 · Ctrl+Win | 左 Ctrl + 左 Win | 千问按住语音（需 WinUHid） |
 
-键位映射页「语音键快速设置」可一键应用上表常用组合。其它输入法：在按键映射里设成相同组合，并选择「按住」或「点击」。详见应用内「常见问题」Tab 与 `docs/IME_PROFILE_PLAN.md`。
+键位映射页「语音键快速设置」可一键应用上表常用组合。其它输入法：在按键映射里设成与输入法相同的组合即可。详见应用内「常见问题」Tab、`docs/IME_PROFILE_PLAN.md` 与 `docs/VOICE_HOLD_PR8.md`。
 
 ---
 

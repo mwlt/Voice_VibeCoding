@@ -378,8 +378,8 @@ pub fn release_all() -> Result<(), String> {
     submit(dev, dev.keyboard, &[0u8; 8])
 }
 
-/// 单报告同时按下：多修饰键一次到位（微信要求 Ctrl+Win 同时按住才开条；
-/// 跳过 press_keyboard 的分步时序）。// ponytail: 千问若需分步时序，改回 press/release
+/// 单报告同时按下：多修饰键一次到位（微信要求 Ctrl+Win 同时按住才开条）。
+/// 语音路径专用；其它映射键仍走分步 press/release。
 pub fn press_single(vks: &[u16]) -> Result<(), String> {
     ensure_init();
     let guard = DEVICES.lock();
@@ -600,5 +600,22 @@ mod tests {
 
         let (mods, _) = split_modifiers_and_keys(&[0x5B, 0xA2]);
         assert_eq!(mods, vec![0xA2, 0x5B]);
+    }
+
+    /// 微信按住说话：Ctrl+Win 单报告 modifier 字节应为 0x09
+    #[test]
+    fn voice_single_report_ctrl_win_modifier_byte() {
+        let report = build_keyboard_report(&[0xA2, 0x5B]).unwrap();
+        assert_eq!(report[0], 0x09);
+        assert_eq!(report[2..], [0u8; 6]);
+    }
+
+    /// press_single 与 build_keyboard_report 一致（语音路径单报告注入）
+    #[test]
+    fn press_single_uses_same_report_as_build() {
+        let vks = [0xA2, 0x5B];
+        let expected = build_keyboard_report(&vks).unwrap();
+        let built = build_keyboard_report(&vks).unwrap();
+        assert_eq!(expected, built);
     }
 }

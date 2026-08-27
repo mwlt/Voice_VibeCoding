@@ -1,6 +1,6 @@
 {
   "name": "xiaomi-remote-2-pro",
-  "version": "1.5.5",
+  "version": "1.5.6",
   "description": "Voice VibeCoding — 语音氛围编程 / 小米·T1·V60 遥控器桥接 (Rust + Tauri 2 + Vue 3)",
   "type": "module",
   "scripts": {

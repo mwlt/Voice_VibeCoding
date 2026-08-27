@@ -2,12 +2,12 @@
 # Usage:
 #   $env:GITEE_TOKEN = 'your_gitee_personal_access_token'
 #   $env:GITHUB_TOKEN = 'your_github_pat_with_repo_scope'
-#   .\scripts\pack-winuhid-release.ps1 -Version 1.5.5
-#   .\scripts\publish-release.ps1 -Version 1.5.5 -Tag v1.5.5
+#   .\scripts\pack-winuhid-release.ps1 -Version 1.5.6
+#   .\scripts\publish-release.ps1 -Version 1.5.6 -Tag v1.5.6
 
 param(
-    [string]$Version = "1.5.5",
-    [string]$Tag = "v1.5.5"
+    [string]$Version = "1.5.6",
+    [string]$Tag = "v1.5.6"
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,12 +27,12 @@ Copy-Item $msi $ghMsi -Force
 $body = @"
 ## v$Version
 
-- WebView 白屏/黑屏三级恢复：reload → recreate WebView → 托盘「重启软件」
-- 关闭到托盘改 minimize，降低 WebView2 渲染进程被系统回收
-- 托盘「刷新界面」reload 失败自动 recreate
-- 设置页移除冗余「关于」块，保留通用与版本信息
+- 语音键按住说话：WinUHid 单报告注入（Ctrl+Win 等），吞遥控器泄漏 F5，微信/豆包/千问更可靠
+- 输入法设置：微信/豆包说明与参考图（wechat-ime-hotkeysV2、doubao.png），口语化步骤
+- 隐藏「触发模式」UI（后端固定 hold：按住遥控=按住快捷键，松手=释放）
+- 含 PR #8：press_single/release_single、handle_voice 纯 hold、disarm 统一、F5 抑制单测
+- 含 v1.5.5：WebView 白屏/黑屏 reload → recreate → 托盘「重启软件」；关闭到托盘改 minimize
 - 含上一版：忽略更新后，设置里「检查更新」仍可打开弹窗并下载
-- 含 v1.5.3：配置加载容错、WinUHid 应用内下载、Release 附带 WinUHid 手动安装包
 "@
 
 function Ensure-GiteeRelease {

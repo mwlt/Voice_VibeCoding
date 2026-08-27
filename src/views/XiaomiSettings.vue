@@ -7,7 +7,8 @@ import { useBridgeStore } from "../stores/bridge";
 import { useConfigStore } from "../stores/config";
 import DeviceStatus from "../components/DeviceStatus.vue";
 import KeyMappingStage from "../components/KeyMappingStage.vue";
-import wechatImeHotkeysImg from "../assets/guides/wechat-ime-hotkeys.png";
+import wechatImeHotkeysImg from "../assets/guides/wechat-ime-hotkeysV2.png";
+import doubaoImeHotkeysImg from "../assets/guides/doubao.png";
 import { vkDisplayName } from "../utils/vkDisplay";
 import {
   applyImePresetConfig,
@@ -80,6 +81,9 @@ const imeTabs = listImeTabs();
 const imeFaq = IME_FAQ;
 const qianwenGuide = QIANWEN_GUIDE;
 const qianwenPresets = QIANWEN_PRESET_IDS.map((id) => IME_PRESETS[id]);
+
+/** 设为 true 可恢复「触发模式」下拉（后端当前固定为按住语义，PR #8） */
+const SHOW_VOICE_TRIGGER_MODE = false;
 
 const activeImePresets = computed(() => getPresetsForTab(setupImeTab.value));
 const logText = ref("");
@@ -565,6 +569,10 @@ async function persistVoiceSettings() {
 /** 输入法一键预设（微信 / 豆包 / 千问等） */
 function isWechatPreset(id: ImePresetId): boolean {
   return id.startsWith("wechat-");
+}
+
+function isDoubaoHoldPreset(id: ImePresetId): boolean {
+  return id === "doubao-hold";
 }
 
 function presetShortcutLabel(preset: ImePresetDefinition): string {
@@ -1623,7 +1631,7 @@ async function retryLoadConfig() {
             <button class="btn btn-secondary" type="button" @click="showSetupTips = false">关闭</button>
           </div>
           <p class="setup-tips-lead">
-            按输入法对照设置；本软件语音键映射需与输入法快捷键一致。下方可一键应用常用预设。
+            语音键快捷键要和输入法里设的一样，可先点「快速应用」。
           </p>
           <p v-if="setupApplyHint" class="setup-apply-hint setup-apply-hint-global">
             {{ setupApplyHint }}
@@ -1678,7 +1686,7 @@ async function retryLoadConfig() {
                   :disabled="!config"
                   @click="applyImePreset(preset.id)"
                 >
-                  快速应用：{{ presetShortcutLabel(preset) }} · 按住
+                  快速应用：{{ presetShortcutLabel(preset) }}
                 </button>
               </div>
             </article>
@@ -1705,18 +1713,21 @@ async function retryLoadConfig() {
                   @click="applyImePreset(preset.id)"
                 >
                   快速应用：{{ presetShortcutLabel(preset) }}
-                  ·
-                  {{ preset.triggerMode === "Hold" ? "按住" : "点击" }}
-                  <template v-if="preset.voiceReleaseBehavior === 'TapSameChord'">
-                    · 松手再点关
-                  </template>
                 </button>
               </div>
               <figure v-if="isWechatPreset(preset.id)" class="setup-ime-figure">
-                <figcaption>微信输入法 · 语音输入设置参考图</figcaption>
+                <figcaption>微信 · 「按住说话」快捷键</figcaption>
                 <img
                   :src="wechatImeHotkeysImg"
-                  alt="微信输入法快捷键设置参考图"
+                  alt="微信输入法按住说话快捷键设置"
+                  class="setup-ime-img"
+                />
+              </figure>
+              <figure v-if="isDoubaoHoldPreset(preset.id)" class="setup-ime-figure">
+                <figcaption>豆包 · 「长按模式」快捷键</figcaption>
+                <img
+                  :src="doubaoImeHotkeysImg"
+                  alt="豆包输入法长按模式快捷键设置"
                   class="setup-ime-img"
                 />
               </figure>
@@ -1996,7 +2007,7 @@ async function retryLoadConfig() {
                   <div class="tip-badge">开</div>
                   <ul>
                     <li>声音送到电脑</li>
-                    <li>按触发模式发送你设好的映射键</li>
+                    <li>按住语音键时发送你设好的映射快捷键</li>
                   </ul>
                   <p class="tip-aside">适合靠快捷键开/关的语音输入法。</p>
                 </div>
@@ -2012,7 +2023,7 @@ async function retryLoadConfig() {
             </Teleport>
           </div>
 
-          <div class="voice-toolbar-item">
+          <div v-if="SHOW_VOICE_TRIGGER_MODE" class="voice-toolbar-item">
             <span class="voice-toolbar-label">触发模式</span>
             <select
               v-model="config.trigger_mode"

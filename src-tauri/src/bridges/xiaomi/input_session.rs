@@ -10,12 +10,11 @@ use crate::bridges::xiaomi::key_log::{
     button_label, emit_key_and_map, emit_key_phase, emit_message, KeyEmitGate,
 };
 use crate::bridges::xiaomi::key_mapping;
-use crate::config::manager::ConfigManager;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 const HID_SERVICE: u128 = 0x00001812_0000_1000_8000_00805f9b34fb;
 const HID_REPORT: u128 = 0x00002a4d_0000_1000_8000_00805f9b34fb;
@@ -1045,7 +1044,6 @@ fn on_voice_remote_release(app: &AppHandle, gate: &KeyEmitGate, state: &Arc<Mute
     std::thread::sleep(Duration::from_millis(40));
     voice_pcm::end_session();
 
-    crate::bridges::xiaomi::key_mapping::disarm_voice_native_suppress();
     crate::bridges::xiaomi::voice_meter::set_session(false);
 }
 
