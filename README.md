@@ -65,7 +65,8 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 | 修复虚拟键盘 | 「修复虚拟键盘」修复 WinUHid 虚拟键盘；状态栏显示 WinUHid 就绪/异常；安装脚本改为注册→绑定→扫描标准流程 | 新增 |
 | 主机状态栏布局 | 四列同排显示虚拟声卡/键盘/路由/桥接；虚拟声卡电平条可收缩，状态文字不挤出边框 | 优化 |
 | 应用内更新 | 顶栏版本旁提示新版本；弹窗展示更新内容；软件内下载安装包（进度条）并自动启动安装程序 | 新增 |
-| 语音键注入稳态 | Hold 路径用 VoiceChordState 防粘键；WinUHid 组合键分步 press/release；UP 后 sanitizer 全零报告 + SendInput 仅清键（非唤醒） | 优化 |
+| 语音键注入稳态 | Hold 路径用 VoiceChordState 防粘键；WinUHid 分步 press/release；UP 后 sanitizer 全零报告 + SendInput 仅清键 | 优化 |
+| 语音首包延迟 | 按下先快捷键 DOWN 再 VB-CABLE CLEAR；PCM 按下同步 ensure；PING 重试 15ms | 优化 |
 | 单实例 | 再次启动只激活已有窗口，降低双开抢端口 | 增强 |
 | 应用内日志 | 界面直接查看 / 复制 / 打开日志，不必只翻 `%APPDATA%` 文件 | 增强 |
 | 统一桌面壳 | Rust + Tauri 2 + Vue 单安装包、托盘与设置页一体，免 Python 运行时 | 增强 |

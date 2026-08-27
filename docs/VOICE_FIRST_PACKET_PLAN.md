@@ -25,20 +25,14 @@
 
 | 步骤 | 内容 | 状态 | 验证 |
 | --- | --- | --- | --- |
-| 0 | 本文档 | ⬜ 待做 | — |
-| 1 | L1 `voice_press` 顺序 + 测试 | ⬜ 待做 | `voice_first_packet` test |
-| 2 | `on_voice_remote_press` 按 L1 重排 | ⬜ 待做 | 同上 + 逻辑审查 |
-| 3 | L2/L3 `voice_pcm` PING 间隔 + 按下同步 ensure | ⬜ 待做 | `voice_first_packet` + `test:rust` |
-| 4 | 全量回归 + README | ⬜ 待做 | `npm test` + `test:rust` + `cargo check` |
-
-## 验证命令
-
-```bash
-cargo test --manifest-path src-tauri/Cargo.toml --test voice_first_packet
-npm run test:rust
-cargo check --manifest-path src-tauri/Cargo.toml
-```
+| 0 | 本文档 | ✅ 完成 | 文档已写入 |
+| 1 | L1 `voice_press` 顺序 + 测试 | ✅ 完成 | `voice_first_packet` 3 passed |
+| 2 | `on_voice_remote_press` 按 L1 重排 | ✅ 完成 | ShortcutDown 先于 PcmClear |
+| 3 | L2/L3 `voice_pcm` PING 15ms + 按下同步 ensure | ✅ 完成 | 同上 |
+| 4 | 全量回归 + README | ✅ 完成 | `test:rust` 19 passed、`npm test` 4、`cargo check` ok |
 
 ## 变更日志
 
-- （实施过程中追加）
+- Step 1：`voice_press.rs` + `voice_first_packet` 测例（快捷键先于 CLEAR）。
+- Step 2–3：`on_voice_remote_press` 重排；`ensure_pcm_ready_on_press()`；PING 间隔 50ms→15ms。
+- Step 4：2026-08-27 复跑 — `npm run test:rust` 19 passed、`npm test` 4 passed、`cargo check` ok。
