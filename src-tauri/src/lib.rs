@@ -5,6 +5,7 @@ pub mod audio;
 pub mod logging;
 pub mod app_update;
 pub mod webview_guard;
+pub mod webview_recovery;
 pub mod file_download;
 
 use tauri::{Manager, RunEvent};
@@ -36,21 +37,8 @@ pub fn should_start_minimized(args: &[String]) -> bool {
     args.iter().any(|a| a.trim() == "--minimized")
 }
 
-fn focus_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        // WebView2 可能处于隐藏状态（启动时 SetIsVisible(false)），先恢复渲染再显示窗口
-        #[cfg(target_os = "windows")]
-        {
-            let w = window.clone();
-            let _ = w.with_webview(move |webview| unsafe {
-                let _ = webview.controller().SetIsVisible(true);
-            });
-        }
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
-}
+/// 自启时 bridge 自动重连额外错峰（秒），避开开机 IO 高峰
+const REMOTE_BRIDGE_START_DELAY_SECS: u64 = 4;
 
 #[cfg_attr(mobile, mobile_entry_point)]
 pub fn run() {
@@ -59,7 +47,7 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            focus_main_window(app);
+            webview_recovery::restore_main_window(app);
         }));
     }
 
@@ -109,23 +97,8 @@ pub fn run() {
                 .ok();
 
             if let Some(window) = app.get_webview_window("main") {
-                // 关闭窗口：minimize_to_tray=true 则隐藏；false 则真正退出
-                let app_handle = app.handle().clone();
-                let window_ = window.clone();
-                window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        let minimize = app_handle
-                            .try_state::<config::manager::ConfigManager>()
-                            .and_then(|m| m.get_global_settings().ok())
-                            .map(|s| s.minimize_to_tray)
-                            .unwrap_or(true);
-                        if minimize {
-                            api.prevent_close();
-                            let _ = window_.hide();
-                        }
-                        // else: 允许关闭 → 触发 Exit → cleanup_on_exit
-                    }
-                });
+                // 关闭窗口：minimize_to_tray=true 则最小化到任务栏（不用 hide，防 WebView2 僵尸态）
+                webview_recovery::attach_main_window_close_handler(app.handle(), &window);
 
                 // 启动后最小化到托盘（用户设置）或 --minimized（自启参数）
                 let start_hidden = app
@@ -201,10 +174,18 @@ pub fn run() {
 
             // 启动后自动连接 + 断线重连（对齐 Python worker 循环）
             let auto_app = app.handle().clone();
+            let auto_minimized_boot =
+                should_start_minimized(&std::env::args().collect::<Vec<_>>());
             std::thread::Builder::new()
                 .name("xiaomi-auto-connect".into())
                 .spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    let base_delay = 2_u64;
+                    let extra = if auto_minimized_boot {
+                        REMOTE_BRIDGE_START_DELAY_SECS
+                    } else {
+                        0
+                    };
+                    std::thread::sleep(std::time::Duration::from_secs(base_delay + extra));
                     if let (Some(config_manager), Some(runtime)) = (
                         auto_app.try_state::<config::manager::ConfigManager>(),
                         auto_app
@@ -234,19 +215,20 @@ pub fn run() {
             // 启动后静默检查更新（有新版才向前端发事件）
             app_update::spawn_startup_check(app.handle().clone());
 
-            // WebView2 健康守卫：前端每 5s 心跳；检测到渲染进程死亡自动 reload（修长时间运行后白屏）
+            // WebView2 健康守卫：前端每 5s 心跳；reload 无效时自动 recreate
             {
                 let guard_app = app.handle().clone();
                 std::thread::Builder::new()
                     .name("webview-guard".into())
                     .spawn(move || loop {
                         std::thread::sleep(std::time::Duration::from_secs(5));
-                        if webview_guard::check_and_reload(std::time::Instant::now()) {
-                            log::warn!("WEBVIEW GUARD: reloading main window (rendering suspected dead)");
-                            if let Some(window) = guard_app.get_webview_window("main") {
-                                let _ = window.reload();
-                            }
-                        }
+                        let visible = guard_app
+                            .get_webview_window("main")
+                            .and_then(|w| w.is_visible().ok())
+                            .unwrap_or(false);
+                        let action =
+                            webview_guard::check(std::time::Instant::now(), visible);
+                        webview_recovery::apply_health_action(&guard_app, action);
                     })?;
             }
 

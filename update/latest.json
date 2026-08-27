@@ -1,8 +1,8 @@
 {
-  "version": "1.5.3",
-  "notes": "v1.5.3：\n- 修复部分系统安装后按键映射区域不显示（配置加载失败提示 + 损坏配置自动恢复默认）\n- WinUHid 驱动包支持应用内下载：自选保存位置、进度条显示\n- Release 附带 WinUHid_Manual 手动安装包（含安装说明与 Run-Install.cmd）",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.3",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.3",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.5.3/Voice%20VibeCoding_1.5.3_x64-setup.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.5.3/Voice.VibeCoding_1.5.3_x64-setup.exe"
+  "version": "1.5.5",
+  "notes": "v1.5.5：\n- WebView 白屏/黑屏三级恢复：reload → recreate → 托盘「重启软件」\n- 关闭到托盘改 minimize，降低 WebView2 渲染进程被回收\n- 托盘「刷新界面」reload 失败自动 recreate\n- 设置页移除冗余「关于」块\n- 含上一版：忽略更新后设置里「检查更新」仍可打开弹窗并下载",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.5",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.5",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.5.5/Voice%20VibeCoding_1.5.5_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.5.5/Voice.VibeCoding_1.5.5_x64-setup.exe"
 }

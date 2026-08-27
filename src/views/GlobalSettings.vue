@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { getVersion } from "@tauri-apps/api/app";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import type { GlobalSettings } from "../types";
 import { useAppUpdateStore } from "../stores/appUpdate";
@@ -18,16 +17,10 @@ const settings = ref<GlobalSettings>({
 
 const saved = ref(true);
 const saving = ref(false);
-const appVersion = ref("…");
 const updateChecking = ref(false);
 const updateHint = ref("");
 
 onMounted(async () => {
-  try {
-    appVersion.value = `v${await getVersion()}`;
-  } catch {
-    appVersion.value = "v1.5.3";
-  }
   try {
     const s = await invoke<GlobalSettings>("get_global_settings");
     settings.value = s;
@@ -178,28 +171,6 @@ async function checkUpdate() {
             <option value="zh-TW">繁體中文</option>
             <option value="en">English</option>
           </select>
-        </div>
-      </section>
-
-      <section class="card">
-        <h3>关于</h3>
-        <div class="about-grid">
-          <div class="about-item">
-            <span class="about-label">应用名称</span>
-            <span class="about-value">Voice VibeCoding（语音氛围编程）</span>
-          </div>
-          <div class="about-item">
-            <span class="about-label">版本</span>
-            <span class="about-value">{{ appVersion }}</span>
-          </div>
-          <div class="about-item">
-            <span class="about-label">技术栈</span>
-            <span class="about-value">Rust + Tauri 2 + Vue 3</span>
-          </div>
-          <div class="about-item">
-            <span class="about-label">支持设备</span>
-            <span class="about-value">小米遥控器 2 Pro / T1 遥控器 / 汉王 V60</span>
-          </div>
         </div>
       </section>
 
@@ -420,15 +391,6 @@ async function checkUpdate() {
   background: var(--primary-dark);
 }
 
-.about-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-.about-item { display: flex; flex-direction: column; gap: 4px; }
-.about-label { font-size: 12px; color: var(--text-secondary); }
-.about-value { font-size: 13px; font-weight: 500; }
-
 .credit-layout {
   display: flex;
   align-items: flex-start;
@@ -558,9 +520,6 @@ async function checkUpdate() {
   }
   .credit-logo-wrap {
     width: 100px;
-  }
-  .about-grid {
-    grid-template-columns: 1fr;
   }
 }
 </style>

@@ -1,13 +1,13 @@
-# Publish v1.5.3 installers + WinUHid manual zip to Gitee + GitHub Releases.
+# Publish installers + WinUHid manual zip to Gitee + GitHub Releases.
 # Usage:
 #   $env:GITEE_TOKEN = 'your_gitee_personal_access_token'
 #   $env:GITHUB_TOKEN = 'your_github_pat_with_repo_scope'
-#   .\scripts\pack-winuhid-release.ps1 -Version 1.5.3
-#   .\scripts\publish-release.ps1 -Version 1.5.3 -Tag v1.5.3
+#   .\scripts\pack-winuhid-release.ps1 -Version 1.5.5
+#   .\scripts\publish-release.ps1 -Version 1.5.5 -Tag v1.5.5
 
 param(
-    [string]$Version = "1.5.3",
-    [string]$Tag = "v1.5.3"
+    [string]$Version = "1.5.5",
+    [string]$Tag = "v1.5.5"
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,10 +27,12 @@ Copy-Item $msi $ghMsi -Force
 $body = @"
 ## v$Version
 
-- 修复部分系统安装后按键映射区域不显示（配置加载失败提示 + 损坏配置自动恢复默认）
-- WinUHid 驱动包支持应用内下载：自选保存位置、进度条显示
-- Release 附带 WinUHid_Manual 手动安装包（含安装说明与 Run-Install.cmd）
-- 含 v1.5.2：Win 键黏滞修复、语音首包延迟优化、WinUHid 安装流程修复
+- WebView 白屏/黑屏三级恢复：reload → recreate WebView → 托盘「重启软件」
+- 关闭到托盘改 minimize，降低 WebView2 渲染进程被系统回收
+- 托盘「刷新界面」reload 失败自动 recreate
+- 设置页移除冗余「关于」块，保留通用与版本信息
+- 含上一版：忽略更新后，设置里「检查更新」仍可打开弹窗并下载
+- 含 v1.5.3：配置加载容错、WinUHid 应用内下载、Release 附带 WinUHid 手动安装包
 "@
 
 function Ensure-GiteeRelease {

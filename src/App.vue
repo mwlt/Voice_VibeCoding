@@ -3,6 +3,7 @@ import { onMounted, onUnmounted, ref } from "vue";
 import { RouterView, useRouter } from "vue-router";
 import { listen, emit, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import SideNav from "./components/SideNav.vue";
 import AppUpdateModal from "./components/AppUpdateModal.vue";
 import { useAppUpdateStore } from "./stores/appUpdate";
@@ -126,6 +127,12 @@ async function dismissConflict() {
 }
 
 onMounted(async () => {
+  // 页面就绪后再显示窗口（tauri.conf visible:false，避免白屏闪烁）
+  try {
+    await getCurrentWindow().show();
+  } catch (e) {
+    console.warn("show main window failed:", e);
+  }
   await appUpdate.init();
   unlistenNav = await listen<string>("navigate", (ev) => {
     if (ev.payload) router.push(ev.payload);

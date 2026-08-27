@@ -7,22 +7,6 @@ use tauri::{
     AppHandle, Emitter, Manager,
 };
 
-fn restore_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        // WebView2 可能处于隐藏状态（启动时 SetIsVisible(false)），先恢复渲染再显示窗口
-        #[cfg(target_os = "windows")]
-        {
-            let w = window.clone();
-            let _ = w.with_webview(move |webview| unsafe {
-                let _ = webview.controller().SetIsVisible(true);
-            });
-        }
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
-}
-
 fn quit_app(app: &AppHandle) {
     // 先停桥接 / HID Tap / 钩子 / 音频子进程，避免托盘退出后 remote-bridge-hub.exe 残留
     if let Some(runtime) =
@@ -49,6 +33,7 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let settings = MenuItemBuilder::with_id("xiaomi_settings", "按键与语音设置").build(app)?;
     let restart = MenuItemBuilder::with_id("restart_bridge", "重启桥接").build(app)?;
     let refresh = MenuItemBuilder::with_id("refresh_ui", "刷新界面（白屏自救）").build(app)?;
+    let restart_app = MenuItemBuilder::with_id("restart_app", "重启软件").build(app)?;
     let separator1 = PredefinedMenuItem::separator(app)?;
 
     let xiaomi_connect = MenuItemBuilder::with_id("xiaomi_connect", "连接小米遥控器").build(app)?;
@@ -82,6 +67,7 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .item(&settings)
         .item(&restart)
         .item(&refresh)
+        .item(&restart_app)
         .item(&separator1)
         .item(&xiaomi_submenu)
         .item(&t1_submenu)
@@ -93,17 +79,11 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 
 fn on_menu_event(app: &AppHandle, id: &str) {
     match id {
-        "restore" | "show" => restore_main_window(app),
-        "refresh_ui" => {
-            // 白屏自救：强制重载主窗口（WebView2 渲染进程死亡时前端按钮已不可用，必须走后端）
-            restore_main_window(app);
-            if let Some(window) = app.get_webview_window("main") {
-                log::info!("TRAY: manual refresh UI requested");
-                let _ = window.reload();
-            }
-        }
+        "restore" | "show" => crate::webview_recovery::restore_main_window(app),
+        "refresh_ui" => crate::webview_recovery::manual_refresh_ui(app),
+        "restart_app" => crate::webview_recovery::restart_application(app),
         "xiaomi_settings" => {
-            restore_main_window(app);
+            crate::webview_recovery::restore_main_window(app);
             let _ = app.emit("navigate", "/xiaomi");
         }
         "restart_bridge" => {
@@ -196,7 +176,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<TrayIcon, Box<dyn std::error::Error
                 ..
             } = event
             {
-                restore_main_window(tray.app_handle());
+                crate::webview_recovery::restore_main_window(tray.app_handle());
             }
         })
         .build(app)?;
