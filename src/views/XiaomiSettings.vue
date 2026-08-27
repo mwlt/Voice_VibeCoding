@@ -27,6 +27,7 @@ const type = "xiaomi" as const;
 
 const device = computed(() => bridge.devices[type]);
 const config = computed(() => configStore.configs[type]);
+const configLoadError = computed(() => configStore.loadErrors[type]);
 
 interface HostStatusItem {
   id: string;
@@ -1636,6 +1637,10 @@ function toggleConnection() {
         </div>
       </div>
 
+      <div v-if="configLoadError" class="config-load-warn" role="alert">
+        配置加载失败，已使用默认配置。当前修改不会被保存，请检查配置目录。
+      </div>
+
       <section class="card mapping-layout" v-if="config">
         <div class="mapping-heading">
           <h3>按键映射</h3>
@@ -1874,6 +1879,16 @@ function toggleConnection() {
   gap: 6px 16px;
   margin-bottom: 8px;
   min-height: 1.4em;
+}
+.config-load-warn {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 13px;
+  line-height: 1.5;
 }
 .mapping-layout h3 {
   margin: 0;

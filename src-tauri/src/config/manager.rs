@@ -205,19 +205,31 @@ impl ConfigManager {
 
     // ---- 设备配置 ----
 
-    fn load_device_config_from_disk(&self, device: &str) -> Result<DeviceConfig, String> {
+    /// 读取设备配置；读盘/反序列化失败时回退默认配置（保证 UI 始终有值可渲染）
+    fn load_device_config_from_disk(&self, device: &str) -> DeviceConfig {
         let path = self.device_config_path(device);
-        if path.exists() {
-            let content = fs::read_to_string(&path)
-                .map_err(|e| format!("读取配置失败: {}", e))?;
-            let mut config: DeviceConfig = serde_json::from_str(&content)
-                .map_err(|e| format!("解析配置失败: {}", e))?;
-            if device == "xiaomi" {
-                Self::merge_xiaomi_defaults(&mut config);
+        let defaults = Self::default_config_for(device);
+        if !path.exists() {
+            return defaults;
+        }
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("[{device}] 读取配置失败: {e}，已回退默认配置");
+                return defaults;
             }
-            Ok(config)
-        } else {
-            Ok(Self::default_config_for(device))
+        };
+        match serde_json::from_str::<DeviceConfig>(&content) {
+            Ok(mut config) => {
+                if device == "xiaomi" {
+                    Self::merge_xiaomi_defaults(&mut config);
+                }
+                config
+            }
+            Err(e) => {
+                log::warn!("[{device}] 解析配置失败: {e}，已回退默认配置");
+                defaults
+            }
         }
     }
 
@@ -226,7 +238,7 @@ impl ConfigManager {
         if let Some(cached) = self.device_cache.lock().get(device).cloned() {
             return Ok(cached);
         }
-        let config = self.load_device_config_from_disk(device)?;
+        let config = self.load_device_config_from_disk(device);
         self.device_cache
             .lock()
             .insert(device.to_string(), config.clone());
