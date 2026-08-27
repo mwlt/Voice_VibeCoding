@@ -30,7 +30,13 @@ struct LatestManifest {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateCheckResult {
     pub checked: bool,
+    /// semver 上确有新版本（可下载；设置里「检查更新」据此弹窗）
+    pub has_newer_version: bool,
+    /// 用户已忽略该版本的自动提醒
+    pub prompt_suppressed: bool,
+    /// 兼容字段：与 has_newer_version 相同
     pub update_available: bool,
+    /// 兼容字段：与 prompt_suppressed 相同（仅有新版本时才有意义）
     pub ignored: bool,
     pub current_version: String,
     pub latest_version: String,
@@ -102,6 +108,35 @@ fn parse_semver(s: &str) -> (u64, u64, u64) {
     )
 }
 
+/// 纯函数：根据当前版本、远端版本、已忽略版本，判定是否有新版本及是否应抑制被动提醒。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdateEvaluation {
+    pub has_newer_version: bool,
+    pub prompt_suppressed: bool,
+}
+
+pub fn evaluate_update(
+    current: &str,
+    latest: &str,
+    ignored_version: Option<&str>,
+) -> UpdateEvaluation {
+    let latest_norm = normalize_version(latest);
+    let newer = is_newer(&latest_norm, current);
+    let prompt_suppressed = newer
+        && ignored_version
+            .map(|v| normalize_version(v) == latest_norm)
+            .unwrap_or(false);
+    UpdateEvaluation {
+        has_newer_version: newer,
+        prompt_suppressed,
+    }
+}
+
+/// 是否应向用户发出被动更新提醒（启动检测、顶栏角标、自动弹窗）。
+pub fn should_emit_passive_prompt(result: &UpdateCheckResult) -> bool {
+    result.has_newer_version && !result.prompt_suppressed
+}
+
 fn fetch_manifest(url: &str) -> Result<LatestManifest, String> {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(8))
@@ -126,10 +161,7 @@ fn build_result(
 ) -> UpdateCheckResult {
     let current = current_version().to_string();
     let latest = normalize_version(&manifest.version);
-    let newer = is_newer(&latest, &current);
-    let ignored = ignored_version
-        .map(|v| normalize_version(v) == latest)
-        .unwrap_or(false);
+    let eval = evaluate_update(&current, &latest, ignored_version);
     let setup_url = if source == "gitee" {
         manifest.gitee_setup_url.clone()
     } else {
@@ -137,8 +169,10 @@ fn build_result(
     };
     UpdateCheckResult {
         checked: true,
-        update_available: newer && !ignored,
-        ignored: newer && ignored,
+        has_newer_version: eval.has_newer_version,
+        prompt_suppressed: eval.prompt_suppressed,
+        update_available: eval.has_newer_version,
+        ignored: eval.prompt_suppressed,
         current_version: current,
         latest_version: latest,
         notes: manifest.notes,
@@ -163,10 +197,11 @@ pub fn check_for_update(config: &ConfigManager) -> UpdateCheckResult {
             let r = build_result(m, "gitee", ignored.as_deref());
             *LAST_RESULT.lock() = Some(r.clone());
             log::info!(
-                "UPDATE check via gitee: current={} latest={} available={}",
+                "UPDATE check via gitee: current={} latest={} newer={} suppressed={}",
                 r.current_version,
                 r.latest_version,
-                r.update_available
+                r.has_newer_version,
+                r.prompt_suppressed
             );
             return r;
         }
@@ -181,10 +216,11 @@ pub fn check_for_update(config: &ConfigManager) -> UpdateCheckResult {
             let r = build_result(m, "github", ignored.as_deref());
             *LAST_RESULT.lock() = Some(r.clone());
             log::info!(
-                "UPDATE check via github: current={} latest={} available={}",
+                "UPDATE check via github: current={} latest={} newer={} suppressed={}",
                 r.current_version,
                 r.latest_version,
-                r.update_available
+                r.has_newer_version,
+                r.prompt_suppressed
             );
             return r;
         }
@@ -211,8 +247,8 @@ pub fn ignore_version(config: &ConfigManager, version: &str) -> Result<UpdateChe
     if let Some(mut last) = LAST_RESULT.lock().clone() {
         let latest = normalize_version(&last.latest_version);
         if latest == normalize_version(version) {
+            last.prompt_suppressed = true;
             last.ignored = true;
-            last.update_available = false;
             *LAST_RESULT.lock() = Some(last.clone());
             return Ok(last);
         }
@@ -221,7 +257,7 @@ pub fn ignore_version(config: &ConfigManager, version: &str) -> Result<UpdateChe
 }
 
 pub fn emit_if_available(app: &AppHandle, result: &UpdateCheckResult) {
-    if result.update_available {
+    if should_emit_passive_prompt(result) {
         let _ = app.emit("app-update-available", result);
     }
 }
@@ -400,5 +436,52 @@ mod tests {
         assert!(!is_newer("1.3.6", "1.3.6"));
         assert!(!is_newer("1.3.5", "1.3.6"));
         assert!(is_newer("v2.0.0", "1.9.9"));
+    }
+
+    #[test]
+    fn evaluate_update_newer_not_ignored() {
+        let e = evaluate_update("1.5.2", "1.5.3", None);
+        assert!(e.has_newer_version);
+        assert!(!e.prompt_suppressed);
+    }
+
+    #[test]
+    fn evaluate_update_newer_ignored_same_version() {
+        let e = evaluate_update("1.5.2", "1.5.3", Some("1.5.3"));
+        assert!(e.has_newer_version);
+        assert!(e.prompt_suppressed);
+    }
+
+    #[test]
+    fn evaluate_update_newer_ignored_different_version() {
+        let e = evaluate_update("1.5.2", "1.5.4", Some("1.5.3"));
+        assert!(e.has_newer_version);
+        assert!(!e.prompt_suppressed);
+    }
+
+    #[test]
+    fn evaluate_update_not_newer() {
+        let e = evaluate_update("1.5.3", "1.5.3", Some("1.5.3"));
+        assert!(!e.has_newer_version);
+        assert!(!e.prompt_suppressed);
+    }
+
+    #[test]
+    fn passive_prompt_emits_only_when_not_suppressed() {
+        let active = UpdateCheckResult {
+            has_newer_version: true,
+            prompt_suppressed: false,
+            update_available: true,
+            ..Default::default()
+        };
+        let suppressed = UpdateCheckResult {
+            has_newer_version: true,
+            prompt_suppressed: true,
+            update_available: true,
+            ignored: true,
+            ..Default::default()
+        };
+        assert!(should_emit_passive_prompt(&active));
+        assert!(!should_emit_passive_prompt(&suppressed));
     }
 }

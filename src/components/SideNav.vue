@@ -12,7 +12,7 @@ const route = useRoute();
 const router = useRouter();
 const bridge = useBridgeStore();
 const appUpdate = useAppUpdateStore();
-const { updateInfo } = storeToRefs(appUpdate);
+const { updateInfo, shouldShowPassivePrompt } = storeToRefs(appUpdate);
 
 const showQuitConfirm = ref(false);
 const quitting = ref(false);
@@ -74,8 +74,8 @@ async function confirmQuit() {
     <div class="brand">
       <span class="brand-name">Voice VibeCoding</span>
       <span class="brand-ver">{{ appVersion }}</span>
-      <template v-if="updateInfo?.updateAvailable">
-        <span class="brand-update-badge">新版本 V{{ updateInfo.latestVersion }}</span>
+      <template v-if="shouldShowPassivePrompt">
+        <span class="brand-update-badge">新版本 V{{ updateInfo!.latestVersion }}</span>
         <button type="button" class="brand-update-btn" @click="appUpdate.openModal()">
           查看更新内容
         </button>

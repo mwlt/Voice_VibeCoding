@@ -65,15 +65,17 @@ async function checkUpdate() {
   updateChecking.value = true;
   updateHint.value = "正在检查…";
   try {
-    const result = await appUpdate.checkForUpdate();
+    const result = await appUpdate.checkForUpdate(true);
     appUpdate.applyUpdateInfo(result);
     if (result.error) {
       updateHint.value = `检查失败：${result.error}`;
     } else if (result.updateAvailable) {
-      updateHint.value = `发现新版本 V${result.latestVersion}，可点击顶栏「查看更新内容」。`;
-      appUpdate.openModal();
-    } else if (result.ignored) {
-      updateHint.value = `已忽略 V${result.latestVersion}，当前 V${result.currentVersion}。`;
+      if (result.promptSuppressed ?? result.ignored) {
+        updateHint.value = `发现新版本 V${result.latestVersion}（已关闭自动提醒，仍可在此更新）。`;
+      } else {
+        updateHint.value = `发现新版本 V${result.latestVersion}。`;
+      }
+      appUpdate.openModal(true);
     } else {
       updateHint.value = `已是最新（V${result.currentVersion}）。`;
     }

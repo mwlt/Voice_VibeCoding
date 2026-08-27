@@ -4,6 +4,11 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import type { AppUpdateDownloadProgress, AppUpdateInfo } from "../types";
+import {
+  shouldAutoOpenModal,
+  shouldOpenModalFromManualCheck,
+  shouldShowPassivePrompt as passivePromptVisible,
+} from "./appUpdateLogic";
 
 const DISMISS_KEY = "app-update-dismissed";
 
@@ -31,6 +36,15 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function normalizeUpdateInfo(info: AppUpdateInfo): AppUpdateInfo {
+  const promptSuppressed = info.promptSuppressed ?? info.ignored ?? false;
+  return {
+    ...info,
+    promptSuppressed,
+    ignored: promptSuppressed,
+  };
+}
+
 export const useAppUpdateStore = defineStore("appUpdate", () => {
   const updateInfo = ref<AppUpdateInfo | null>(null);
   const showModal = ref(false);
@@ -45,6 +59,8 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
   let initialized = false;
 
   const isDownloading = computed(() => downloadPhase.value === "downloading");
+
+  const shouldShowPassivePrompt = computed(() => passivePromptVisible(updateInfo.value));
 
   const progressLabel = computed(() => {
     const p = downloadProgress.value;
@@ -63,33 +79,47 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
   }
 
   function applyUpdateInfo(info: AppUpdateInfo | null) {
-    if (info?.updateAvailable) {
-      if (updateInfo.value?.latestVersion !== info.latestVersion) {
+    if (!info) return;
+    const normalized = normalizeUpdateInfo(info);
+    if (normalized.updateAvailable) {
+      if (updateInfo.value?.latestVersion !== normalized.latestVersion) {
         resetDownloadState();
       }
-      updateInfo.value = info;
-    } else if (info && !info.updateAvailable) {
+      updateInfo.value = normalized;
+      return;
+    }
+    if (normalized.checked) {
       updateInfo.value = null;
       showModal.value = false;
       resetDownloadState();
     }
   }
 
-  function shouldAutoOpen(version: string): boolean {
+  function shouldAutoOpenForSession(version: string): boolean {
     return dismissedVersion() !== version;
   }
 
   function onUpdateAvailable(info: AppUpdateInfo, autoOpen = false) {
     applyUpdateInfo(info);
-    if (info.updateAvailable && autoOpen && shouldAutoOpen(info.latestVersion)) {
+    const normalized = updateInfo.value;
+    if (
+      autoOpen &&
+      normalized &&
+      shouldAutoOpenModal(normalized) &&
+      shouldAutoOpenForSession(normalized.latestVersion)
+    ) {
       showModal.value = true;
     }
   }
 
-  function openModal() {
-    if (updateInfo.value?.updateAvailable) {
-      showModal.value = true;
+  function openModal(force = false) {
+    const info = updateInfo.value;
+    if (!info) return;
+    if (force) {
+      if (shouldOpenModalFromManualCheck(info)) showModal.value = true;
+      return;
     }
+    if (passivePromptVisible(info)) showModal.value = true;
   }
 
   function closeModal() {
@@ -145,8 +175,8 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
     }
   }
 
-  async function checkForUpdate() {
-    return invoke<AppUpdateInfo>("check_app_update");
+  async function checkForUpdate(force = false) {
+    return invoke<AppUpdateInfo>("check_app_update", { force });
   }
 
   async function init() {
@@ -223,6 +253,7 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
     downloadProgress,
     downloadMessage,
     isDownloading,
+    shouldShowPassivePrompt,
     progressLabel,
     applyUpdateInfo,
     onUpdateAvailable,

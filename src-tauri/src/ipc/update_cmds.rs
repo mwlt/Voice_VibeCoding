@@ -4,13 +4,17 @@ use crate::config::manager::ConfigManager;
 use tauri::{AppHandle, State};
 
 /// 检查应用更新（Gitee latest.json 优先）
+/// `force` 为 true 时不触发被动弹窗事件（供设置页主动检查，由前端自行 openModal）
 #[tauri::command]
 pub async fn check_app_update(
     app: AppHandle,
+    force: Option<bool>,
     config_manager: State<'_, ConfigManager>,
 ) -> Result<crate::app_update::UpdateCheckResult, String> {
     let result = crate::app_update::check_for_update(config_manager.inner());
-    crate::app_update::emit_if_available(&app, &result);
+    if !force.unwrap_or(false) {
+        crate::app_update::emit_if_available(&app, &result);
+    }
     Ok(result)
 }
 

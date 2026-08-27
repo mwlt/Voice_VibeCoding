@@ -65,7 +65,7 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 | 修复虚拟键盘 | 「修复虚拟键盘」修复 WinUHid 虚拟键盘；支持导出/应用内下载驱动包（进度条、自选保存路径）；Release 附带 WinUHid_Manual 手动安装包 | 增强 |
 | 配置加载容错 | 按键映射区依赖配置加载；损坏 xiaomi.json 自动备份并恢复默认；失败时显示错误与重试 | 修复 |
 | 主机状态栏布局 | 四列同排显示虚拟声卡/键盘/路由/桥接；虚拟声卡电平条可收缩，状态文字不挤出边框 | 优化 |
-| 应用内更新 | 顶栏版本旁提示新版本；弹窗展示更新内容；软件内下载安装包（进度条）并自动启动安装程序 | 新增 |
+| 应用内更新 | 顶栏被动提醒；「不再提醒此版本」仅关闭自动弹窗/角标；设置 → 检查更新仍可打开弹窗并下载 | 增强 |
 | 语音键注入稳态 | Hold 路径用 VoiceChordState 防粘键；WinUHid 分步 press/release；UP 后 sanitizer 全零报告 + SendInput 仅清键 | 优化 |
 | 语音首包延迟 | 按下先快捷键 DOWN 再 VB-CABLE CLEAR；PCM 按下同步 ensure；PING 重试 15ms | 优化 |
 | 单实例 | 再次启动只激活已有窗口，降低双开抢端口 | 增强 |
@@ -229,7 +229,7 @@ npm run tauri:build
 | NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.5.3_x64-setup.exe` |
 
 
-发新版时请同步更新仓库根目录 `update/latest.json`（提高 `version`，填写 Gitee/GitHub 页面与安装包直链）。应用会优先读 Gitee raw，失败再读 GitHub raw；有更新时在顶栏版本号旁显示「新版本」与「查看更新内容」，并支持软件内下载安装包。
+发新版时请同步更新仓库根目录 `update/latest.json`（提高 `version`，填写 Gitee/GitHub 页面与安装包直链）。应用会优先读 Gitee raw，失败再读 GitHub raw。有新版本时在顶栏显示「新版本」与「查看更新内容」；弹窗内可选「不再提醒此版本」（仅抑制自动提醒，不影响设置页「检查更新」）。详见 [docs/UPDATE_IGNORE_PLAN.md](docs/UPDATE_IGNORE_PLAN.md)。
 
 
 ---

@@ -57,7 +57,11 @@ export interface GlobalSettings {
 
 export interface AppUpdateInfo {
   checked: boolean;
+  /** semver 上确有新版本（可下载） */
   updateAvailable: boolean;
+  /** 用户已忽略该版本的自动提醒 */
+  promptSuppressed?: boolean;
+  /** 兼容：与 promptSuppressed 相同 */
   ignored: boolean;
   currentVersion: string;
   latestVersion: string;

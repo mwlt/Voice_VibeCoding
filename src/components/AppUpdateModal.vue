@@ -40,6 +40,9 @@ function progressWidth(): string {
           <p class="update-intro">
             当前版本 V{{ updateInfo.currentVersion }}。可在软件内下载安装包，完成后自动启动安装程序（安装前请先退出本软件）。
           </p>
+          <p v-if="updateInfo.promptSuppressed" class="update-suppressed-hint" role="note">
+            您已关闭此版本的自动提醒；仍可在此下载安装。
+          </p>
           <section v-if="updateInfo.notes" class="update-notes-block" aria-label="更新内容">
             <h4 class="update-notes-heading">更新内容</h4>
             <p class="update-notes">{{ updateInfo.notes }}</p>
@@ -109,7 +112,7 @@ function progressWidth(): string {
             :disabled="isDownloading"
             @click="store.ignoreCurrentUpdate()"
           >
-            忽略此版本
+            不再提醒此版本
           </button>
           <button
             class="update-btn update-btn-secondary"
@@ -168,6 +171,17 @@ function progressWidth(): string {
   font-size: 13px;
   line-height: 1.5;
   color: var(--text-secondary, #64748b);
+}
+
+.update-suppressed-hint {
+  margin: -4px 0 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #92400e;
 }
 
 .update-notes-block {
