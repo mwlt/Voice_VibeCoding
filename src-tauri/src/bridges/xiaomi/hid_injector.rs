@@ -360,7 +360,22 @@ pub fn release(vks: &[u16]) -> Result<(), String> {
     if vks.iter().any(|vk| consumer_usage(*vk).is_some()) {
         return submit(dev, dev.consumer, &[0, 0]);
     }
-    release_keyboard(dev, vks)
+    let stagger = release_keyboard(dev, vks);
+    // 必达：无论分步 release 是否成功，再发一次全零键盘报告，防止 Win 位残留
+    let zero = submit(dev, dev.keyboard, &[0u8; 8]);
+    stagger?;
+    zero?;
+    Ok(())
+}
+
+/// 强制全零键盘报告（panic release / sanitizer 用）
+pub fn release_all() -> Result<(), String> {
+    ensure_init();
+    let guard = DEVICES.lock();
+    let Some(dev) = guard.as_ref() else {
+        return Err("WinUHid not open".into());
+    };
+    submit(dev, dev.keyboard, &[0u8; 8])
 }
 
 fn submit(dev: &Devices, handle: *mut c_void, report: &[u8]) -> Result<(), String> {

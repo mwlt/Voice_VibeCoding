@@ -11,7 +11,7 @@
 | S1 | `applyImePresetConfig(config, presetId)` | 一键应用后：快捷键 VK、`voice_hotkey`、`trigger_mode`、`voice_release_behavior`、`voice_shortcut_enabled` | `src/utils/imePreset.ts` + Vitest |
 | S2 | `DeviceConfig.voice_release_behavior` 序列化默认 | 旧配置缺字段 → `None`；新字段可读写 | `src-tauri/tests/config_voice_release.rs` |
 | S3 | `VoiceChordState::press_with` / `release_with` | 粘键防护、DOWN 失败补偿 KEYUP、release 重试一次 | `voice_chord_state.rs` + integration test |
-| S4 | `inject_voice_chord(keys, key_up) → bool` | 有 WinUHid 时优先 press/release；失败回落 SendInput | `key_mapping.rs`（运行时接线；DLL 有无由环境决定） |
+| S4 | `inject_voice_chord(keys, key_up) → bool` | 有 WinUHid 时 press/release；UP 后 sanitizer；**不** SendInput 唤醒 | `key_mapping.rs` + `ime_voice_wake_route` |
 | S5 | `should_tap_same_chord_after_up(behavior)` | `None` 不追加；`TapSameChord` 追加 | `voice_release.rs` + integration test |
 
 非本阶段缝：自动识别前台输入法、UI 快照、真实 WinUHid 硬件 DLL。
@@ -60,4 +60,4 @@ cargo check --manifest-path src-tauri/Cargo.toml
 - Step 4：`XiaomiSettings.vue` 多预设卡片；`npm run build` 通过。
 - Step 6：README 能力表 / 预设表；顺手消除 `SetIsVisible` unused Result 告警。
 - 最终复跑：`npm test` 5、`test:rust` 6、`build`、`cargo check` 均通过（2026-08-26）。
-- 诊断（diagnosing-bugs）：用户反馈右 Alt **与** Ctrl+Win 均无法唤醒 → 根因是语音路径对非 Alt 仍优先 WinUHid（输入法听不到虚拟 HID）。已对齐 Nexus：`inject_voice_chord` / `voice_tap_vks` **永不** WinUHid，一律 SendInput+EXTRA_INFO；`tap_vks` 仅保留给普通按键映射。反馈环：`cargo test --test ime_voice_wake_route`。
+- 语音释放卫生（2026-08-27）：见 `docs/VOICE_CHORD_RELEASE_PLAN.md` — sanitizer + 连点 recover + UP 时序修正；`test:rust` 16 passed。

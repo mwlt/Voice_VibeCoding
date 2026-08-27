@@ -6,6 +6,9 @@ use crate::bridges::xiaomi::connect;
 use crate::bridges::xiaomi::key_log::{button_label, emit_key_phase};
 use crate::bridges::xiaomi::tv_gate;
 use crate::bridges::xiaomi::voice_chord_state::VoiceChordState;
+use crate::bridges::xiaomi::voice_chord_sanitizer::{
+    recover_chord_modifiers, recover_foreign_modifiers,
+};
 use crate::bridges::xiaomi::voice_inject::scan_code_for_vk;
 use crate::bridges::xiaomi::voice_release::{should_tap_same_chord_after_up, VoiceReleaseDecision};
 use crate::config::manager::{ConfigManager, DeviceConfig, KeyAction};
@@ -855,23 +858,18 @@ fn key_chord(vks: &[u16], key_up: bool) {
 
 /// 注入前松开不在和弦内、却仍按下的修饰键，避免粘键污染组合。
 #[cfg(target_os = "windows")]
-fn release_sticky_foreign_modifiers(chord: &[u16]) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-    const MODS: [u16; 8] = [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C];
-    for vk in MODS {
-        if chord.iter().any(|&c| c == vk || (c == 0x12 && matches!(vk, 0xA4 | 0xA5))) {
-            continue;
-        }
-        let down = (unsafe { GetAsyncKeyState(vk as i32) } as u16) & 0x8000 != 0;
-        if down {
-            let _ = key_chord_send_input_with_extra(&[vk], true, EXTRA_INFO);
-            log::info!("XIAOMI VOICE released sticky foreign mod vk=0x{vk:02X}");
-        }
-    }
+fn voice_sanitize_keyup(vks: &[u16]) -> bool {
+    key_chord_send_input_with_extra(vks, true, EXTRA_INFO)
+}
+
+/// 注入前松开不在和弦内、却仍按下的修饰键（SendInput 仅 KEYUP，非唤醒）。
+#[cfg(not(target_os = "windows"))]
+fn voice_sanitize_keyup(_vks: &[u16]) -> bool {
+    false
 }
 
 /// 语音和弦注入 — **必须** WinUHid（虚拟硬件 HID）。
-/// SendInput 会被豆包/千问等过滤，不能作为语音唤醒修复方案。
+/// SendInput 会被豆包/千问等过滤，不能作为语音唤醒修复方案；仅 UP 后 sanitizer 清键。
 fn inject_voice_chord(vks: &[u16], key_up: bool) -> bool {
     if vks.is_empty() {
         return false;
@@ -880,20 +878,38 @@ fn inject_voice_chord(vks: &[u16], key_up: bool) -> bool {
     {
         let vks = crate::bridges::xiaomi::voice_inject::normalize_voice_chord_vks(vks);
         if !key_up {
-            release_sticky_foreign_modifiers(&vks);
+            recover_foreign_modifiers(&vks, voice_sanitize_keyup);
         }
 
         if crate::bridges::xiaomi::hid_injector::is_available() {
             let hid_ok = if !key_up {
                 crate::bridges::xiaomi::hid_injector::press(&vks).is_ok()
             } else {
-                crate::bridges::xiaomi::hid_injector::release(&vks).is_ok()
+                match crate::bridges::xiaomi::hid_injector::release(&vks) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log::error!("XIAOMI VOICE WinUHid release failed: {e}");
+                        let _ = crate::bridges::xiaomi::hid_injector::release_all();
+                        false
+                    }
+                }
             };
+            if key_up {
+                let cleared = recover_chord_modifiers(&vks, voice_sanitize_keyup);
+                if !hid_ok && cleared > 0 {
+                    log::warn!(
+                        "XIAOMI VOICE release recovered via sanitizer cleared={cleared} vks={vks:?}"
+                    );
+                    return true;
+                }
+            }
             if hid_ok {
                 log::info!("XIAOMI VOICE inject via WinUHid key_up={key_up} vks={vks:?}");
                 return true;
             }
-            log::error!("XIAOMI VOICE WinUHid inject failed key_up={key_up} vks={vks:?}");
+            if !key_up {
+                log::error!("XIAOMI VOICE WinUHid inject failed key_up={key_up} vks={vks:?}");
+            }
             return false;
         }
         if !key_up {

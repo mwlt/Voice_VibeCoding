@@ -1073,22 +1073,26 @@ fn on_voice_remote_release(app: &AppHandle, gate: &KeyEmitGate, state: &Arc<Mute
         return;
     }
 
-    std::thread::sleep(Duration::from_millis(40));
-    voice_pcm::end_session();
-
     notify_voice_phase(app, gate, false);
 
+    // 先释放快捷键，避免 40ms 内组合键仍按住导致连点竞态 / Win 残留
     if toggle {
-        // 按下已立即注入 DOWN；抬起无论长短都走 UP（短按等效一次 tap，长按结束按住）
         key_mapping::on_remote_button(app, "mic", false);
         log::info!(
             "XIAOMI ATVV AUDIO_STOP click-mode {} release ms={press_ms}",
-            if hold_armed || press_ms >= CLICK_HOLD_THRESHOLD_MS { "HOLD" } else { "TAP" }
+            if hold_armed || press_ms >= CLICK_HOLD_THRESHOLD_MS {
+                "HOLD"
+            } else {
+                "TAP"
+            }
         );
     } else {
         key_mapping::on_remote_button(app, "mic", false);
         log::info!("XIAOMI ATVV AUDIO_STOP hold-mode → shortcut UP");
     }
+
+    std::thread::sleep(Duration::from_millis(40));
+    voice_pcm::end_session();
 
     crate::bridges::xiaomi::key_mapping::disarm_voice_native_suppress();
     crate::bridges::xiaomi::voice_meter::set_session(false);

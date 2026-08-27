@@ -19,6 +19,7 @@ SendInput 会被过滤，不能作为修复方案。
 2. 尝试打开 `\\.\WinUHid`；失败则状态显示「虚拟键盘未就绪」
 3. 「修复虚拟键盘」→ UAC → 按 **Stage → Register → Bind → Scan → Verify** 安装（见下）
 4. 语音和弦注入 **仅** 走 WinUHid；不可用时写错误日志并提示修复
+5. UP 后 **Release Sanitizer**：必发全零 HID 报告；若 Win/Ctrl 仍 down 则 SendInput 仅 KEYUP（不作唤醒兜底）
 
 ## 安装流程（v1.5.1+ canonical）
 

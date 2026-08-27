@@ -23,8 +23,10 @@ impl VoiceChordState {
     where
         F: FnMut(&[u16], bool) -> bool,
     {
-        if self.held.is_some() {
-            return false;
+        // 连点：若仍 marked held，先走完整 UP（含 sanitizer），再接受新 DOWN
+        if let Some(prev) = self.held.take() {
+            let _ = inject(&prev, true);
+            let _ = inject(&prev, true);
         }
         if inject(keys, false) {
             self.held = Some(keys.to_vec());

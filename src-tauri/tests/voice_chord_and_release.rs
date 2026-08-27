@@ -48,6 +48,25 @@ fn release_retries_once_when_first_keyup_fails() {
 }
 
 #[test]
+fn press_while_held_releases_previous_first() {
+    let mut state = VoiceChordState::default();
+    let mut log: Vec<(Vec<u16>, bool)> = Vec::new();
+    assert!(state.press_with(&[0xA2, 0x5B], |keys, up| {
+        log.push((keys.to_vec(), up));
+        true
+    }));
+    assert!(state.press_with(&[0xA2, 0x5B], |keys, up| {
+        log.push((keys.to_vec(), up));
+        true
+    }));
+    assert_eq!(log.len(), 4);
+    assert_eq!(log[0], (vec![0xA2, 0x5B], false));
+    assert_eq!(log[1], (vec![0xA2, 0x5B], true));
+    assert_eq!(log[2], (vec![0xA2, 0x5B], true));
+    assert_eq!(log[3], (vec![0xA2, 0x5B], false));
+}
+
+#[test]
 fn tap_same_chord_decision_matches_behavior() {
     assert_eq!(
         should_tap_same_chord_after_up(VoiceReleaseBehavior::None),
