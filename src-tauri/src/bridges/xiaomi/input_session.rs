@@ -10,7 +10,7 @@ use crate::bridges::xiaomi::key_log::{
     button_label, emit_key_and_map, emit_key_phase, emit_message, KeyEmitGate,
 };
 use crate::bridges::xiaomi::key_mapping;
-use crate::config::manager::{ConfigManager, TriggerMode};
+use crate::config::manager::ConfigManager;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -943,19 +943,6 @@ struct AtvvVoiceState {
     frames: u64,
     /// 遥控语音键当前是否按下
     remote_pressed: bool,
-    /// 按下时刻（点击模式区分短按/长按）
-    press_at: Option<Instant>,
-    /// 点击模式：已超过阈值并已对映射键 DOWN
-    hold_chord_armed: bool,
-    /// 取消过期的「长按判定」定时器
-    press_gen: u64,
-}
-
-fn voice_trigger_is_toggle(app: &AppHandle) -> bool {
-    app.try_state::<ConfigManager>()
-        .and_then(|m| m.get_device_config("xiaomi").ok())
-        .map(|c| matches!(c.trigger_mode, TriggerMode::Toggle))
-        .unwrap_or(false)
 }
 
 #[cfg(target_os = "windows")]
@@ -975,9 +962,6 @@ fn atvv_write_tx(
         }
     }
 }
-
-/// 短于此时长抬起 → 视为「点击」；达到此时长仍按住 → 视为「按住」
-const CLICK_HOLD_THRESHOLD_MS: u64 = 200;
 
 fn notify_voice_phase(app: &AppHandle, gate: &KeyEmitGate, pressed: bool) {
     if pressed {
@@ -1000,11 +984,11 @@ fn arm_atvv_voice_session(state: &Arc<Mutex<AtvvVoiceState>>, clear_frames: bool
 }
 
 /// 按 `voice_press::voice_remote_press_steps` 顺序执行遥控语音键按下。
+/// 纯 hold 语义：按下 → 映射键 DOWN，抬起 → UP（单击=热键按一次，按住=热键持续按住）。
 fn on_voice_remote_press(app: &AppHandle, gate: &KeyEmitGate, state: &Arc<Mutex<AtvvVoiceState>>) {
     use crate::bridges::xiaomi::voice_pcm;
 
-    let toggle = voice_trigger_is_toggle(app);
-    let gen = {
+    {
         let Ok(mut st) = state.lock() else {
             return;
         };
@@ -1012,11 +996,7 @@ fn on_voice_remote_press(app: &AppHandle, gate: &KeyEmitGate, state: &Arc<Mutex<
             return;
         }
         st.remote_pressed = true;
-        st.press_at = Some(Instant::now());
-        st.hold_chord_armed = false;
-        st.press_gen = st.press_gen.wrapping_add(1);
-        st.press_gen
-    };
+    }
 
     // ArmSessionState
     arm_atvv_voice_session(state, true);
@@ -1025,21 +1005,8 @@ fn on_voice_remote_press(app: &AppHandle, gate: &KeyEmitGate, state: &Arc<Mutex<
     voice_pcm::ensure_pcm_ready_on_press();
 
     // ShortcutDown — 输入法先于 VB-CABLE CLEAR
-    if toggle {
-        {
-            let Ok(mut st) = state.lock() else {
-                return;
-            };
-            if st.press_gen == gen && st.remote_pressed {
-                st.hold_chord_armed = true;
-            }
-        }
-        key_mapping::voice_shortcut_ensure_down(app);
-        log::info!("XIAOMI ATVV AUDIO_START click-mode → shortcut DOWN (immediate)");
-    } else {
-        key_mapping::on_remote_button(app, "mic", true);
-        log::info!("XIAOMI ATVV AUDIO_START hold-mode → shortcut DOWN");
-    }
+    key_mapping::on_remote_button(app, "mic", true);
+    log::info!("XIAOMI ATVV AUDIO_START → shortcut DOWN");
 
     // PcmClear
     voice_pcm::clear();
@@ -1049,30 +1016,21 @@ fn on_voice_remote_press(app: &AppHandle, gate: &KeyEmitGate, state: &Arc<Mutex<
     crate::bridges::xiaomi::voice_meter::set_session(true);
 }
 
-/// 遥控语音键抬起：结束传声 + 短按 TAP / 长按 UP
+/// 遥控语音键抬起：结束传声 + 映射键 UP
 fn on_voice_remote_release(app: &AppHandle, gate: &KeyEmitGate, state: &Arc<Mutex<AtvvVoiceState>>) {
     use crate::bridges::xiaomi::voice_pcm;
-    let toggle = voice_trigger_is_toggle(app);
-    let (was_pressed, hold_armed, press_ms) = {
+    let was_pressed = {
         let Ok(mut st) = state.lock() else {
             return;
         };
         if !st.remote_pressed {
             return;
         }
-        let ms = st
-            .press_at
-            .map(|t| t.elapsed().as_millis() as u64)
-            .unwrap_or(0);
-        let hold_armed = st.hold_chord_armed;
         st.remote_pressed = false;
-        st.press_at = None;
-        st.hold_chord_armed = false;
-        st.press_gen = st.press_gen.wrapping_add(1); // 作废阈值定时器
         st.streaming = false;
         st.last_mic_off = Some(Instant::now());
         st.pending.clear();
-        (true, hold_armed, ms)
+        true
     };
     if !was_pressed {
         return;
@@ -1081,20 +1039,8 @@ fn on_voice_remote_release(app: &AppHandle, gate: &KeyEmitGate, state: &Arc<Mute
     notify_voice_phase(app, gate, false);
 
     // 先释放快捷键，避免 40ms 内组合键仍按住导致连点竞态 / Win 残留
-    if toggle {
-        key_mapping::on_remote_button(app, "mic", false);
-        log::info!(
-            "XIAOMI ATVV AUDIO_STOP click-mode {} release ms={press_ms}",
-            if hold_armed || press_ms >= CLICK_HOLD_THRESHOLD_MS {
-                "HOLD"
-            } else {
-                "TAP"
-            }
-        );
-    } else {
-        key_mapping::on_remote_button(app, "mic", false);
-        log::info!("XIAOMI ATVV AUDIO_STOP hold-mode → shortcut UP");
-    }
+    key_mapping::on_remote_button(app, "mic", false);
+    log::info!("XIAOMI ATVV AUDIO_STOP → shortcut UP");
 
     std::thread::sleep(Duration::from_millis(40));
     voice_pcm::end_session();
@@ -1195,9 +1141,6 @@ fn subscribe_atvv_service(
         gain_db,
         frames: 0,
         remote_pressed: false,
-        press_at: None,
-        hold_chord_armed: false,
-        press_gen: 0,
     }));
 
     let app2 = app.clone();

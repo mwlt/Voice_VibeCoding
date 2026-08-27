@@ -16,7 +16,6 @@ pub mod voice_meter;
 pub mod voice_chord_state;
 pub mod voice_chord_sanitizer;
 pub mod voice_press;
-pub mod voice_release;
 pub mod voice_inject;
 pub mod raw_mapping;
 pub mod autostart;

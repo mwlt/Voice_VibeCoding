@@ -105,15 +105,20 @@ pub fn start_special_key_hook() {
     if RUNNING.swap(true, Ordering::AcqRel) {
         return;
     }
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("xiaomi-special-keys".into())
         .spawn(|| {
             #[cfg(target_os = "windows")]
             hook_loop();
             RUNNING.store(false, Ordering::Release);
             HOOK_THREAD_ID.store(0, Ordering::Release);
-        })
-        .ok();
+        });
+    // ponytail: 线程启动失败要复位 RUNNING，否则钩子永久卡死且静默不重试
+    if spawned.is_err() {
+        RUNNING.store(false, Ordering::Release);
+        log::error!("XIAOMI SPECIAL KEY hook thread spawn failed");
+        return;
+    }
     log::info!("XIAOMI SPECIAL KEY hook starting");
 }
 

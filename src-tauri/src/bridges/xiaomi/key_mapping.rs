@@ -10,7 +10,6 @@ use crate::bridges::xiaomi::voice_chord_sanitizer::{
     recover_chord_modifiers, recover_foreign_modifiers,
 };
 use crate::bridges::xiaomi::voice_inject::scan_code_for_vk;
-use crate::bridges::xiaomi::voice_release::{should_tap_same_chord_after_up, VoiceReleaseDecision};
 use crate::config::manager::{ConfigManager, DeviceConfig, KeyAction};
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -185,11 +184,15 @@ pub fn should_suppress_voice_f5(down: bool, up: bool) -> bool {
     if VOICE_F5_DOWN_SUPPRESSED.load(Ordering::Acquire) {
         return true;
     }
+    // 明确注入语音和弦期间：无条件吞 F5（遥控器原生 F5 会混入 Ctrl+Win，微信「按住说话」不识别）
+    if voice_native_suppress_active() {
+        VOICE_F5_DOWN_SUPPRESSED.store(true, Ordering::Release);
+        return true;
+    }
     if !input_session_active() {
         return false;
     }
-    if voice_native_suppress_active()
-        || direct_signal_recent("voice", Duration::from_millis(300))
+    if direct_signal_recent("voice", Duration::from_millis(300))
         || direct_signal_recent("mic", Duration::from_millis(300))
     {
         VOICE_F5_DOWN_SUPPRESSED.store(true, Ordering::Release);
@@ -410,70 +413,24 @@ fn handle_voice(app: &AppHandle, pressed: bool) {
         log::warn!("XIAOMI VOICE shortcut empty");
         return;
     }
-    // 点击 / 按住：快捷键都跟遥控按下/抬起走（短按≈点按，长按=按住）
-    // 「点击模式」的短按点按由 input_session 在短于阈值抬起时改走 tap；此处处理按下/抬起和弦
+    // 纯 hold：按下 → 映射键 DOWN，抬起 → UP（单击=热键按一次，按住=热键持续按住）
     if pressed {
+        // 语音唤起前把本进程 LL 钩子顶到链头（装到微信钩子之前），
+        // 才能替微信吞掉遥控器原生 F5，避免 Ctrl+Win+F5 使微信「按住说话」不识别
+        crate::bridges::xiaomi::special_keys::bump_hook_to_front();
+        // 注入语音和弦期间吞掉遥控器原生 F5
+        arm_voice_native_suppress();
         let pressed_ok = {
             let mut state = VOICE_CHORD.lock();
             state.press_with(&vks, inject_voice_chord)
         };
         if pressed_ok {
-            log::info!(
-                "XIAOMI VOICE SHORTCUT DOWN mode={:?} vks={vks:?}",
-                config.trigger_mode
-            );
+            log::info!("XIAOMI VOICE SHORTCUT DOWN vks={vks:?}");
         } else {
-            log::warn!(
-                "XIAOMI VOICE SHORTCUT DOWN failed mode={:?} vks={vks:?}",
-                config.trigger_mode
-            );
+            log::warn!("XIAOMI VOICE SHORTCUT DOWN failed vks={vks:?}");
         }
-    } else if force_release_voice_shortcut("remote_up") {
-        maybe_tap_after_voice_up(&config, &vks);
-    }
-}
-
-/// 点击模式：短按判定为「点按一次」完整 tap（若尚未因长按而 DOWN）
-pub fn voice_shortcut_tap(app: &AppHandle) {
-    let Some(config) = load_xiaomi_config(app) else {
-        return;
-    };
-    if !config.voice_shortcut_enabled {
-        return;
-    }
-    let vks = resolve_voice_hotkey(&config);
-    if vks.is_empty() {
-        return;
-    }
-    // 若已经按住 DOWN，先松开再 tap，避免粘键
-    let _ = force_release_voice_shortcut("click_tap");
-    let hold = if vks.iter().any(|vk| matches!(vk, 0x5B | 0x5C)) {
-        120
     } else {
-        70
-    };
-    voice_tap_vks(&vks, hold);
-    log::info!("XIAOMI VOICE SHORTCUT TAP (click) vks={vks:?} hold_ms={hold}");
-}
-
-/// 点击模式：确认已进入长按后补发 DOWN（若尚未 DOWN）
-pub fn voice_shortcut_ensure_down(app: &AppHandle) {
-    let Some(config) = load_xiaomi_config(app) else {
-        return;
-    };
-    if !config.voice_shortcut_enabled {
-        return;
-    }
-    let vks = resolve_voice_hotkey(&config);
-    if vks.is_empty() {
-        return;
-    }
-    let pressed_ok = {
-        let mut state = VOICE_CHORD.lock();
-        state.press_with(&vks, inject_voice_chord)
-    };
-    if pressed_ok {
-        log::info!("XIAOMI VOICE SHORTCUT DOWN (hold-after-click-threshold) vks={vks:?}");
+        force_release_voice_shortcut("remote_up");
     }
 }
 
@@ -488,33 +445,6 @@ fn force_release_voice_shortcut(reason: &str) -> bool {
         log::error!("XIAOMI VOICE SHORTCUT UP failed reason={reason} vks={keys:?}");
     }
     released
-}
-
-fn maybe_tap_after_voice_up(config: &DeviceConfig, vks: &[u16]) {
-    if should_tap_same_chord_after_up(config.voice_release_behavior)
-        != VoiceReleaseDecision::TapSameChord
-    {
-        return;
-    }
-    let hold = if vks.iter().any(|vk| matches!(vk, 0x5B | 0x5C)) {
-        120
-    } else {
-        70
-    };
-    // 稍作间隔，避免与 KEYUP 粘连导致开关式输入法吃不到第二次点按
-    std::thread::sleep(Duration::from_millis(40));
-    voice_tap_vks(vks, hold);
-    log::info!(
-        "XIAOMI VOICE SHORTCUT post-up tap behavior={:?} vks={vks:?}",
-        config.voice_release_behavior
-    );
-}
-
-/// 语音专用 tap：优先 WinUHid，再 SendInput（+ Alt 菜单抑制）。
-fn voice_tap_vks(vks: &[u16], hold_ms: u64) {
-    let _ = inject_voice_chord(vks, false);
-    std::thread::sleep(Duration::from_millis(hold_ms.max(1)));
-    let _ = inject_voice_chord(vks, true);
 }
 
 /// ATVV opcode 路径调用（对齐 VoiceShortcut.press/release/tap）
@@ -883,9 +813,9 @@ fn inject_voice_chord(vks: &[u16], key_up: bool) -> bool {
 
         if crate::bridges::xiaomi::hid_injector::is_available() {
             let hid_ok = if !key_up {
-                crate::bridges::xiaomi::hid_injector::press(&vks).is_ok()
+                crate::bridges::xiaomi::hid_injector::press_single(&vks).is_ok()
             } else {
-                match crate::bridges::xiaomi::hid_injector::release(&vks) {
+                match crate::bridges::xiaomi::hid_injector::release_single(&vks) {
                     Ok(()) => true,
                     Err(e) => {
                         log::error!("XIAOMI VOICE WinUHid release failed: {e}");

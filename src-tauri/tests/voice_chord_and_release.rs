@@ -5,10 +5,6 @@ use remote_bridge_hub_lib::bridges::xiaomi::voice_inject::{
     has_alt_modifier, scan_code_for_vk, should_suppress_alt_menu_after_keyup,
     ALT_MENU_SUPPRESS_DUMMY_VK,
 };
-use remote_bridge_hub_lib::bridges::xiaomi::voice_release::{
-    should_tap_same_chord_after_up, VoiceReleaseDecision,
-};
-use remote_bridge_hub_lib::config::manager::VoiceReleaseBehavior;
 
 #[test]
 fn releases_original_keys_and_is_idempotent() {
@@ -64,18 +60,6 @@ fn press_while_held_releases_previous_first() {
     assert_eq!(log[1], (vec![0xA2, 0x5B], true));
     assert_eq!(log[2], (vec![0xA2, 0x5B], true));
     assert_eq!(log[3], (vec![0xA2, 0x5B], false));
-}
-
-#[test]
-fn tap_same_chord_decision_matches_behavior() {
-    assert_eq!(
-        should_tap_same_chord_after_up(VoiceReleaseBehavior::None),
-        VoiceReleaseDecision::NoExtraTap
-    );
-    assert_eq!(
-        should_tap_same_chord_after_up(VoiceReleaseBehavior::TapSameChord),
-        VoiceReleaseDecision::TapSameChord
-    );
 }
 
 #[test]

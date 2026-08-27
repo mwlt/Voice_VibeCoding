@@ -378,6 +378,28 @@ pub fn release_all() -> Result<(), String> {
     submit(dev, dev.keyboard, &[0u8; 8])
 }
 
+/// 单报告同时按下：多修饰键一次到位（微信要求 Ctrl+Win 同时按住才开条；
+/// 跳过 press_keyboard 的分步时序）。// ponytail: 千问若需分步时序，改回 press/release
+pub fn press_single(vks: &[u16]) -> Result<(), String> {
+    ensure_init();
+    let guard = DEVICES.lock();
+    let dev = guard
+        .as_ref()
+        .ok_or_else(|| "WinUHid not open".to_string())?;
+    let report = build_keyboard_report(vks)?;
+    submit(dev, dev.keyboard, &report)
+}
+
+/// 单报告全部抬起（全零键盘报告）。
+pub fn release_single(_vks: &[u16]) -> Result<(), String> {
+    ensure_init();
+    let guard = DEVICES.lock();
+    let dev = guard
+        .as_ref()
+        .ok_or_else(|| "WinUHid not open".to_string())?;
+    submit(dev, dev.keyboard, &[0u8; 8])
+}
+
 fn submit(dev: &Devices, handle: *mut c_void, report: &[u8]) -> Result<(), String> {
     unsafe {
         if (dev.api.submit)(handle, report.as_ptr(), report.len() as u32) == 0 {
