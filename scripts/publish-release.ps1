@@ -1,12 +1,12 @@
-# Publish v1.5.1 installers to Gitee + GitHub Releases.
+# Publish v1.5.2 installers to Gitee + GitHub Releases.
 # Usage:
 #   $env:GITEE_TOKEN = 'your_gitee_personal_access_token'
 #   $env:GITHUB_TOKEN = 'your_github_pat_with_repo_scope'
 #   .\scripts\publish-release.ps1
 
 param(
-    [string]$Version = "1.5.1",
-    [string]$Tag = "v1.5.1"
+    [string]$Version = "1.5.2",
+    [string]$Tag = "v1.5.2"
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,11 +24,11 @@ Copy-Item $msi $ghMsi -Force
 $body = @"
 ## v$Version
 
-- 修复 WinUHid 虚拟键盘安装流程（StageDriver → RegisterRoot → BindDriver → ScanDevices，无 devcon 也可安装）
-- 「修复虚拟键盘」增加悬浮说明（会做什么 / 什么时候点）
-- 主机状态栏改为四列同排；虚拟声卡电平条可收缩，状态文字不再挤出边框
-- WinUHid 安装阶段日志解析与修复失败提示更清晰
-- 新增 ``npm run test:winuhid-install`` 安装脚本自检
+- 修复 Ctrl+Win 等语音组合键多次点击后 Win 键黏滞（Release Sanitizer + WinUHid 全零报告）
+- 语音键连点 recover-then-press；抬起先 shortcut UP 再 PCM 收尾
+- 按住语音键：先注入快捷键再 VB-CABLE CLEAR，PCM 按下同步 ensure
+- PCM PING 重试 15ms，降低首包/冷启动延迟
+- 含 v1.5.1：WinUHid 安装流程修复、主机状态栏四列布局、修复虚拟键盘说明
 "@
 
 function Ensure-GiteeRelease {

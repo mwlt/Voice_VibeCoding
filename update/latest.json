@@ -1,8 +1,8 @@
 {
-  "version": "1.5.1",
-  "notes": "v1.5.1：\n- 修复 WinUHid 虚拟键盘安装流程（注册→绑定→扫描，无 devcon 也可安装）\n- 「修复虚拟键盘」增加悬浮说明，与 ATVV/声卡修复一致\n- 主机状态栏四列同排，虚拟声卡电平条与状态文字不再挤出边框\n- WinUHid 安装阶段日志与修复提示更清晰",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.1",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.1",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.5.1/Voice%20VibeCoding_1.5.1_x64-setup.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.5.1/Voice.VibeCoding_1.5.1_x64-setup.exe"
+  "version": "1.5.2",
+  "notes": "v1.5.2：\n- 修复 Ctrl+Win 等组合键多次点击后 Win 键黏滞（Release Sanitizer + 全零 HID 报告）\n- 语音键连点先 recover 再 press，抬起先 UP 再收尾 PCM\n- 按住语音键：先注入快捷键再开 VB-CABLE，PCM 按下同步就绪\n- PCM PING 重试间隔 15ms，首包延迟更低",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.2",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.2",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.5.2/Voice%20VibeCoding_1.5.2_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.5.2/Voice.VibeCoding_1.5.2_x64-setup.exe"
 }
