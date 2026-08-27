@@ -207,17 +207,39 @@ impl ConfigManager {
 
     fn load_device_config_from_disk(&self, device: &str) -> Result<DeviceConfig, String> {
         let path = self.device_config_path(device);
-        if path.exists() {
-            let content = fs::read_to_string(&path)
-                .map_err(|e| format!("读取配置失败: {}", e))?;
-            let mut config: DeviceConfig = serde_json::from_str(&content)
-                .map_err(|e| format!("解析配置失败: {}", e))?;
-            if device == "xiaomi" {
-                Self::merge_xiaomi_defaults(&mut config);
+        if !path.exists() {
+            return Ok(Self::default_config_for(device));
+        }
+
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(e) => {
+                log::warn!("读取 {} 配置失败，使用默认: {}", device, e);
+                return Ok(Self::default_config_for(device));
             }
-            Ok(config)
-        } else {
-            Ok(Self::default_config_for(device))
+        };
+
+        match serde_json::from_str::<DeviceConfig>(&content) {
+            Ok(mut config) => {
+                if device == "xiaomi" {
+                    Self::merge_xiaomi_defaults(&mut config);
+                }
+                Ok(config)
+            }
+            Err(e) => {
+                let backup = path.with_extension("json.bak");
+                if fs::rename(&path, &backup).is_ok() {
+                    log::warn!(
+                        "解析 {} 配置失败，已备份到 {:?} 并恢复默认: {}",
+                        device,
+                        backup,
+                        e
+                    );
+                } else {
+                    log::warn!("解析 {} 配置失败，使用默认: {}", device, e);
+                }
+                Ok(Self::default_config_for(device))
+            }
         }
     }
 

@@ -640,15 +640,48 @@ pub async fn get_xiaomi_winuhid_status(
         .map_err(|e| format!("winuhid status task: {e}"))?)
 }
 
-/// 部署 DLL + 提权安装内嵌 WinUHid 驱动
+/// 部署 DLL + 提权安装内嵌 WinUHid 驱动；source 可选 embedded / export / download_page / download_zip
 #[tauri::command]
 pub async fn repair_xiaomi_winuhid(
+    source: Option<String>,
+    force: Option<bool>,
 ) -> Result<crate::bridges::xiaomi::winuhid_env::WinUHidActionResult, String> {
+    let force = force.unwrap_or(false);
+    if let Some(src) = source {
+        return Ok(
+            tokio::task::spawn_blocking(move || {
+                crate::bridges::xiaomi::winuhid_env::repair_with_source(&src, force)
+            })
+            .await
+            .map_err(|e| format!("winuhid repair task: {e}"))??,
+        );
+    }
+    if force {
+        return Ok(
+            tokio::task::spawn_blocking(|| crate::bridges::xiaomi::winuhid_env::repair_embedded(true))
+                .await
+                .map_err(|e| format!("winuhid repair task: {e}"))??,
+        );
+    }
     Ok(
         tokio::task::spawn_blocking(crate::bridges::xiaomi::winuhid_env::check_or_repair)
             .await
             .map_err(|e| format!("winuhid repair task: {e}"))?,
     )
+}
+
+/// 应用内下载 WinUHid 驱动包（dest_path 由前端 save 对话框选定）
+#[tauri::command]
+pub async fn download_xiaomi_winuhid_zip(
+    app: AppHandle,
+    dest_path: String,
+) -> Result<(), String> {
+    let url = crate::bridges::xiaomi::winuhid_env::download_zip_url();
+    let dest = std::path::PathBuf::from(dest_path.trim());
+    if dest.as_os_str().is_empty() {
+        return Err("保存路径为空".into());
+    }
+    crate::file_download::spawn_winuhid_zip_download(app, url, dest)
 }
 
 /// 对齐 Python `open_logs`：打开日志目录

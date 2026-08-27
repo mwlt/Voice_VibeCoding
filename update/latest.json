@@ -1,8 +1,8 @@
 {
-  "version": "1.5.2",
-  "notes": "v1.5.2：\n- 修复 Ctrl+Win 等组合键多次点击后 Win 键黏滞（Release Sanitizer + 全零 HID 报告）\n- 语音键连点先 recover 再 press，抬起先 UP 再收尾 PCM\n- 按住语音键：先注入快捷键再开 VB-CABLE，PCM 按下同步就绪\n- PCM PING 重试间隔 15ms，首包延迟更低",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.2",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.2",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.5.2/Voice%20VibeCoding_1.5.2_x64-setup.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.5.2/Voice.VibeCoding_1.5.2_x64-setup.exe"
+  "version": "1.5.3",
+  "notes": "v1.5.3：\n- 修复部分系统安装后按键映射区域不显示（配置加载失败提示 + 损坏配置自动恢复默认）\n- WinUHid 驱动包支持应用内下载：自选保存位置、进度条显示\n- Release 附带 WinUHid_Manual 手动安装包（含安装说明与 Run-Install.cmd）",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.3",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.3",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.5.3/Voice%20VibeCoding_1.5.3_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.5.3/Voice.VibeCoding_1.5.3_x64-setup.exe"
 }

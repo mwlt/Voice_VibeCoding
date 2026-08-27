@@ -38,5 +38,9 @@ $statusOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPa
 Assert ($statusOut -match 'Phase: Verify') 'Status mode must emit Phase: Verify'
 Assert ($statusOut -match 'Result:') 'Status mode must emit Result:'
 
+# 5) Force flag documented in Install path
+Assert ($src -match '\[switch\] \$Force') 'Install script must support -Force switch'
+Assert ($src -match 'force reinstall') 'Install script must mention force reinstall'
+
 Write-Host "PASS: all winuhid install script checks"
 exit 0

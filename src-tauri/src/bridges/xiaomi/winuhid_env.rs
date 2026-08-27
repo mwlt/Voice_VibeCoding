@@ -7,6 +7,22 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+pub const DOWNLOAD_PAGE_URL: &str =
+    "https://gitee.com/mwlt/remote-voice-vibe-coding/releases";
+
+pub fn download_zip_url() -> String {
+    let ver = env!("CARGO_PKG_VERSION");
+    format!(
+        "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v{ver}/WinUHid_Manual_{ver}.zip"
+    )
+}
+
+pub fn download_zip_filename() -> String {
+    format!("WinUHid_Manual_{}.zip", env!("CARGO_PKG_VERSION"))
+}
+
+pub const MANUAL_FOLDER_NAME: &str = "Voice VibeCoding WinUHid 手动安装";
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WinUHidEnvStatus {
@@ -16,6 +32,8 @@ pub struct WinUHidEnvStatus {
     pub driver_ready: bool,
     pub embedded_driver_available: bool,
     pub package_dir: Option<String>,
+    pub download_page_url: String,
+    pub download_zip_url: String,
     pub message: String,
 }
 
@@ -24,8 +42,124 @@ pub struct WinUHidEnvStatus {
 pub struct WinUHidActionResult {
     pub ok: bool,
     pub ready: bool,
+    pub needs_choice: bool,
     pub needs_reboot: bool,
     pub message: String,
+    pub export_path: Option<String>,
+}
+
+fn desktop_dir() -> Result<PathBuf, String> {
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        let desktop = PathBuf::from(profile).join("Desktop");
+        if desktop.is_dir() {
+            return Ok(desktop);
+        }
+    }
+    std::env::var("USERPROFILE")
+        .map(|p| PathBuf::from(p).join("Desktop"))
+        .map_err(|_| "无法定位桌面目录".to_string())
+}
+
+fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
+    if !src.is_dir() {
+        return Err(format!("源目录不存在: {}", src.display()));
+    }
+    fs::create_dir_all(dst).map_err(|e| format!("创建目录失败: {e}"))?;
+    for entry in fs::read_dir(src).map_err(|e| format!("读取目录失败: {e}"))? {
+        let entry = entry.map_err(|e| format!("读取目录项失败: {e}"))?;
+        let name = entry.file_name();
+        let from = entry.path();
+        let to = dst.join(&name);
+        if from.is_dir() {
+            copy_tree(&from, &to)?;
+        } else {
+            fs::copy(&from, &to).map_err(|e| format!("复制 {} 失败: {e}", from.display()))?;
+        }
+    }
+    Ok(())
+}
+
+pub fn export_manual_package() -> Result<WinUHidActionResult, String> {
+    let root = find_asset_root().ok_or_else(|| "内嵌 WinUHid 资源不可用".to_string())?;
+    let dest = desktop_dir()?.join(MANUAL_FOLDER_NAME);
+    if dest.exists() {
+        fs::remove_dir_all(&dest).map_err(|e| format!("清理旧安装包失败: {e}"))?;
+    }
+    copy_tree(&root, &dest)?;
+    open_folder(&dest)?;
+    Ok(WinUHidActionResult {
+        ok: true,
+        ready: false,
+        needs_choice: false,
+        needs_reboot: false,
+        message: format!(
+            "已导出 WinUHid 安装包到桌面「{}」。请阅读文件夹内「安装说明.txt」，双击 Run-Install.cmd 安装，完成后回到应用确认「虚拟键盘」状态。",
+            MANUAL_FOLDER_NAME
+        ),
+        export_path: Some(dest.display().to_string()),
+    })
+}
+
+pub fn open_folder(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("打开文件夹失败: {e}"))?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        return Err("仅 Windows 支持".into());
+    }
+    Ok(())
+}
+
+pub fn open_download_page() -> Result<WinUHidActionResult, String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", DOWNLOAD_PAGE_URL])
+            .spawn()
+            .map_err(|e| format!("打开下载页失败: {e}"))?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        return Err("仅 Windows 支持".into());
+    }
+    Ok(WinUHidActionResult {
+        ok: true,
+        ready: false,
+        needs_choice: false,
+        needs_reboot: false,
+        message: "已打开 Release 页。下载 WinUHid_Manual 压缩包，解压后阅读「安装说明.txt」安装。".into(),
+        export_path: None,
+    })
+}
+
+pub fn open_download_zip() -> Result<WinUHidActionResult, String> {
+    // 保留给旧调用方；新流程走 download_xiaomi_winuhid_zip（应用内下载 + 进度条）
+    Ok(WinUHidActionResult {
+        ok: true,
+        ready: false,
+        needs_choice: false,
+        needs_reboot: false,
+        message: "请在弹窗中使用「下载驱动包手动安装」，可选择保存位置并查看下载进度。".into(),
+        export_path: None,
+    })
+}
+
+pub fn repair_with_source(source: &str, force: bool) -> Result<WinUHidActionResult, String> {
+    match source.to_ascii_lowercase().as_str() {
+        "embedded" | "embedded_force" => repair_embedded(force || source.eq_ignore_ascii_case("embedded_force")),
+        "export" => export_manual_package(),
+        "download_page" => open_download_page(),
+        "download_zip" => open_download_zip(),
+        other => Err(format!(
+            "未知来源: {other}，可选 embedded / embedded_force / export / download_page / download_zip"
+        )),
+    }
 }
 
 fn asset_candidates(relative: &str) -> Vec<PathBuf> {
@@ -119,6 +253,10 @@ pub fn find_install_script() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+pub fn find_asset_root() -> Option<PathBuf> {
+    find_install_script().and_then(|s| s.parent().map(|p| p.to_path_buf()))
+}
+
 /// 把内嵌 WinUHid.dll 拷到 exe 旁与 LocalAppData，便于 LoadLibrary。
 pub fn deploy_dll_beside_exe() -> Result<Option<PathBuf>, String> {
     let src = find_dll().ok_or_else(|| "内嵌 WinUHid.dll 不可用".to_string())?;
@@ -193,9 +331,9 @@ pub fn env_status() -> WinUHidEnvStatus {
     let message = if ready {
         "虚拟键盘（WinUHid）已就绪，语音键可按硬件方式注入。".into()
     } else if dll_found && !driver_ready && embedded {
-        "已找到 WinUHid.dll，但驱动未就绪。请点「修复虚拟键盘」安装内嵌驱动（需管理员确认）。".into()
+        "已找到 WinUHid.dll，但驱动未就绪。请点「修复虚拟键盘」选择自动修复或导出安装包。".into()
     } else if !dll_found && embedded {
-        "未找到 WinUHid.dll。请点「修复虚拟键盘」自动部署并安装驱动。".into()
+        "未找到 WinUHid.dll。请点「修复虚拟键盘」自动部署或导出安装包。".into()
     } else if dll_found && driver_ready && !injector_ok {
         "驱动设备可访问，但注入器未打开。可再点一次「修复虚拟键盘」或重启桥接。".into()
     } else {
@@ -208,6 +346,8 @@ pub fn env_status() -> WinUHidEnvStatus {
         driver_ready,
         embedded_driver_available: embedded,
         package_dir: package.map(|p| p.display().to_string()),
+        download_page_url: DOWNLOAD_PAGE_URL.into(),
+        download_zip_url: download_zip_url(),
         message,
     }
 }
@@ -285,7 +425,7 @@ pub fn ensure_runtime_quiet() {
     }
 }
 
-pub fn repair_embedded() -> Result<WinUHidActionResult, String> {
+pub fn repair_embedded(force: bool) -> Result<WinUHidActionResult, String> {
     let _ = deploy_dll_beside_exe()?;
     let package = find_driver_package_dir()
         .ok_or_else(|| "内嵌 WinUHid 驱动包不可用（缺少 driver/ 下的 inf/dll/cat）".to_string())?;
@@ -293,28 +433,32 @@ pub fn repair_embedded() -> Result<WinUHidActionResult, String> {
     let dll = find_dll().ok_or_else(|| "未找到 WinUHid.dll".to_string())?;
 
     log::info!(
-        "WinUHid repair: script={} package={} dll={}",
+        "WinUHid repair: force={force} script={} package={} dll={}",
         script.display(),
         package.display(),
         dll.display()
     );
 
     let mut cmd = Command::new("powershell.exe");
-    cmd.args([
-        "-NoProfile",
-        "-WindowStyle",
-        "Hidden",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        &script.display().to_string(),
-        "-Mode",
-        "Install",
-        "-PackageDir",
-        &package.display().to_string(),
-        "-DllSource",
-        &dll.display().to_string(),
-    ]);
+    let mut args = vec![
+        "-NoProfile".to_string(),
+        "-WindowStyle".to_string(),
+        "Hidden".to_string(),
+        "-ExecutionPolicy".to_string(),
+        "Bypass".to_string(),
+        "-File".to_string(),
+        script.display().to_string(),
+        "-Mode".to_string(),
+        "Install".to_string(),
+        "-PackageDir".to_string(),
+        package.display().to_string(),
+        "-DllSource".to_string(),
+        dll.display().to_string(),
+    ];
+    if force {
+        args.push("-Force".to_string());
+    }
+    cmd.args(args);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -367,11 +511,15 @@ pub fn repair_embedded() -> Result<WinUHidActionResult, String> {
         )
     };
 
+    let needs_choice = !ready && !needs_reboot;
+
     Ok(WinUHidActionResult {
         ok: ready || needs_reboot,
         ready,
+        needs_choice,
         needs_reboot,
         message,
+        export_path: None,
     })
 }
 
@@ -381,17 +529,30 @@ pub fn check_or_repair() -> WinUHidActionResult {
         return WinUHidActionResult {
             ok: true,
             ready: true,
+            needs_choice: false,
             needs_reboot: false,
             message: status.message,
+            export_path: None,
         };
     }
-    match repair_embedded() {
-        Ok(r) => r,
+    match repair_embedded(false) {
+        Ok(mut r) => {
+            if !r.ready && !r.needs_reboot && !r.ok {
+                r.needs_choice = true;
+                r.message = format!(
+                    "{} 可在「修复虚拟键盘」弹窗中导出安装包或从 Release 下载。",
+                    r.message
+                );
+            }
+            r
+        }
         Err(e) => WinUHidActionResult {
             ok: false,
             ready: false,
+            needs_choice: true,
             needs_reboot: false,
-            message: e,
+            message: format!("{e} 请点「修复虚拟键盘」导出安装包或选择其他方式。"),
+            export_path: None,
         },
     }
 }

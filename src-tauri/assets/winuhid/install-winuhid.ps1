@@ -2,12 +2,43 @@
 param(
   [ValidateSet("Install", "InstallElevated", "Status")]
   [string] $Mode = "Install",
-  [Parameter(Mandatory = $true)]
-  [string] $PackageDir,
-  [string] $DllSource = ""
+  [string] $PackageDir = "",
+  [string] $DllSource = "",
+  [switch] $Force
 )
 
 $ErrorActionPreference = "Stop"
+$ScriptRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+
+function Resolve-InstallPaths {
+  param([string] $PackageDirIn, [string] $DllSourceIn)
+  $pkg = $PackageDirIn
+  if ([string]::IsNullOrWhiteSpace($pkg)) {
+    $pkg = Join-Path $ScriptRoot "driver"
+  } elseif (-not [System.IO.Path]::IsPathRooted($pkg)) {
+    $pkg = Join-Path $ScriptRoot $pkg
+  }
+  if (-not (Test-Path -LiteralPath $pkg)) {
+    throw "driver folder not found: $pkg`nRun from this folder in Admin PowerShell: .\install-winuhid.ps1"
+  }
+  $pkg = (Resolve-Path -LiteralPath $pkg).Path
+
+  $dll = $DllSourceIn
+  if ([string]::IsNullOrWhiteSpace($dll)) {
+    $dll = Join-Path $ScriptRoot "WinUHid.dll"
+  } elseif (-not [System.IO.Path]::IsPathRooted($dll)) {
+    $dll = Join-Path $ScriptRoot $dll
+  }
+  if (-not (Test-Path -LiteralPath $dll)) {
+    throw "WinUHid.dll not found: $dll"
+  }
+  return @{ PackageDir = $pkg; DllSource = $dll }
+}
+
+$resolved = Resolve-InstallPaths -PackageDirIn $PackageDir -DllSourceIn $DllSource
+$PackageDir = $resolved.PackageDir
+$DllSource = $resolved.DllSource
+
 $StateRoot = Join-Path $env:LOCALAPPDATA "com.remote-bridge-hub.app\winuhid"
 $RebootFlag = Join-Path $StateRoot "reboot-required.flag"
 $HardwareId = "Root\WinUHid"
@@ -243,10 +274,13 @@ try {
     }
     "Install" {
       Deploy-UserDll
-      if (Test-WinUHidDevice) {
-        Write-Phase "Verify" "already reachable"
+      if ((Test-WinUHidDevice) -and (-not $Force)) {
+        Write-Phase "Verify" "already reachable (use -Force to rerun full install)"
         $result = "OK"
         break
+      }
+      if ($Force -and (Test-WinUHidDevice)) {
+        Write-Phase "Install" "force reinstall requested"
       }
       $code = Invoke-ElevatedInstall
       Start-Sleep -Seconds 1

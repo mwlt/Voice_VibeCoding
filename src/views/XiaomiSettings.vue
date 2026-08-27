@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, computed, ref, nextTick, watch } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
 import { useBridgeStore } from "../stores/bridge";
 import { useConfigStore } from "../stores/config";
 import DeviceStatus from "../components/DeviceStatus.vue";
@@ -27,6 +28,11 @@ const type = "xiaomi" as const;
 
 const device = computed(() => bridge.devices[type]);
 const config = computed(() => configStore.configs[type]);
+const configLoadState = computed(() => configStore.loadStates[type]);
+const configLoadError = computed(() => configStore.loadErrors[type]);
+const configSectionLoading = computed(
+  () => configLoadState.value === "pending" || configLoadState.value === "loading"
+);
 
 interface HostStatusItem {
   id: string;
@@ -52,7 +58,18 @@ const voiceRepairing = ref(false);
 const winuhidRepairing = ref(false);
 const atvvRepairing = ref(false);
 const showVoiceChoice = ref(false);
+const showWinuhidChoice = ref(false);
 const voiceChoiceMsg = ref("");
+const winuhidChoiceMsg = ref("");
+type WinuhidDownloadPhase = "idle" | "downloading" | "complete" | "error";
+const winuhidDownloadPhase = ref<WinuhidDownloadPhase>("idle");
+const winuhidDownloadProgress = ref<{
+  downloaded: number;
+  total?: number | null;
+  percent?: number | null;
+} | null>(null);
+const winuhidDownloadMessage = ref("");
+const winuhidZipDefaultName = ref("WinUHid_Manual.zip");
 const showVoiceReboot = ref(false);
 const voiceRebootMsg = ref("");
 const showLogModal = ref(false);
@@ -594,6 +611,9 @@ let unlistenKey: UnlistenFn | null = null;
 let unlistenMeter: UnlistenFn | null = null;
 let unlistenAtvvRepair: UnlistenFn | null = null;
 let unlistenAtvvCancel: UnlistenFn | null = null;
+let unlistenWinuhidProgress: UnlistenFn | null = null;
+let unlistenWinuhidComplete: UnlistenFn | null = null;
+let unlistenWinuhidError: UnlistenFn | null = null;
 
 function formatTime(d = new Date()): string {
   return d.toLocaleTimeString("zh-CN", { hour12: false });
@@ -910,36 +930,133 @@ async function chooseVoiceSource(source: "embedded" | "download_page" | "downloa
 interface WinUHidActionResult {
   ok: boolean;
   ready: boolean;
+  needsChoice: boolean;
   needsReboot: boolean;
   message: string;
+  exportPath?: string | null;
+}
+
+function applyWinuhidResult(result: WinUHidActionResult) {
+  prependLog(result.message);
+  host.value = {
+    ...host.value,
+    winuhid_ready: result.ready,
+    detail: result.message,
+    tone: result.ready ? "ok" : result.needsReboot ? "warn" : result.ok ? "warn" : "error",
+  };
+  if (result.needsReboot) {
+    voiceRebootMsg.value = result.message;
+    showVoiceReboot.value = true;
+  }
+  if (result.needsChoice) {
+    winuhidChoiceMsg.value = result.message;
+    showWinuhidChoice.value = true;
+  }
 }
 
 async function repairWinUHid() {
   if (winuhidRepairing.value || voiceRepairing.value || atvvRepairing.value || restarting.value) {
     return;
   }
+  openWinuhidRepairChoice();
+}
+
+async function chooseWinuhidSource(
+  source: "embedded" | "embedded_force" | "export" | "download_page" | "download_zip"
+) {
+  if (source === "download_zip") {
+    await startWinuhidZipDownload();
+    return;
+  }
   winuhidRepairing.value = true;
+  showWinuhidChoice.value = false;
   try {
-    const result = await invoke<WinUHidActionResult>("repair_xiaomi_winuhid");
-    prependLog(result.message);
-    host.value = {
-      ...host.value,
-      winuhid_ready: result.ready,
-      detail: result.message,
-      tone: result.ready ? "ok" : result.needsReboot ? "warn" : "error",
-    };
-    if (result.needsReboot) {
-      voiceRebootMsg.value = result.message;
-      showVoiceReboot.value = true;
-    }
+    const result = await invoke<WinUHidActionResult>("repair_xiaomi_winuhid", {
+      source,
+      force: source === "embedded_force",
+    });
+    applyWinuhidResult(result);
     await refreshHost();
   } catch (e) {
-    const msg = `虚拟键盘修复失败: ${e}`;
+    const msg = `虚拟键盘处理失败: ${e}`;
     prependLog(msg);
     host.value = { ...host.value, detail: msg, tone: "error" };
+    winuhidChoiceMsg.value = msg;
+    showWinuhidChoice.value = true;
   } finally {
     winuhidRepairing.value = false;
   }
+}
+
+function formatDownloadBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+const winuhidDownloadProgressLabel = computed(() => {
+  const p = winuhidDownloadProgress.value;
+  if (!p) return "准备下载…";
+  const downloaded = formatDownloadBytes(p.downloaded);
+  if (p.total && p.total > 0) {
+    const pct = p.percent != null ? `（${Math.round(p.percent)}%）` : "";
+    return `${downloaded} / ${formatDownloadBytes(p.total)}${pct}`;
+  }
+  return `已下载 ${downloaded}`;
+});
+
+function winuhidDownloadProgressWidth(): string {
+  const p = winuhidDownloadProgress.value;
+  if (p?.percent != null) return `${Math.min(100, Math.max(0, p.percent))}%`;
+  if (winuhidDownloadPhase.value === "complete") return "100%";
+  return "0%";
+}
+
+function resetWinuhidDownloadState() {
+  winuhidDownloadPhase.value = "idle";
+  winuhidDownloadProgress.value = null;
+  winuhidDownloadMessage.value = "";
+}
+
+async function refreshWinuhidZipName() {
+  try {
+    const status = await invoke<{ downloadZipUrl?: string }>("get_xiaomi_winuhid_status");
+    const url = status.downloadZipUrl || "";
+    const name = url.split("/").pop();
+    if (name) winuhidZipDefaultName.value = name;
+  } catch {
+    /* ignore */
+  }
+}
+
+async function startWinuhidZipDownload() {
+  if (winuhidDownloadPhase.value === "downloading" || winuhidRepairing.value) return;
+
+  const dest = await save({
+    defaultPath: winuhidZipDefaultName.value,
+    filters: [{ name: "ZIP 压缩包", extensions: ["zip"] }],
+    title: "保存 WinUHid 驱动包",
+  });
+  if (!dest) return;
+
+  winuhidDownloadPhase.value = "downloading";
+  winuhidDownloadProgress.value = { downloaded: 0, total: null, percent: null };
+  winuhidDownloadMessage.value = "";
+
+  try {
+    await invoke("download_xiaomi_winuhid_zip", { destPath: dest });
+  } catch (e) {
+    winuhidDownloadPhase.value = "error";
+    winuhidDownloadMessage.value = String(e);
+    prependLog(`WinUHid 驱动包下载失败: ${e}`);
+  }
+}
+
+function openWinuhidRepairChoice() {
+  resetWinuhidDownloadState();
+  winuhidChoiceMsg.value = "请选择修复或安装方式：";
+  showWinuhidChoice.value = true;
+  void refreshWinuhidZipName();
 }
 
 onMounted(async () => {
@@ -1032,6 +1149,49 @@ onMounted(async () => {
   } catch (e) {
     console.warn("listen xiaomi-atvv-repair-cancelled failed:", e);
   }
+
+  try {
+    unlistenWinuhidProgress = await listen<{
+      downloaded: number;
+      total?: number | null;
+      percent?: number | null;
+    }>("winuhid-download-progress", (event) => {
+      if (!event.payload) return;
+      winuhidDownloadPhase.value = "downloading";
+      winuhidDownloadProgress.value = event.payload;
+    });
+  } catch (e) {
+    console.warn("listen winuhid-download-progress failed:", e);
+  }
+
+  try {
+    unlistenWinuhidComplete = await listen<{ path: string }>(
+      "winuhid-download-complete",
+      (event) => {
+        winuhidDownloadPhase.value = "complete";
+        const path = event.payload?.path || "";
+        winuhidDownloadMessage.value = path
+          ? `已保存到：${path}。请解压后阅读「安装说明.txt」，双击 Run-Install.cmd 安装。`
+          : "下载完成。请解压后阅读「安装说明.txt」，双击 Run-Install.cmd 安装。";
+        prependLog(winuhidDownloadMessage.value);
+      },
+    );
+  } catch (e) {
+    console.warn("listen winuhid-download-complete failed:", e);
+  }
+
+  try {
+    unlistenWinuhidError = await listen<{ message: string }>(
+      "winuhid-download-error",
+      (event) => {
+        winuhidDownloadPhase.value = "error";
+        winuhidDownloadMessage.value = event.payload?.message || "下载失败";
+        prependLog(`WinUHid 驱动包下载失败: ${winuhidDownloadMessage.value}`);
+      },
+    );
+  } catch (e) {
+    console.warn("listen winuhid-download-error failed:", e);
+  }
 });
 
 onUnmounted(() => {
@@ -1039,6 +1199,9 @@ onUnmounted(() => {
   unlistenMeter?.();
   unlistenAtvvRepair?.();
   unlistenAtvvCancel?.();
+  unlistenWinuhidProgress?.();
+  unlistenWinuhidComplete?.();
+  unlistenWinuhidError?.();
   if (hostPollTimer) clearInterval(hostPollTimer);
   if (devicePollTimer) clearInterval(devicePollTimer);
   if (voiceTipCloseTimer) clearTimeout(voiceTipCloseTimer);
@@ -1079,6 +1242,13 @@ function toggleConnection() {
     bridge.stopBridge(type);
   } else {
     bridge.startBridge(type);
+  }
+}
+
+async function retryLoadConfig() {
+  await configStore.loadConfig(type);
+  if (configStore.loadErrors[type]) {
+    prependLog(`配置加载失败: ${configStore.loadErrors[type]}`);
   }
 }
 
@@ -1284,7 +1454,7 @@ function toggleConnection() {
                     <ul>
                       <li>部署 WinUHid 组件，并安装内嵌的虚拟键盘驱动</li>
                       <li>在系统里注册并启动虚拟键盘设备，让语音组合键按硬件方式注入</li>
-                      <li>完成后状态栏「虚拟键盘」应显示就绪；仍不行时会提示是否需重启</li>
+                      <li>完成后状态栏「虚拟键盘」应显示就绪；仍不行可选导出安装包</li>
                     </ul>
                   </div>
                   <div class="tip-block tip-off">
@@ -1296,7 +1466,7 @@ function toggleConnection() {
                     </ul>
                   </div>
                   <p class="tip-foot">
-                    会弹出 UAC 管理员确认，请点允许。这和「虚拟声卡检测与修复」「修复 ATVV 连接」不是一回事：那边管声音和蓝牙语音通道，这边管按键能不能被输入法认出来。平时虚拟键盘已就绪就不必反复点。
+                    会弹出 UAC 管理员确认，请点允许。点按钮后会打开修复选项：自动修复、强制重装、导出到桌面或从 Release 下载。这和「虚拟声卡检测与修复」「修复 ATVV 连接」不是一回事。
                   </p>
                 </div>
               </Teleport>
@@ -1636,7 +1806,135 @@ function toggleConnection() {
         </div>
       </div>
 
-      <section class="card mapping-layout" v-if="config">
+      <div
+        v-if="showWinuhidChoice"
+        class="voice-modal-backdrop"
+        @click.self="winuhidDownloadPhase !== 'downloading' && (showWinuhidChoice = false)"
+      >
+        <div class="voice-modal" role="dialog" aria-modal="true">
+          <h3>虚拟键盘修复</h3>
+          <p>{{ winuhidChoiceMsg || "请选择修复或安装方式：" }}</p>
+          <p class="voice-modal-uac-tip">自动修复会弹出 UAC；导出包请阅读「安装说明.txt」后双击 Run-Install.cmd</p>
+          <p class="voice-modal-reboot-tip">部分电脑安装后必须重启 Windows</p>
+
+          <div
+            v-if="winuhidDownloadPhase !== 'idle'"
+            class="winuhid-download-progress"
+            role="status"
+            aria-live="polite"
+          >
+            <div class="winuhid-download-head">
+              <span class="winuhid-download-label">
+                {{
+                  winuhidDownloadPhase === "downloading"
+                    ? "正在下载驱动包…"
+                    : winuhidDownloadPhase === "complete"
+                      ? "下载完成"
+                      : "下载失败"
+                }}
+              </span>
+              <span
+                v-if="winuhidDownloadPhase === 'downloading'"
+                class="winuhid-download-meta"
+              >
+                {{ winuhidDownloadProgressLabel }}
+              </span>
+            </div>
+            <div
+              class="winuhid-download-track"
+              :class="{
+                indeterminate:
+                  winuhidDownloadPhase === 'downloading' &&
+                  winuhidDownloadProgress?.percent == null,
+              }"
+            >
+              <div
+                class="winuhid-download-bar"
+                :style="{ width: winuhidDownloadProgressWidth() }"
+              />
+            </div>
+            <p v-if="winuhidDownloadMessage" class="winuhid-download-msg">
+              {{ winuhidDownloadMessage }}
+            </p>
+          </div>
+
+          <div class="voice-modal-actions">
+            <button
+              class="btn btn-primary"
+              type="button"
+              :disabled="winuhidRepairing || winuhidDownloadPhase === 'downloading'"
+              @click="chooseWinuhidSource('embedded')"
+            >
+              自动修复
+            </button>
+            <button
+              class="btn btn-secondary"
+              type="button"
+              :disabled="winuhidRepairing || winuhidDownloadPhase === 'downloading'"
+              @click="chooseWinuhidSource('embedded_force')"
+            >
+              强制重装（完整走一遍安装）
+            </button>
+            <button
+              class="btn btn-secondary"
+              type="button"
+              :disabled="winuhidRepairing || winuhidDownloadPhase === 'downloading'"
+              @click="chooseWinuhidSource('export')"
+            >
+              导出到桌面手动安装
+            </button>
+            <button
+              class="btn btn-secondary"
+              type="button"
+              :disabled="winuhidRepairing || winuhidDownloadPhase === 'downloading'"
+              @click="chooseWinuhidSource('download_zip')"
+            >
+              {{
+                winuhidDownloadPhase === "downloading"
+                  ? "下载中…"
+                  : "下载驱动包手动安装"
+              }}
+            </button>
+            <button
+              class="btn btn-secondary"
+              type="button"
+              :disabled="winuhidRepairing || winuhidDownloadPhase === 'downloading'"
+              @click="chooseWinuhidSource('download_page')"
+            >
+              打开 Release 页
+            </button>
+            <button
+              class="btn btn-secondary"
+              type="button"
+              :disabled="winuhidDownloadPhase === 'downloading'"
+              @click="showWinuhidChoice = false"
+            >
+              取消
+            </button>
+          </div>
+          <p class="voice-modal-note">
+            导出/下载包内含「安装说明.txt」与 Run-Install.cmd。虚拟键盘已就绪时「自动修复」会跳过；需完整验证请选「强制重装」。
+          </p>
+        </div>
+      </div>
+
+      <section v-if="configSectionLoading" class="card mapping-layout mapping-placeholder">
+        <h3>按键映射</h3>
+        <p class="mapping-placeholder-text">正在加载按键映射…</p>
+      </section>
+
+      <section v-else-if="configLoadState === 'error'" class="card mapping-layout mapping-error">
+        <h3>按键映射</h3>
+        <p class="mapping-error-text">
+          配置未能加载，按键映射区域无法显示。
+          <span v-if="configLoadError">（{{ configLoadError }}）</span>
+        </p>
+        <button class="btn btn-secondary" type="button" @click="retryLoadConfig">
+          重试加载
+        </button>
+      </section>
+
+      <section v-else-if="config" class="card mapping-layout">
         <div class="mapping-heading">
           <h3>按键映射</h3>
           <p
@@ -1878,6 +2176,20 @@ function toggleConnection() {
 .mapping-layout h3 {
   margin: 0;
   flex: 0 0 auto;
+}
+.mapping-placeholder,
+.mapping-error {
+  min-height: 160px;
+}
+.mapping-placeholder-text,
+.mapping-error-text {
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.mapping-error-text {
+  margin-bottom: 12px;
 }
 .mapping-flash {
   margin: 0;
@@ -2295,6 +2607,59 @@ function toggleConnection() {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.winuhid-download-progress {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.winuhid-download-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.winuhid-download-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.winuhid-download-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.winuhid-download-track {
+  height: 8px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+.winuhid-download-track.indeterminate .winuhid-download-bar {
+  width: 35% !important;
+  animation: winuhid-progress-indeterminate 1.2s ease-in-out infinite;
+}
+.winuhid-download-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #3b82f6, #1d4ed8);
+  transition: width 0.15s ease;
+}
+.winuhid-download-msg {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+@keyframes winuhid-progress-indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
 }
 .voice-modal-uac-tip {
   margin: -8px 0 8px !important;

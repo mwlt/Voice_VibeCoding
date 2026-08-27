@@ -1,34 +1,36 @@
-# Publish v1.5.2 installers to Gitee + GitHub Releases.
+# Publish v1.5.3 installers + WinUHid manual zip to Gitee + GitHub Releases.
 # Usage:
 #   $env:GITEE_TOKEN = 'your_gitee_personal_access_token'
 #   $env:GITHUB_TOKEN = 'your_github_pat_with_repo_scope'
-#   .\scripts\publish-release.ps1
+#   .\scripts\pack-winuhid-release.ps1 -Version 1.5.3
+#   .\scripts\publish-release.ps1 -Version 1.5.3 -Tag v1.5.3
 
 param(
-    [string]$Version = "1.5.2",
-    [string]$Tag = "v1.5.2"
+    [string]$Version = "1.5.3",
+    [string]$Tag = "v1.5.3"
 )
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $nsis = Join-Path $root "src-tauri\target\release\bundle\nsis\Voice VibeCoding_${Version}_x64-setup.exe"
 $msi = Join-Path $root "src-tauri\target\release\bundle\msi\Voice VibeCoding_${Version}_x64_zh-CN.msi"
+$winuhidZip = Join-Path $root "dist\WinUHid_Manual_$Version.zip"
 $ghNsis = Join-Path $env:TEMP "Voice.VibeCoding_${Version}_x64-setup.exe"
 $ghMsi = Join-Path $env:TEMP "Voice.VibeCoding_${Version}_x64_zh-CN.msi"
 
 if (-not (Test-Path $nsis)) { throw "Missing NSIS build: $nsis" }
 if (-not (Test-Path $msi)) { throw "Missing MSI build: $msi" }
+if (-not (Test-Path $winuhidZip)) { throw "Missing WinUHid zip: $winuhidZip (run scripts/pack-winuhid-release.ps1)" }
 Copy-Item $nsis $ghNsis -Force
 Copy-Item $msi $ghMsi -Force
 
 $body = @"
 ## v$Version
 
-- 修复 Ctrl+Win 等语音组合键多次点击后 Win 键黏滞（Release Sanitizer + WinUHid 全零报告）
-- 语音键连点 recover-then-press；抬起先 shortcut UP 再 PCM 收尾
-- 按住语音键：先注入快捷键再 VB-CABLE CLEAR，PCM 按下同步 ensure
-- PCM PING 重试 15ms，降低首包/冷启动延迟
-- 含 v1.5.1：WinUHid 安装流程修复、主机状态栏四列布局、修复虚拟键盘说明
+- 修复部分系统安装后按键映射区域不显示（配置加载失败提示 + 损坏配置自动恢复默认）
+- WinUHid 驱动包支持应用内下载：自选保存位置、进度条显示
+- Release 附带 WinUHid_Manual 手动安装包（含安装说明与 Run-Install.cmd）
+- 含 v1.5.2：Win 键黏滞修复、语音首包延迟优化、WinUHid 安装流程修复
 "@
 
 function Ensure-GiteeRelease {
@@ -100,6 +102,7 @@ if ($env:GITEE_TOKEN) {
     Write-Host "Gitee release id: $gid"
     Upload-GiteeAsset $gid $nsis
     Upload-GiteeAsset $gid $msi
+    Upload-GiteeAsset $gid $winuhidZip
     Write-Host "Gitee upload done."
 } else {
     Write-Warning "Skip Gitee: GITEE_TOKEN not set"
@@ -112,6 +115,7 @@ if ($ghToken) {
     Write-Host "GitHub release id: $($gh.id)"
     Upload-GithubAsset $gh $ghNsis (Split-Path $ghNsis -Leaf)
     Upload-GithubAsset $gh $ghMsi (Split-Path $ghMsi -Leaf)
+    Upload-GithubAsset $gh $winuhidZip (Split-Path $winuhidZip -Leaf)
     Write-Host "GitHub upload done."
 } else {
     Write-Warning "Skip GitHub: GITHUB_TOKEN/GH_TOKEN not set"

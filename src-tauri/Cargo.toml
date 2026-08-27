@@ -1,6 +1,6 @@
 [package]
 name = "remote-bridge-hub"
-version = "1.5.2"
+version = "1.5.3"
 description = "Voice VibeCoding — 语音氛围编程 / 小米·T1·V60 遥控器桥接 (Rust)"
 authors = ["Voice VibeCoding"]
 edition = "2021"
@@ -69,6 +69,7 @@ rubato = "0.14"
 
 [profile.dev]
 opt-level = 1
+incremental = false
 
 [profile.release]
 strip = true

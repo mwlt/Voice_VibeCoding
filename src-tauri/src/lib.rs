@@ -5,6 +5,7 @@ pub mod audio;
 pub mod logging;
 pub mod app_update;
 pub mod webview_guard;
+pub mod file_download;
 
 use tauri::{Manager, RunEvent};
 
@@ -277,6 +278,7 @@ pub fn run() {
             ipc::commands::repair_xiaomi_voice_env,
             ipc::commands::get_xiaomi_winuhid_status,
             ipc::commands::repair_xiaomi_winuhid,
+            ipc::commands::download_xiaomi_winuhid_zip,
             ipc::commands::open_logs_folder,
             ipc::commands::get_app_log,
             ipc::commands::open_app_log,
