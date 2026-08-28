@@ -30,6 +30,8 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 本仓库是 **Rust + Tauri 2 + Vue 3** 实现，不是 Python 版 Remote Bridge Hub。二者功能相近，但运行时、安装包与配置目录均独立。
 
+**License:** [MIT](./LICENSE)
+
 ---
 
 ## 它能做什么

@@ -6,6 +6,12 @@ dist/
 
 # Rust / Tauri build output
 src-tauri/target/
+# Alternate cargo target dirs used for diagnosis / TDD (can be huge)
+src-tauri/target-*/
+src-tauri/preprocessed.xml
+
+# Local third-party trees / extracted zips (not part of the app source)
+_third_party/
 
 # Logs & temp
 *.log
@@ -38,6 +44,7 @@ bug修复.md
 *.key
 credentials.json
 
-# Accidental installer copies in repo root
+# Accidental installer copies / duplicate downloads in repo root or docs
 /*.msi
 /*-setup.exe
+docs/install-winuhid(1).ps1
