@@ -1,9 +1,21 @@
 //! WebView2 恢复：reload → recreate → restart 三级自救。
 
 use crate::webview_guard::{self, HealthAction};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 const MAIN_LABEL: &str = "main";
+
+/// 启动时是否进入托盘（设置「启动后最小化到托盘」或 `--minimized`）
+static BOOT_TO_TRAY: AtomicBool = AtomicBool::new(false);
+
+pub fn set_boot_to_tray(v: bool) {
+    BOOT_TO_TRAY.store(v, Ordering::SeqCst);
+}
+
+pub fn boot_to_tray() -> bool {
+    BOOT_TO_TRAY.load(Ordering::SeqCst)
+}
 
 /// 恢复 WebView2 渲染可见性（Windows hide/visible:false 后必须先 SetIsVisible）
 pub fn reveal_webview(window: &WebviewWindow) {
@@ -16,9 +28,20 @@ pub fn reveal_webview(window: &WebviewWindow) {
     }
 }
 
-/// 还原主窗口到前台
+/// 最小化到托盘：show + minimize + 不占任务栏。
+/// **禁止 hide()**：长期 hide 会让 Windows 回收 WebView2，导致白屏/黑屏。
+pub fn minimize_main_to_tray(window: &WebviewWindow) {
+    reveal_webview(window);
+    let _ = window.show();
+    let _ = window.minimize();
+    let _ = window.set_skip_taskbar(true);
+    log::info!("WINDOW: minimized to tray (skip_taskbar, no hide)");
+}
+
+/// 还原主窗口到前台（托盘左键 / 二次启动 / 菜单「打开状态」）
 pub fn restore_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_LABEL) {
+        let _ = window.set_skip_taskbar(false);
         reveal_webview(&window);
         let _ = window.unminimize();
         let _ = window.show();
@@ -26,7 +49,20 @@ pub fn restore_main_window(app: &AppHandle) {
     }
 }
 
-/// 关闭到托盘：minimize 到任务栏（不用 hide，避免 Windows 回收 WebView2 渲染进程）
+/// 前端就绪后显示窗口；若启动策略为托盘则直接 minimize_to_tray。
+pub fn reveal_main_on_frontend_ready(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
+        if boot_to_tray() {
+            minimize_main_to_tray(&window);
+        } else {
+            let _ = window.set_skip_taskbar(false);
+            reveal_webview(&window);
+            let _ = window.show();
+        }
+    }
+}
+
+/// 关闭到托盘：minimize + skip_taskbar（不用 hide）
 pub fn attach_main_window_close_handler(app: &AppHandle, window: &WebviewWindow) {
     let app_handle = app.clone();
     let window_ = window.clone();
@@ -39,8 +75,11 @@ pub fn attach_main_window_close_handler(app: &AppHandle, window: &WebviewWindow)
                 .unwrap_or(true);
             if minimize {
                 api.prevent_close();
-                reveal_webview(&window_);
-                let _ = window_.minimize();
+                minimize_main_to_tray(&window_);
+            } else {
+                // 关窗即退出（托盘仍存活时须主动 exit）
+                api.prevent_close();
+                crate::ipc::tray::quit_app_public(&app_handle);
             }
         }
     });

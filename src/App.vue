@@ -127,11 +127,16 @@ async function dismissConflict() {
 }
 
 onMounted(async () => {
-  // 页面就绪后再显示窗口（tauri.conf visible:false，避免白屏闪烁）
+  // 页面就绪后再显示；启动策略为托盘时由后端 minimize（禁止 hide，防 WebView2 白屏）
   try {
-    await getCurrentWindow().show();
+    await invoke("reveal_main_on_frontend_ready");
   } catch (e) {
-    console.warn("show main window failed:", e);
+    console.warn("reveal main window failed:", e);
+    try {
+      await getCurrentWindow().show();
+    } catch (e2) {
+      console.warn("show main window failed:", e2);
+    }
   }
   await appUpdate.init();
   unlistenNav = await listen<string>("navigate", (ev) => {

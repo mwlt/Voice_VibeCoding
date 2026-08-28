@@ -127,7 +127,7 @@ async function checkUpdate() {
           <div class="setting-info">
             <span class="setting-label">启动后最小化到托盘</span>
             <span class="setting-desc"
-              >启动时不显示主窗口，点击托盘图标即可打开</span
+              >启动后直接进托盘（不占任务栏），点托盘图标打开</span
             >
           </div>
           <label class="toggle">
@@ -144,7 +144,7 @@ async function checkUpdate() {
           <div class="setting-info">
             <span class="setting-label">最小化到托盘</span>
             <span class="setting-desc"
-              >关闭窗口时隐藏到托盘（可从托盘再打开）。关闭此项后，关窗即退出软件</span
+              >点关闭按钮时进托盘（不占任务栏，可点托盘再打开）。关闭此项后，关窗即退出软件</span
             >
           </div>
           <label class="toggle">

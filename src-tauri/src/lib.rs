@@ -22,8 +22,8 @@ fn cleanup_on_exit(app: &tauri::AppHandle) {
 }
 
 /// 自启参数解析：`--minimized`（注册表 Run 键与 Startup 快捷方式均带此参数）。
-/// 语义：自启时最小化到任务栏（保留渲染，避免 hide 造成 WebView2 白屏），
-/// 用户点任务栏/托盘即可恢复。
+/// 语义：自启时 minimize + skip_taskbar 进托盘（禁止 hide，避免 WebView2 白屏），
+/// 用户点托盘即可恢复。
 ///
 /// ```
 /// use remote_bridge_hub_lib::should_start_minimized;
@@ -97,61 +97,41 @@ pub fn run() {
                 .ok();
 
             if let Some(window) = app.get_webview_window("main") {
-                // 关闭窗口：minimize_to_tray=true 则最小化到任务栏（不用 hide，防 WebView2 僵尸态）
+                // 关闭窗口：minimize_to_tray=true → minimize+skip_taskbar（禁止 hide）
                 webview_recovery::attach_main_window_close_handler(app.handle(), &window);
 
-                // 启动后最小化到托盘（用户设置）或 --minimized（自启参数）
-                let start_hidden = app
+                // 启动后最小化到托盘（用户设置）或 --minimized（自启）：统一走 minimize，不用 hide
+                let start_to_tray = app
                     .try_state::<config::manager::ConfigManager>()
                     .and_then(|m| m.get_global_settings().ok())
                     .map(|s| s.start_minimized_to_tray)
-                    .unwrap_or(false);
-                let auto_minimized =
-                    should_start_minimized(&std::env::args().collect::<Vec<_>>());
+                    .unwrap_or(false)
+                    || should_start_minimized(&std::env::args().collect::<Vec<_>>());
+                webview_recovery::set_boot_to_tray(start_to_tray);
 
-                if start_hidden {
-                    // 启动后最小化到托盘：visible:false + with_webview(false) 双保险，零闪烁
-                    log::info!("START: start_minimized_to_tray=true, window stays hidden");
-                    #[cfg(target_os = "windows")]
-                    {
-                        let w = window.clone();
-                        let _ = w.with_webview(move |webview| unsafe {
-                            let _ = webview.controller().SetIsVisible(false);
-                        });
-                    }
-                    let _ = window.hide();
-                } else if auto_minimized {
-                    // 自启参数：先 show 再 minimize 到任务栏（visible:false 时必须先 show，否则托盘/任务栏不可见）
-                    log::info!("START: --minimized detected, minimizing window to taskbar");
+                if start_to_tray {
+                    // 窗口保持 visible:false；前端就绪后 reveal_main_on_frontend_ready 会 minimize 到托盘
+                    // 兜底：若前端未及时调用，延迟后仍进入托盘（不用 hide）
+                    log::info!("START: boot_to_tray=true (start_minimized_to_tray or --minimized)");
                     let win = window.clone();
                     std::thread::Builder::new()
-                        .name("start-minimized".into())
+                        .name("start-to-tray".into())
                         .spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(400));
-                            #[cfg(target_os = "windows")]
-                            {
-                                let w = win.clone();
-                                let _ = w.with_webview(move |webview| unsafe {
-                                    let _ = webview.controller().SetIsVisible(true);
-                                });
-                            }
-                            let _ = win.show();
-                            let _ = win.minimize();
+                            std::thread::sleep(std::time::Duration::from_millis(800));
+                            webview_recovery::minimize_main_to_tray(&win);
                         })?;
                 } else {
-                    // 正常启动：配置为 visible:false 防闪，短延迟后显示（不宜过长）
+                    // 正常启动：visible:false 防闪；前端就绪优先 show，此处作兜底
                     let win = window.clone();
                     std::thread::Builder::new()
                         .name("show-main-window".into())
                         .spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(200));
-                            #[cfg(target_os = "windows")]
-                            {
-                                let w = win.clone();
-                                let _ = w.with_webview(move |webview| unsafe {
-                                    let _ = webview.controller().SetIsVisible(true);
-                                });
+                            std::thread::sleep(std::time::Duration::from_millis(400));
+                            if webview_recovery::boot_to_tray() {
+                                return;
                             }
+                            webview_recovery::reveal_webview(&win);
+                            let _ = win.set_skip_taskbar(false);
                             let _ = win.show();
                         })?;
                 }
@@ -174,8 +154,7 @@ pub fn run() {
 
             // 启动后自动连接 + 断线重连（对齐 Python worker 循环）
             let auto_app = app.handle().clone();
-            let auto_minimized_boot =
-                should_start_minimized(&std::env::args().collect::<Vec<_>>());
+            let auto_minimized_boot = webview_recovery::boot_to_tray();
             std::thread::Builder::new()
                 .name("xiaomi-auto-connect".into())
                 .spawn(move || {
@@ -274,6 +253,7 @@ pub fn run() {
             ipc::update_cmds::ignore_app_update,
             ipc::update_cmds::download_app_update,
             ipc::commands::webview_ping,
+            ipc::commands::reveal_main_on_frontend_ready,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

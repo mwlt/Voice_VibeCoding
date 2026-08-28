@@ -2,12 +2,12 @@
 # Usage:
 #   $env:GITEE_TOKEN = 'your_gitee_personal_access_token'
 #   $env:GITHUB_TOKEN = 'your_github_pat_with_repo_scope'
-#   .\scripts\pack-winuhid-release.ps1 -Version 1.5.6
-#   .\scripts\publish-release.ps1 -Version 1.5.6 -Tag v1.5.6
+#   .\scripts\pack-winuhid-release.ps1 -Version 1.5.7
+#   .\scripts\publish-release.ps1 -Version 1.5.7 -Tag v1.5.7
 
 param(
-    [string]$Version = "1.5.6",
-    [string]$Tag = "v1.5.6"
+    [string]$Version = "1.5.7",
+    [string]$Tag = "v1.5.7"
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,11 +27,11 @@ Copy-Item $msi $ghMsi -Force
 $body = @"
 ## v$Version
 
-- 语音键按住说话：WinUHid 单报告注入（Ctrl+Win 等），吞遥控器泄漏 F5，微信/豆包/千问更可靠
-- 输入法设置：微信/豆包说明与参考图（wechat-ime-hotkeysV2、doubao.png），口语化步骤
-- 隐藏「触发模式」UI（后端固定 hold：按住遥控=按住快捷键，松手=释放）
+- 最小化到托盘修复：点 X /「启动后最小化到托盘」用 minimize + skip_taskbar，禁止 hide，避免 WebView2 被系统回收致白屏/黑屏
+- 关窗进托盘不占任务栏；关闭「最小化到托盘」时关窗即退出
+- 含 v1.5.6：语音键按住说话 WinUHid 单报告注入，吞遥控器泄漏 F5；输入法设置说明与参考图
 - 含 PR #8：press_single/release_single、handle_voice 纯 hold、disarm 统一、F5 抑制单测
-- 含 v1.5.5：WebView 白屏/黑屏 reload → recreate → 托盘「重启软件」；关闭到托盘改 minimize
+- 含 v1.5.5：WebView 白屏/黑屏 reload → recreate → 托盘「重启软件」
 - 含上一版：忽略更新后，设置里「检查更新」仍可打开弹窗并下载
 "@
 

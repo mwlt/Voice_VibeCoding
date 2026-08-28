@@ -47,7 +47,7 @@ Rust 主进程与音频子进程存活，WebView2 **渲染进程已死亡**进�
 
 | 级别 | 手段 | 触发条件 |
 |------|------|----------|
-| L0 预防 | 关闭 → `minimize()` 而非 `hide()` | 用户点关闭且「最小化到托盘」开启 |
+| L0 预防 | 关闭 / 启动进托盘 → `minimize()` + `set_skip_taskbar(true)`，**禁止 `hide()`** | 用户点关闭且「最小化到托盘」开启；或「启动后最小化到托盘」/`--minimized` |
 | L1 轻量 | `window.reload()` | 心跳超时 / 启动宽限期无 pong |
 | L2 重建 | destroy + `WebviewWindowBuilder` 重建 | reload 连续失败 ≥2 次 |
 | L3 重启 | `app.restart()` 整进程 relaunch | 托盘「重启软件」；L2 仍失败时用户手动 |
