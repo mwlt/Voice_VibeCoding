@@ -24,19 +24,20 @@ fn reset() {
 #[test]
 fn end_voice_period_must_not_unstick_held_f5() {
     reset();
-    set_input_session_active(true);
+    begin_voice_period();
     assert!(should_suppress_voice_f5(true, false, false));
-    // KEYUP 永远放行并清 sticky（防链头漏 DOWN 后粘死）
-    assert!(!should_suppress_voice_f5(false, true, false));
-    assert!(!voice_f5_down_suppressed());
+    assert!(voice_f5_down_suppressed());
+    // ATVV 先松、固件 F5 仍按住：不清 sticky，后续 typematic DOWN 继续吞
     end_voice_period("atvv_early_up");
-    // ATVV 已松，固件仍可能发 typematic DOWN：须继续吞 DOWN
     assert!(
         should_suppress_voice_f5(true, false, false),
         "end_voice_period must NOT clear sticky while F5 still held (DOWN path)"
     );
-    assert!(!should_suppress_voice_f5(false, true, false));
-    set_input_session_active(false);
+    assert!(
+        !should_suppress_voice_f5(false, true, false),
+        "KEYUP always passes and clears sticky"
+    );
+    assert!(!voice_f5_down_suppressed());
     disarm_voice_native_suppress();
 }
 
@@ -97,9 +98,11 @@ fn sticky_unsticks_when_f5_stream_stops() {
 #[test]
 fn session_end_disarms_sticky() {
     reset();
-    set_input_session_active(true);
+    begin_voice_period();
     assert!(should_suppress_voice_f5(true, false, false));
     assert!(voice_f5_down_suppressed());
+    // 断开会话会 disarm（见 set_input_session_active(false)）
+    set_input_session_active(true);
     set_input_session_active(false);
     assert!(
         !voice_f5_down_suppressed(),
@@ -125,13 +128,24 @@ fn f5_keyup_always_passes_even_after_suppressed_down() {
     // 回归：网页键盘测试见 Ctrl+Win+F5 且 F5 粘死 → 因吞了 KEYUP。
     // DOWN 可能已漏到链前钩子/系统；UP 必须放行才能解粘，否则微信热键变成 Ctrl+Win+F5。
     reset();
-    set_input_session_active(true);
+    begin_voice_period();
     assert!(should_suppress_voice_f5(true, false, false));
     assert!(voice_f5_down_suppressed());
     assert!(!should_suppress_voice_f5(false, true, false));
     assert!(!voice_f5_down_suppressed());
-    set_input_session_active(false);
+    end_voice_period("test");
     disarm_voice_native_suppress();
+}
+
+#[test]
+fn physical_f5_works_while_ble_session_connected() {
+    reset();
+    set_input_session_active(true);
+    assert!(
+        !should_suppress_voice_f5(true, false, false),
+        "BLE connected must not disable physical keyboard F5"
+    );
+    set_input_session_active(false);
 }
 
 #[test]

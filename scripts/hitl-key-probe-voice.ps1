@@ -29,5 +29,5 @@ if ($probeOk -and $stuckOk -and $chordOk) {
 
 Write-Host "RED: 仍有泄漏/粘键/映射不全。"
 Write-Host "请贴回: (1) 界面分析结果 (2) key-probe.log 里含 0x74 / 0xA2 / 0x5B 的行"
-Write-Host "并确认已完全退出旧进程后重启（gadget 戳 v1.5.9-f5-zero 需重载 WUDFHost）"
+Write-Host "并确认已完全退出旧进程后重启（gadget 戳 v1.6.0-f5-zero 需重载 WUDFHost）"
 exit 1

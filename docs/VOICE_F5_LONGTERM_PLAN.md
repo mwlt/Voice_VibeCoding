@@ -16,7 +16,7 @@
 
 | # | 缝 | 断言什么 |
 |---|-----|----------|
-| S1 | `should_suppress_voice_f5` / sticky 生命周期 | 吞 **DOWN**/typematic；**KEYUP 永远放行**并清 sticky；`end_voice_period` 不清 sticky；会话结束 `disarm`；空闲解粘 |
+| S1 | `should_suppress_voice_f5` / sticky 生命周期 | 吞 **DOWN**/typematic（仅语音周期/armed，**不含**整段 input session）；**KEYUP 永远放行**并清 sticky；`end_voice_period` 不清 sticky；会话结束 `disarm`；空闲解粘 |
 | S2 | `special_keys` hook_proc + `voice_dispatch` | 回调内无 sleep/IO/`on_firmware_voice_key(` 同步重活；投递非阻塞 |
 | S3 | `bump_hook_to_front_and_settle` / `hook_bump` | generation 落地；钩子线程自死锁检测；重叠先挂后卸 |
 | S4 | `HOOK_PROC_DEPTH` 嵌套分支 | 注入键可放行；**F5 仍抑制**（含 probe/arm_output）；其余转发 |
@@ -56,7 +56,7 @@
 - [ ] 记事本长按语音键 ≥5s 不插日期  
 - [ ] 短按/连按无裸 F5  
 - [ ] 拒 UAC 后约 **8s** 可再试（连续拒绝指数退避，上限 **60s**），不狂弹  
-- [ ] 真键盘 F5：无会话时可用；**断开会话后立即可用**（不再卡 sticky）  
+- [ ] 真键盘 F5：遥控器**已连接**时也可用；语音按住期间可短暂被吞；断开会话后立即可用
 - [ ] 语音松手后若固件 F5 仍按住，记事本仍不插日期（sticky 保留到 KEYUP / 10s 空闲）
 
 ## 变更日志
@@ -69,6 +69,9 @@
 - 2026-08-31 实机回归（粘键）：
   - **Bug：** sticky 吞 KEYUP；链头漏过的 KEYDOWN 无法配对 → F5 永久按下 → Ctrl+Win+F5，微信无法唤醒
   - **修：** `should_suppress_voice_f5` 对 **KEYUP 永远放行**并清 sticky；只吞 DOWN/typematic
+- 2026-08-31 实机回归（真键盘 F5）：
+  - **Bug：** `in_guard` 含 `input_session_active` → 遥控器已连接时真键盘 F5 全部被吞
+  - **修：** 仅语音周期 / armed 时吞 DOWN；会话在线不再挡物理 F5（遥控器 F5 靠 gadget `0x003E` + 语音窗口）
 
 ## 相关
 

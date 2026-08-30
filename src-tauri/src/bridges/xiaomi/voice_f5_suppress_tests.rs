@@ -64,18 +64,17 @@ fn suppress_firmware_f5_while_voice_native_armed() {
     assert!(!should_suppress_voice_f5(true, false, false));
 }
 
-/// 会话活跃即吞 F5（不依赖 Tap；语音 ATVV 路径）。
+/// 会话在线不等于吞 F5（否则真键盘 F5 失效）；只在语音周期/armed 时吞。
 #[test]
-fn session_suppresses_f5_without_tap_ready() {
+fn session_alone_does_not_swallow_physical_f5() {
     end_voice_period("test");
     disarm_voice_native_suppress();
     set_input_session_active(true);
     assert!(
-        should_suppress_voice_f5(true, false, false),
-        "session alone must swallow firmware F5 before ATVV marks"
+        !should_suppress_voice_f5(true, false, false),
+        "session alone must not swallow physical keyboard F5"
     );
     assert!(!should_suppress_voice_f5(false, true, false));
-    assert!(should_suppress_voice_f5(true, false, false));
     set_input_session_active(false);
     disarm_voice_native_suppress();
 }

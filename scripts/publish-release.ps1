@@ -2,12 +2,12 @@
 # Usage:
 #   $env:GITEE_TOKEN = 'your_gitee_personal_access_token'
 #   $env:GITHUB_TOKEN = 'your_github_pat_with_repo_scope'
-#   .\scripts\pack-winuhid-release.ps1 -Version 1.5.9
-#   .\scripts\publish-release.ps1 -Version 1.5.9 -Tag v1.5.9
+#   .\scripts\pack-winuhid-release.ps1 -Version 1.6.0
+#   .\scripts\publish-release.ps1 -Version 1.6.0 -Tag v1.6.0
 
 param(
-    [string]$Version = "1.5.9",
-    [string]$Tag = "v1.5.9"
+    [string]$Version = "1.6.0",
+    [string]$Tag = "v1.6.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,11 +27,9 @@ Copy-Item $msi $ghMsi -Force
 $body = @"
 ## v$Version
 
-- 语音键 F5：KEYUP 永远放行，避免漏 DOWN 后 F5 粘死（Ctrl+Win+F5）导致微信无法唤醒
-- 钩子快进快出（voice_dispatch）+ bump 真落地 + 嵌套仍吞 F5
-- HID Tap：拒 UAC 可识别并短退避（8s→60s）；gadget 清 F5 usage 0x003E
-- 偶发漏 F5 时可再按一两下（详见 README）
-- 含 v1.5.8：Win 和弦不粘滞、WinUHid 重启策略、Electron 输入框提示
+- 修复：遥控器已连接时真键盘 F5 被误吞（仅语音按住期间才吞 F5）
+- 含 v1.5.9：F5 KEYUP 永远放行防粘键；钩子快进快出 / bump 落地；Tap 拒 UAC 短退避
+- 偶发漏遥控 F5 时可再按一两下（详见 README）
 "@
 
 function Ensure-GiteeRelease {

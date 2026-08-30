@@ -11,30 +11,30 @@ use remote_bridge_hub_lib::bridges::xiaomi::key_mapping::{
 };
 
 #[test]
-fn session_alone_suppresses_f5_before_atvv_without_tap() {
+fn session_alone_must_not_block_physical_keyboard_f5() {
+    // 回归：会话在线时若吞全体 F5，真键盘 F5（记事本插日期等）会完全失效。
     end_voice_period("test");
     disarm_voice_native_suppress();
     set_input_session_active(true);
     assert!(
-        should_suppress_voice_f5(true, false, false),
-        "session active + tap_ready=false must still swallow F5 before ATVV"
+        !should_suppress_voice_f5(true, false, false),
+        "session alone must not swallow physical keyboard F5"
     );
     assert!(
-        !should_suppress_voice_f5(false, true, false),
-        "KEYUP must always pass (unstick if DOWN leaked ahead of our hook)"
+        !should_suppress_voice_f5(true, false, true),
+        "session + tap_ready must not swallow physical keyboard F5"
     );
     assert!(!voice_f5_down_suppressed());
-    assert!(should_suppress_voice_f5(true, false, false));
     set_input_session_active(false);
     disarm_voice_native_suppress();
 }
 
 #[test]
-fn tap_ready_session_suppresses_f5_before_atvv() {
+fn tap_ready_session_allows_physical_f5_outside_voice() {
     end_voice_period("test");
     disarm_voice_native_suppress();
     set_input_session_active(true);
-    assert!(should_suppress_voice_f5(true, false, true));
+    assert!(!should_suppress_voice_f5(true, false, true));
     assert!(!should_suppress_voice_f5(false, true, true));
     assert!(!voice_f5_down_suppressed());
     set_input_session_active(false);
@@ -99,8 +99,8 @@ fn suppress_path_must_not_sleep_and_keys_off_session() {
     assert!(!body.contains("wait_for_direct_signal"));
     assert!(!body.contains("thread::sleep"));
     assert!(
-        body.contains("input_session_active"),
-        "ATVV path must key off input session, not only tap_ready"
+        !body.contains("input_session_active"),
+        "must not key off whole input session (blocks physical keyboard F5)"
     );
     assert!(
         body.contains("return false"),

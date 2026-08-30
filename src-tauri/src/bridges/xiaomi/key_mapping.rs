@@ -335,8 +335,10 @@ fn voice_f5_sticky_valid(now: Instant, last: Option<Instant>) -> bool {
 
 /// 固件语音键常被译成 F5。
 ///
-/// **DOWN**：会话 / 语音周期 / armed → 吞，并记 sticky；
+/// **DOWN**：仅 **语音周期 / armed** → 吞，并记 sticky；
 ///          已 sticky 且未超时 → 一律吞（覆盖 typematic）。
+///          **不用** `input_session_active`：会话在线时吞全体 F5 会让真键盘 F5 完全失效。
+///          遥控器裸 F5 靠 gadget 清 `0x003E` + 语音窗口 LL 兜底。
 /// **UP**：**永远放行**（并清 sticky）。
 ///        LL 钩子若不是链头，KEYDOWN 可能已被前面的钩子/系统吃进；
 ///        若此时再吞 KEYUP → F5 永久粘死 → Ctrl+Win 变成 Ctrl+Win+F5，微信无法唤醒。
@@ -366,9 +368,7 @@ pub fn should_suppress_voice_f5(down: bool, up: bool, _tap_ready: bool) -> bool 
             "XIAOMI VOICE F5 sticky auto-released (no F5 event for >{VOICE_F5_STICKY_MAX_IDLE_MS}ms)"
         );
     }
-    let in_guard = voice_period_active()
-        || voice_native_suppress_active()
-        || input_session_active();
+    let in_guard = voice_period_active() || voice_native_suppress_active();
     if !in_guard {
         return false;
     }

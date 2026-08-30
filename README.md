@@ -8,7 +8,7 @@
 
 > **偶尔：按语音键时键盘测试页会闪一下 F5（或出现孤立的 F5 抬起）**
 >
-> 遥控器语音键在 Windows 上常被译成 F5。本软件会尽量吞掉它并注入你映射的组合键（如 Ctrl+Win），但低级钩子无法 100% 抢在所有软件前面，偶发仍可能漏一帧。常见于：刚改完语音键映射、刚启动/重启软件、钩子重挂空窗、或 HID Tap 尚未就绪。
+> 遥控器语音键在 Windows 上常被译成 F5。本软件在**按住语音键期间**会尽量吞掉它并注入你映射的组合键（如 Ctrl+Win）；平时真键盘 F5 仍可用。低级钩子无法 100% 抢在所有软件前面，偶发仍可能漏一帧。常见于：刚改完语音键映射、刚启动/重启软件、钩子重挂空窗、或 HID Tap 尚未就绪。
 >
 > **这不影响正常使用：再按一两下语音键即可。** 松手后 F5 不应一直处于按下；若真键盘 F5「粘住」，点一下真键盘 F5 松开即可。技术细节见 `docs/VOICE_F5_LONGTERM_PLAN.md`。
 
@@ -36,7 +36,7 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 
 
-**v1.5.9** · Windows 桌面应用
+**v1.6.0** · Windows 桌面应用
 
 把小米遥控器 2 Pro（及预留的 T1 / 汉王 V60）接到电脑：按键可映射成键盘快捷键，语音可送到输入法听写。
 
@@ -107,16 +107,16 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 ## 下载安装包
 
-正式安装包在两边的 Release 页（当前 **v1.5.9**）：
+正式安装包在两边的 Release 页（当前 **v1.6.0**）：
 
-- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.9)（国内优先）
-- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.9)
+- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.0)（国内优先）
+- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.0)
 
 常用文件：
 
-- `Voice VibeCoding_1.5.9_x64-setup.exe`（NSIS）
-- `Voice VibeCoding_1.5.9_x64_zh-CN.msi`
-- `WinUHid_Manual_1.5.9.zip`（WinUHid 虚拟键盘手动安装包，也可在应用内「修复虚拟键盘 → 下载驱动包」下载）
+- `Voice VibeCoding_1.6.0_x64-setup.exe`（NSIS）
+- `Voice VibeCoding_1.6.0_x64_zh-CN.msi`
+- `WinUHid_Manual_1.6.0.zip`（WinUHid 虚拟键盘手动安装包，也可在应用内「修复虚拟键盘 → 下载驱动包」下载）
 
 安装时若提示无法覆盖 `remote-bridge-hub.exe`，请先退出本软件（含托盘）再重试。
 
@@ -243,8 +243,8 @@ npm run tauri:build
 | 类型       | 路径                                                                            |
 | -------- | ----------------------------------------------------------------------------- |
 | 可执行文件    | `src-tauri/target/release/remote-bridge-hub.exe`                              |
-| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.5.9_x64_zh-CN.msi`  |
-| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.5.9_x64-setup.exe` |
+| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.6.0_x64_zh-CN.msi`  |
+| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.6.0_x64-setup.exe` |
 
 
 发新版时请同步更新仓库根目录 `update/latest.json`（提高 `version`，填写 Gitee/GitHub 页面与安装包直链）。应用会优先读 Gitee raw，失败再读 GitHub raw。有新版本时在顶栏显示「新版本」与「查看更新内容」；弹窗内可选「不再提醒此版本」（仅抑制自动提醒，不影响设置页「检查更新」）。详见 [docs/UPDATE_IGNORE_PLAN.md](docs/UPDATE_IGNORE_PLAN.md)。
