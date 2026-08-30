@@ -1,10 +1,10 @@
-//! Diagnosis: IME voice wake requires WinUHid (not SendInput).
+//! Voice wake inject backend: WinUHid when available, else SendInput fallback.
 //!
 //! Run:
 //!   cargo test --manifest-path src-tauri/Cargo.toml --test ime_voice_wake_route -- --nocapture
 
 use remote_bridge_hub_lib::bridges::xiaomi::voice_inject::{
-    sanitize_own_inject_flags, voice_chord_inject_route, VoiceChordInjectRoute, LLKHF_INJECTED,
+    sanitize_own_inject_flags, voice_inject_backend, VoiceInjectBackend, LLKHF_INJECTED,
     LLKHF_INJECTED_MASK,
 };
 
@@ -18,14 +18,39 @@ fn ime_voice_chords() -> Vec<(&'static str, Vec<u16>)> {
 }
 
 #[test]
-fn ime_voice_chords_require_virtual_hid() {
+fn when_winuhid_available_prefer_virtual_hid() {
     for (label, chord) in ime_voice_chords() {
         assert_eq!(
-            voice_chord_inject_route(&chord),
-            VoiceChordInjectRoute::RequireVirtualHid,
-            "{label}: voice wake must use WinUHid, not SendInput"
+            voice_inject_backend(&chord, true),
+            VoiceInjectBackend::VirtualHid,
+            "{label}: WinUHid up → virtual HID only"
         );
     }
+}
+
+#[test]
+fn when_winuhid_unavailable_fallback_sendinput() {
+    for (label, chord) in ime_voice_chords() {
+        assert_eq!(
+            voice_inject_backend(&chord, false),
+            VoiceInjectBackend::SendInputFallback,
+            "{label}: WinUHid down → SendInput degraded (not blocked)"
+        );
+    }
+}
+
+#[test]
+fn backends_are_mutually_exclusive() {
+    assert_ne!(
+        VoiceInjectBackend::VirtualHid,
+        VoiceInjectBackend::SendInputFallback
+    );
+    // Same press must never pick both — availability is a single bool.
+    assert_eq!(voice_inject_backend(&[], true), VoiceInjectBackend::VirtualHid);
+    assert_eq!(
+        voice_inject_backend(&[], false),
+        VoiceInjectBackend::SendInputFallback
+    );
 }
 
 #[test]

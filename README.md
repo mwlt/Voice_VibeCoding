@@ -1,5 +1,11 @@
 # Voice VibeCoding
 
+> **偶尔 / 有可能：微信输入法不认某些输入框（尤其 Electron 类软件）**
+>
+> Cursor、VS Code、部分聊天客户端等用的是网页输入框。光标已经在闪，微信有时仍不把它当成「可以听写的输入框」，按语音键就唤不醒「按住说话」。这不是本软件没把快捷键发出去。
+>
+> **建议：先在该输入框里打一两个字，再按遥控语音键，一般就可以正常调用。** 或先点一下记事本 / 浏览器地址栏，再切回来。记事本里能稳定唤醒、只有这类软件里偶发失败，属于输入法挂接问题，不是映射故障。
+
 本项目：   rust语言 windows版（基于python版本重构） 作者 ：mwlt
 
 *gitee:* 
@@ -24,7 +30,7 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 
 
-**v1.5.7** · Windows 桌面应用
+**v1.5.8** · Windows 桌面应用
 
 把小米遥控器 2 Pro（及预留的 T1 / 汉王 V60）接到电脑：按键可映射成键盘快捷键，语音可送到输入法听写。
 
@@ -54,7 +60,7 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 | ATVV 状态红字提示 | 桥接已运行但语音通道未订阅时，在「音频信号」旁显示「ATVV 未连接」 | 新增 |
 | ATVV 失败系统通知 | 语音通道未就绪时按语音键，右下角通知引导去点「修复 ATVV 连接」（限流，避免刷屏） | 新增 |
 | 按键录入扩展 | 对齐常见 108 键显示名；录入会话旁听 Consumer 媒体键（音量±/静音）；常驻「设置为：」按钮兜底计算器等；默认语音触发为「按住」 | 增强 |
-| F5 抑制策略 | ATVV 正常时只吞与语音键关联的 F5，物理键盘 F5 可用；失败时放行并提示，避免「连着遥控就不能按 F5」 | 优化 |
+| F5 抑制策略 | **重叠 bump**（先挂再卸，无空窗）+ gadget 清 `0x003E` + 会话 LL 吞；见 `docs/VOICE_F5_ZERO_LEAK_PLAN.md` | 修复 |
 | ATVV / HID Tap 时序 | 订阅语音通道前暂停 HID Tap，降低 AccessDenied；订阅成功后再启 Tap | 优化 |
 | 语音路由占用策略 | 默认 `hold_device`：启动握 CABLE 设备，仅说话时 play；空闲不常驻写静音（见下文「VB-CABLE 占用方式」） | 优化 |
 | 虚拟声卡状态探测 | 优先读系统 MMDevices 注册表判断 CABLE 是否就绪；已就绪后停探，避免设置页轮询经 WASAPI 枚举导致 `audiodg` 句柄异常上涨 | 优化 |
@@ -63,13 +69,16 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 | 音频信号波形 | 设置页实时显示 BLE 解码电平 / 波形，便于判断语音是否真正进机 | 增强 |
 | 虚拟声卡检测与安装 | 应用内检测 VB-CABLE，支持内嵌驱动或官网安装指引，结果写回主机状态 | 增强 |
 | 语音键按住说话（微信等） | WinUHid 单报告注入 Ctrl+Win；吞遥控器泄漏 F5；松手统一 disarm；输入法设置说明与参考图 | 修复 |
+| 语音键含 Win 不粘滞 | Ctrl+Win / Win+Alt 松开走菜单键同款分步 HID 释放，并无条件补 Win KEYUP，避免 Win 粘住 | 修复 |
+| 修复虚拟键盘重启策略 | 仅 Windows 返回 3010 才提示必须重启；否则再点「自动修复」；重启后若仍未就绪自动补一次 | 优化 |
+| 微信/Electron 输入框 | README 置顶说明：偶发不认网页输入框，先打一两个字再按语音键 | 增强 |
 | 输入法设置引导 | 「输入法设置」分 Tab：微信 / 豆包 / 千问 / 常见问题；一键预设、设置参考图、口语化步骤 | 增强 |
 | 语音键快速设置 | 键位映射页一键设置常用语音组合（微信、千问 Win+Alt 等） | 新增 |
 | 修复虚拟键盘 | 「修复虚拟键盘」修复 WinUHid 虚拟键盘；支持导出/应用内下载驱动包（进度条、自选保存路径）；Release 附带 WinUHid_Manual 手动安装包 | 增强 |
 | 配置加载容错 | 按键映射区依赖配置加载；损坏 xiaomi.json 自动备份并恢复默认；失败时显示错误与重试 | 修复 |
 | 主机状态栏布局 | 四列同排显示虚拟声卡/键盘/路由/桥接；虚拟声卡电平条可收缩，状态文字不挤出边框 | 优化 |
 | 应用内更新 | 顶栏被动提醒；「不再提醒此版本」仅关闭自动弹窗/角标；设置 → 检查更新仍可打开弹窗并下载 | 增强 |
-| 语音键注入稳态 | Hold 路径用 VoiceChordState 防粘键；WinUHid 分步 press/release；UP 后 sanitizer 全零报告 + SendInput 仅清键 | 优化 |
+| 语音键注入稳态 | Hold 用 VoiceChordState；**优先 WinUHid**，不可用时互斥降级 SendInput（日志/通知）；UP sanitizer 清键 | 优化 |
 | 语音首包延迟 | 按下先快捷键 DOWN 再 VB-CABLE CLEAR；PCM 按下同步 ensure；PING 重试 15ms | 优化 |
 | 单实例 | 再次启动只激活已有窗口，降低双开抢端口 | 增强 |
 | 应用内日志 | 界面直接查看 / 复制 / 打开日志，不必只翻 `%APPDATA%` 文件 | 增强 |
@@ -92,16 +101,16 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 ## 下载安装包
 
-正式安装包在两边的 Release 页（当前 **v1.5.7**）：
+正式安装包在两边的 Release 页（当前 **v1.5.8**）：
 
-- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.7)（国内优先）
-- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.7)
+- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.8)（国内优先）
+- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.8)
 
 常用文件：
 
-- `Voice VibeCoding_1.5.7_x64-setup.exe`（NSIS）
-- `Voice VibeCoding_1.5.7_x64_zh-CN.msi`
-- `WinUHid_Manual_1.5.7.zip`（WinUHid 虚拟键盘手动安装包，也可在应用内「修复虚拟键盘 → 下载驱动包」下载）
+- `Voice VibeCoding_1.5.8_x64-setup.exe`（NSIS）
+- `Voice VibeCoding_1.5.8_x64_zh-CN.msi`
+- `WinUHid_Manual_1.5.8.zip`（WinUHid 虚拟键盘手动安装包，也可在应用内「修复虚拟键盘 → 下载驱动包」下载）
 
 安装时若提示无法覆盖 `remote-bridge-hub.exe`，请先退出本软件（含托盘）再重试。
 
@@ -228,8 +237,8 @@ npm run tauri:build
 | 类型       | 路径                                                                            |
 | -------- | ----------------------------------------------------------------------------- |
 | 可执行文件    | `src-tauri/target/release/remote-bridge-hub.exe`                              |
-| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.5.7_x64_zh-CN.msi`  |
-| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.5.7_x64-setup.exe` |
+| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.5.8_x64_zh-CN.msi`  |
+| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.5.8_x64-setup.exe` |
 
 
 发新版时请同步更新仓库根目录 `update/latest.json`（提高 `version`，填写 Gitee/GitHub 页面与安装包直链）。应用会优先读 Gitee raw，失败再读 GitHub raw。有新版本时在顶栏显示「新版本」与「查看更新内容」；弹窗内可选「不再提醒此版本」（仅抑制自动提醒，不影响设置页「检查更新」）。详见 [docs/UPDATE_IGNORE_PLAN.md](docs/UPDATE_IGNORE_PLAN.md)。

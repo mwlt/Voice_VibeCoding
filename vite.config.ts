@@ -8,13 +8,13 @@ export default defineConfig(async () => ({
   // Relative base so production asset/chunk paths work under Tauri custom protocol
   base: "./",
   clearScreen: false,
-  // Use 1430 — sibling project xiaomi_remote_2_pro_rust already binds 1420
+  // 2430: 1420/1430 sit in Windows excluded ranges (Hyper-V/WinNAT often reserves 1382–1481)
   server: {
-    port: 1430,
+    port: 2430,
     strictPort: true,
     host: host || false,
     hmr: host
-      ? { protocol: "ws", host, port: 1431 }
+      ? { protocol: "ws", host, port: 2431 }
       : undefined,
     watch: { ignored: ["**/src-tauri/**"] },
   },

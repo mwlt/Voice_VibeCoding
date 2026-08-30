@@ -29,11 +29,13 @@
 | `install-winuhid.ps1` 重构落地 | ✅ 已完成 | `src-tauri/assets/winuhid/install-winuhid.ps1` |
 | 移除 `UpdateDriverForPlugAndPlayDevices` | ✅ 已完成 | 源码与自动化测试已确认 |
 | 分阶段日志 `Phase: …` | ✅ 已完成 | 脚本 + `winuhid_env.rs` 解析最后阶段 |
-| 自动化测试 `scripts/test-winuhid-install.ps1` | ✅ 已通过 | 语法 / 结构 / Status 模式 |
+| 自动化测试 `scripts/test-winuhid-install.ps1` | ✅ 已通过 | 语法 / 结构 / Status / **#10 HardwareID W-API + 损坏修复**（2026-08-30） |
+| GitHub #10 HardwareID A/W 修复 | ✅ 已完成 | `SetupDiSetDeviceRegistryPropertyW` + `Repair-WinUHidHardwareId`；见 `WINUHID_HARDWAREID_FIX.md` |
 | Rust `cargo check` | ✅ 已通过 | `winuhid_env.rs` 编译通过 |
 | Status 模式（本机） | ✅ 已通过 | `Phase: Verify \| device reachable` / `Result: OK` |
 | InstallElevated 全路径（无 devcon 干净 VM） | ⏳ 未在本会话验证 | 需无 WDK devcon 的干净 Win10/11 VM + UAC |
 | InstallElevated 全路径（本机提权） | ⏳ 未在本会话验证 | 当前 shell 非管理员，未触发 UAC 实测 |
+| 仅真 3010 才提示必须重启 | ✅ 已完成 | 设备不可达但 pnputil 非 3010 → 请再点自动修复；重启标记仅真 3010 写入；开机后若仍未就绪自动补一次非强制修复 |
 
 ## 如何复测
 

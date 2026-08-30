@@ -22,4 +22,5 @@ pub mod autostart;
 pub mod config;
 pub mod connect;
 pub mod key_log;
+pub mod key_probe;
 pub mod input_session;

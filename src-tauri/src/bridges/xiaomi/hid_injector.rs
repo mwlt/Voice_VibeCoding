@@ -337,6 +337,7 @@ fn release_keyboard(dev: &Devices, vks: &[u16]) -> Result<(), String> {
 
 pub fn press(vks: &[u16]) -> Result<(), String> {
     ensure_init();
+    crate::bridges::xiaomi::key_log::note_virtual_hid_inject(vks);
     let guard = DEVICES.lock();
     let Some(dev) = guard.as_ref() else {
         return Err("WinUHid not open".into());
@@ -382,6 +383,7 @@ pub fn release_all() -> Result<(), String> {
 /// 语音路径专用；其它映射键仍走分步 press/release。
 pub fn press_single(vks: &[u16]) -> Result<(), String> {
     ensure_init();
+    crate::bridges::xiaomi::key_log::note_virtual_hid_inject(vks);
     let guard = DEVICES.lock();
     let dev = guard
         .as_ref()
@@ -608,6 +610,16 @@ mod tests {
         let report = build_keyboard_report(&[0xA2, 0x5B]).unwrap();
         assert_eq!(report[0], 0x09);
         assert_eq!(report[2..], [0u8; 6]);
+    }
+
+    /// 键盘报告可编码 F5 usage 0x3E（固件泄漏键）；语音路径靠 gadget 清掉，不在此注入 F5。
+    #[test]
+    fn keyboard_report_can_encode_f5_usage() {
+        let with_f5 = build_keyboard_report(&[0xA2, 0x5B, 0x74]).unwrap();
+        assert_eq!(with_f5[0], 0x09, "Ctrl+Win modifier");
+        assert_eq!(with_f5[2], 0x3E, "F5 usage 0x3E (not 0x3A=F1)");
+        let chord = build_keyboard_report(&[0xA2, 0x5B]).unwrap();
+        assert_eq!(chord[2..], [0u8; 6]);
     }
 
     /// press_single 与 build_keyboard_report 一致（语音路径单报告注入）

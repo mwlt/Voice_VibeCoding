@@ -1,11 +1,11 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/refs/heads/v2/crates/tauri-utils/schema.json",
   "productName": "Voice VibeCoding",
-  "version": "1.5.7",
+  "version": "1.5.8",
   "identifier": "com.remote-bridge-hub.app",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:1430",
+    "devUrl": "http://localhost:2430",
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
   },

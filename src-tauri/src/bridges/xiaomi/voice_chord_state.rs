@@ -19,6 +19,11 @@ impl VoiceChordState {
         self.held.is_some()
     }
 
+    /// 当前按住的 VK（供 F5 中和等外部编排读取）。
+    pub fn held_keys(&self) -> Option<Vec<u16>> {
+        self.held.clone()
+    }
+
     pub fn press_with<F>(&mut self, keys: &[u16], mut inject: F) -> bool
     where
         F: FnMut(&[u16], bool) -> bool,
@@ -45,5 +50,20 @@ impl VoiceChordState {
         let keys = self.held.take()?;
         let released = inject(&keys, true) || inject(&keys, true);
         Some((keys, released))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn held_keys_exposed_for_diagnostics() {
+        let mut s = VoiceChordState::empty();
+        assert!(s.held_keys().is_none());
+        s.press_with(&[0xA2, 0x5B], |_, _| true);
+        assert_eq!(s.held_keys(), Some(vec![0xA2, 0x5B]));
+        let _ = s.release_with(|_, _| true);
+        assert!(s.held_keys().is_none());
     }
 }

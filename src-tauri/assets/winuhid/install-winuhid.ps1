@@ -66,12 +66,14 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class WinUHidRootInstaller {
+  // GitHub #10: must call SetupDiSetDeviceRegistryPropertyW. A-API + UTF-16 bytes
+  // splits HardwareID into single characters (R,o,o,t,...) so the driver never binds.
   const uint DICD_GENERATE_ID=0x1, SPDRP_HARDWAREID=0x1, DIF_REGISTERDEVICE=0x19;
   static readonly IntPtr INVALID_HANDLE_VALUE=new IntPtr(-1);
   [StructLayout(LayoutKind.Sequential)] struct SP_DEVINFO_DATA { public uint cbSize; public Guid ClassGuid; public uint DevInst; public IntPtr Reserved; }
   [DllImport("setupapi.dll",SetLastError=true)] static extern IntPtr SetupDiCreateDeviceInfoList(ref Guid ClassGuid,IntPtr hwndParent);
   [DllImport("setupapi.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool SetupDiCreateDeviceInfo(IntPtr set,string name,ref Guid guid,string desc,IntPtr hwnd,uint flags,ref SP_DEVINFO_DATA data);
-  [DllImport("setupapi.dll",SetLastError=true)] static extern bool SetupDiSetDeviceRegistryProperty(IntPtr set,ref SP_DEVINFO_DATA data,uint property,byte[] buffer,uint size);
+  [DllImport("setupapi.dll",EntryPoint="SetupDiSetDeviceRegistryPropertyW",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool SetupDiSetDeviceRegistryProperty(IntPtr set,ref SP_DEVINFO_DATA data,uint property,byte[] buffer,uint size);
   [DllImport("setupapi.dll",SetLastError=true)] static extern bool SetupDiCallClassInstaller(uint installFunction,IntPtr set,ref SP_DEVINFO_DATA data);
   [DllImport("setupapi.dll",SetLastError=true)] static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
   static void Check(bool ok){if(!ok)throw new Win32Exception(Marshal.GetLastWin32Error());}
@@ -82,6 +84,7 @@ public static class WinUHidRootInstaller {
     try {
       SP_DEVINFO_DATA data=new SP_DEVINFO_DATA(); data.cbSize=(uint)Marshal.SizeOf(typeof(SP_DEVINFO_DATA));
       Check(SetupDiCreateDeviceInfo(set,description,ref systemClass,description,IntPtr.Zero,DICD_GENERATE_ID,ref data));
+      // REG_MULTI_SZ Unicode: id + double NUL; size in bytes (DevCon: (len+1+1)*sizeof(TCHAR))
       byte[] ids=Encoding.Unicode.GetBytes(hardwareId+"\0\0");
       Check(SetupDiSetDeviceRegistryProperty(set,ref data,SPDRP_HARDWAREID,ids,(uint)ids.Length));
       Check(SetupDiCallClassInstaller(DIF_REGISTERDEVICE,set,ref data));
@@ -89,6 +92,70 @@ public static class WinUHidRootInstaller {
   }
 }
 '@
+}
+
+function Test-HardwareIdValueCorrupt([string[]] $Values, [string] $Expected) {
+  if ($null -eq $Values -or $Values.Count -eq 0) { return $false }
+  if ($Values -contains $Expected) { return $false }
+  # Classic #10 corruption: each UTF-16 code unit stored as its own MULTI_SZ entry
+  $joined = ($Values -join '')
+  if ($joined -eq $Expected) { return $true }
+  if ($Values.Count -ge 4 -and ($Values | Where-Object { $_.Length -eq 1 }).Count -eq $Values.Count) {
+    return $true
+  }
+  return $false
+}
+
+function Get-WinUHidEnumKeyPaths {
+  $root = 'HKLM:\SYSTEM\CurrentControlSet\Enum\Root'
+  if (-not (Test-Path -LiteralPath $root)) { return @() }
+  $paths = @()
+  Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | ForEach-Object {
+    $name = $_.PSChildName
+    if ($name -match 'WinUHid|WINUHID') {
+      Get-ChildItem -LiteralPath $_.PSPath -ErrorAction SilentlyContinue | ForEach-Object {
+        $paths += $_.PSPath
+      }
+    }
+  }
+  return $paths
+}
+
+function Repair-WinUHidHardwareId {
+  <#
+    .SYNOPSIS
+      Fix GitHub #10 corrupted HardwareID (single-character MULTI_SZ) under Root\WinUHid*.
+  #>
+  $expected = $HardwareId
+  $repaired = 0
+  foreach ($path in Get-WinUHidEnumKeyPaths) {
+    try {
+      $item = Get-ItemProperty -LiteralPath $path -ErrorAction Stop
+      $raw = $item.HardwareID
+      if ($null -eq $raw) { continue }
+      $values = @($raw)
+      if (-not (Test-HardwareIdValueCorrupt -Values $values -Expected $expected)) { continue }
+      Write-Phase "RepairHardwareId" "corrupt HardwareID at $path → restoring '$expected'"
+      $key = Get-Item -LiteralPath $path
+      # Prefer .NET MultiString write (correct REG_MULTI_SZ)
+      $hivePath = $key.Name  # e.g. HKEY_LOCAL_MACHINE\SYSTEM\...
+      $sub = $hivePath -replace '^HKEY_LOCAL_MACHINE\\', ''
+      $rk = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($sub, $true)
+      if ($null -eq $rk) { throw "cannot open $sub for write" }
+      try {
+        $rk.SetValue('HardwareID', [string[]]@($expected), [Microsoft.Win32.RegistryValueKind]::MultiString)
+        $repaired++
+      } finally { $rk.Close() }
+    } catch {
+      Write-Phase "RepairHardwareId" "skip $path : $($_.Exception.Message)"
+    }
+  }
+  if ($repaired -gt 0) {
+    Write-Phase "RepairHardwareId" "repaired=$repaired node(s)"
+  } else {
+    Write-Phase "RepairHardwareId" "no corrupt HardwareID found"
+  }
+  return $repaired
 }
 
 function Test-RootDeviceNodeListed([string] $PnputilPath) {
@@ -119,6 +186,9 @@ function Invoke-PnputilPhase {
 }
 
 function Register-RootDeviceNode([string] $InfPath, [string] $PnputilPath) {
+  # Always attempt repair of #10 corruption before skipping registration
+  $null = Repair-WinUHidHardwareId
+
   if (Test-RootDeviceNodeListed $PnputilPath) {
     Write-Phase "RegisterRoot" "node already listed ($HardwareId)"
     return
@@ -139,6 +209,7 @@ function Register-RootDeviceNode([string] $InfPath, [string] $PnputilPath) {
     $devconCode = $LASTEXITCODE
     if ($devconCode -eq 0) {
       Write-Phase "RegisterRoot" "devcon exit=0 OK"
+      $null = Repair-WinUHidHardwareId
       return
     }
     Write-Phase "RegisterRoot" "devcon exit=$devconCode; falling back to SetupAPI DIF_REGISTERDEVICE"
@@ -153,10 +224,12 @@ function Register-RootDeviceNode([string] $InfPath, [string] $PnputilPath) {
   } catch {
     if (Test-RootDeviceNodeListed $PnputilPath) {
       Write-Phase "RegisterRoot" "SetupAPI reported error but node now listed; continuing ($($_.Exception.Message))"
+      $null = Repair-WinUHidHardwareId
       return
     }
     throw
   }
+  $null = Repair-WinUHidHardwareId
 }
 
 function Bind-AndPresentRootDevice([string] $InfPath, [string] $PnputilPath) {
@@ -259,13 +332,14 @@ try {
       Write-Phase "Verify" "waiting for device"
       if (-not (Wait-WinUHidReady)) {
         if ($reboot) {
+          # pnputil /install returned 3010: Windows itself requires a reboot.
           Set-Content -LiteralPath $RebootFlag -Value "reboot required" -Encoding ASCII
-          Write-Phase "Verify" "not reachable; reboot flag set (exit 3010)"
+          Write-Phase "Verify" "not reachable; Windows restart required (exit 3010)"
           exit 3010
         }
-        Set-Content -LiteralPath $RebootFlag -Value "reboot required" -Encoding ASCII
-        Write-Phase "Verify" "not reachable after bind+scan; reboot may be required (exit 3010)"
-        exit 3010
+        # Device still down, but Windows did not demand a reboot. Caller should retry auto-repair.
+        Write-Phase "Verify" "not reachable after bind+scan; retry auto-repair (no reboot)"
+        exit 1
       }
 
       Remove-Item -LiteralPath $RebootFlag -Force -ErrorAction SilentlyContinue

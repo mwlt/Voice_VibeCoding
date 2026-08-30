@@ -98,28 +98,39 @@ function installHook() {
             kind: "gatt_read",
             raw: hex(this.output, this.outputLength)
           });
-          // HID Tap 是旁路抄送：Windows 仍会处理同一份报告 → 固件原生成键 + 应用注入 = 双触发。
-          // hub 已连接时清掉「应用负责注入」的全部 usage（menu 0x65 翻译成 VK_APPS 会弹
-          // 右键菜单、back 0xF1、方向 0x4F-52、OK 0x28、TV 0x35、主页 0x4A、电源 0x66、
-          // 音量/静音 0x7F/80/81 及 Consumer 0xE2/E9/EA），改由应用 SendInput 注入单一动作。
-          // onLeave 在返回调用方之前执行，此处改缓冲有效。
-          if (output !== null) {
-            for (let offset = 3; offset + 1 < EXPECTED_OUTPUT_LENGTH; offset += 2) {
-              const usage = this.output.add(offset).readU16();
-              const mapped =
-                usage === 0x00f1 || // Back
-                usage === 0x0028 || // OK
-                usage === 0x0035 || // TV
-                usage === 0x004a || // Home
-                usage === 0x004f || usage === 0x0050 || usage === 0x0051 || usage === 0x0052 || // D-pad
-                usage === 0x0065 || // Menu (VK_APPS → 右键菜单，必清)
-                usage === 0x0066 || // Power
-                usage === 0x007f || usage === 0x0080 || usage === 0x0081 || // volume/mute
-                usage === 0x00e2 || usage === 0x00e9 || usage === 0x00ea;    // consumer vol/mute
-              if (mapped) {
-                this.output.add(offset).writeU16(0);
+          // HID Tap 旁路抄送：清掉应用负责注入的 usage，避免原生+注入双发。
+          // 方向 0x4F-52 / OK 0x28 必须清：应用侧一律 SendInput 注入（含身份映射）。
+          // 始终清（不依赖 hub socket）。v1.5.9-f5-zero：脚本变更→WUDFHost 重启。
+          // USB HID：F1=0x003A，F5=0x003E。重叠 bump + 源头清 = 零空窗交付。
+          let rawBefore = hex(this.output, this.outputLength);
+          let clearedF5 = false;
+          for (let offset = 3; offset + 1 < EXPECTED_OUTPUT_LENGTH; offset += 2) {
+            const usage = this.output.add(offset).readU16();
+            const mapped =
+              usage === 0x00f1 || // Back
+              usage === 0x0028 || // OK
+              usage === 0x0035 || // TV
+              usage === 0x003e || // F5（语音固件泄漏；曾误写成 0x003A=F1）
+              usage === 0x004a || // Home
+              usage === 0x004f || usage === 0x0050 || usage === 0x0051 || usage === 0x0052 || // D-pad
+              usage === 0x0065 || // Menu
+              usage === 0x0066 || // Power
+              usage === 0x007f || usage === 0x0080 || usage === 0x0081 ||
+              usage === 0x00e2 || usage === 0x00e9 || usage === 0x00ea;
+            if (mapped) {
+              if (usage === 0x003e) {
+                clearedF5 = true;
               }
+              this.output.add(offset).writeU16(0);
             }
+          }
+          if (clearedF5) {
+            emit({
+              kind: "cleared_f5",
+              raw: rawBefore,
+              after: hex(this.output, this.outputLength),
+              stamp: "v1.5.9-f5-zero"
+            });
           }
         }
       } catch (error) {

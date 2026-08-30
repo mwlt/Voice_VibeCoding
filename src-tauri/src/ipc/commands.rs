@@ -733,6 +733,54 @@ pub async fn open_app_log() -> Result<(), String> {
     crate::logging::open_log_in_editor()
 }
 
+/// 开始键盘探测（独立 key-probe.log，类似在线键盘测试）
+#[tauri::command]
+pub async fn start_xiaomi_key_probe(app: AppHandle) -> Result<String, String> {
+    crate::bridges::xiaomi::key_probe::start(app)
+}
+
+#[tauri::command]
+pub async fn stop_xiaomi_key_probe() -> Result<(), String> {
+    crate::bridges::xiaomi::key_probe::stop()
+}
+
+#[tauri::command]
+pub async fn get_xiaomi_key_probe_status() -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({
+        "active": crate::bridges::xiaomi::key_probe::is_active(),
+        "path": crate::bridges::xiaomi::key_probe::log_path().to_string_lossy(),
+    }))
+}
+
+#[tauri::command]
+pub async fn clear_xiaomi_key_probe_log() -> Result<String, String> {
+    crate::bridges::xiaomi::key_probe::clear_log()
+}
+
+#[tauri::command]
+pub async fn analyze_xiaomi_key_probe() -> Result<crate::bridges::xiaomi::key_probe::ProbeAnalysis, String> {
+    crate::bridges::xiaomi::key_probe::analyze_recent(200_000)
+}
+
+#[tauri::command]
+pub async fn open_xiaomi_key_probe_log() -> Result<(), String> {
+    let path = crate::bridges::xiaomi::key_probe::log_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    if !path.is_file() {
+        std::fs::write(&path, "").map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("打开 key-probe.log 失败: {e}"))?;
+    }
+    Ok(())
+}
+
 /// 对齐 Python `exit`：真正退出进程（非托盘隐藏）
 #[tauri::command]
 pub async fn quit_application(app: AppHandle) -> Result<(), String> {

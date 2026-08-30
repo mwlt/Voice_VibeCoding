@@ -403,7 +403,85 @@ fn format_repair_failure(output: &std::process::Output, result_raw: &str) -> Str
     )
 }
 
+fn reboot_flag_path() -> Option<PathBuf> {
+    std::env::var("LOCALAPPDATA").ok().map(|local| {
+        PathBuf::from(local)
+            .join("com.remote-bridge-hub.app")
+            .join("winuhid")
+            .join("reboot-required.flag")
+    })
+}
+
+fn reboot_flag_age() -> Option<Duration> {
+    let path = reboot_flag_path()?;
+    if !path.is_file() {
+        return None;
+    }
+    path.metadata().ok()?.modified().ok()?.elapsed().ok()
+}
+
+fn clear_reboot_flag() {
+    if let Some(path) = reboot_flag_path() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+#[cfg(target_os = "windows")]
+extern "system" {
+    fn GetTickCount64() -> u64;
+}
+
+#[cfg(target_os = "windows")]
+fn os_uptime() -> Option<Duration> {
+    Some(Duration::from_millis(unsafe { GetTickCount64() }))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn os_uptime() -> Option<Duration> {
+    None
+}
+
+/// After a true Windows 3010 we leave a flag. Run one auto-repair only if
+/// the machine has rebooted since that flag was written and the injector is still down.
+fn should_run_post_reboot_repair(
+    ready: bool,
+    flag_age: Option<Duration>,
+    uptime: Option<Duration>,
+) -> bool {
+    if ready {
+        return false;
+    }
+    let Some(age) = flag_age else {
+        return false;
+    };
+    match uptime {
+        Some(up) => age > up,
+        None => true,
+    }
+}
+
+fn script_requests_reboot(result_raw: &str, exit_code: Option<i32>) -> bool {
+    let raw_l = result_raw.to_ascii_lowercase();
+    raw_l.contains("restart required")
+        || result_raw.contains("需要重启")
+        || exit_code == Some(3010)
+}
+
+fn script_device_not_accessible(result_raw: &str, stdout: &str) -> bool {
+    let blob = format!("{result_raw}\n{stdout}").to_ascii_lowercase();
+    blob.contains("device not accessible") || blob.contains("retry auto-repair")
+}
+
+fn reboot_required_message() -> &'static str {
+    "驱动已安装，必须重启 Windows 后虚拟键盘才会生效。重启后若仍未就绪，会自动完成剩余步骤。"
+}
+
+fn click_auto_repair_message() -> &'static str {
+    "驱动已装入，但虚拟键盘尚未就绪。请再点一次「自动修复」。"
+}
+
 /// 启动时尽力部署 DLL 并尝试打开注入器（不弹 UAC）。
+/// 若上次安装留下了重启标记且本次开机后仍未就绪，再自动跑一次非强制修复。
 pub fn ensure_runtime_quiet() {
     match deploy_dll_beside_exe() {
         Ok(Some(p)) => {
@@ -416,13 +494,44 @@ pub fn ensure_runtime_quiet() {
     }
     crate::bridges::xiaomi::hid_injector::reset_and_retry();
     if crate::bridges::xiaomi::hid_injector::is_available() {
+        clear_reboot_flag();
         log::info!("WinUHid runtime ready");
-    } else {
-        log::warn!(
-            "WinUHid not ready at startup — voice IME wake needs「修复虚拟键盘」: {}",
-            env_status().message
-        );
+        return;
     }
+
+    for delay_ms in [2_000_u64, 6_000] {
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        crate::bridges::xiaomi::hid_injector::reset_and_retry();
+        if crate::bridges::xiaomi::hid_injector::is_available() {
+            clear_reboot_flag();
+            log::info!("WinUHid runtime ready after delayed retry");
+            return;
+        }
+    }
+
+    if should_run_post_reboot_repair(false, reboot_flag_age(), os_uptime()) {
+        log::info!("WinUHid still down after reboot; running one auto-repair");
+        match repair_embedded(false) {
+            Ok(r) if r.ready => {
+                clear_reboot_flag();
+                log::info!("WinUHid post-reboot auto-repair ready");
+            }
+            Ok(r) => {
+                clear_reboot_flag();
+                log::warn!("WinUHid post-reboot auto-repair did not become ready: {}", r.message);
+            }
+            Err(e) => {
+                clear_reboot_flag();
+                log::warn!("WinUHid post-reboot auto-repair failed: {e}");
+            }
+        }
+        return;
+    }
+
+    log::warn!(
+        "WinUHid not ready at startup — voice IME wake needs「修复虚拟键盘」: {}",
+        env_status().message
+    );
 }
 
 pub fn repair_embedded(force: bool) -> Result<WinUHidActionResult, String> {
@@ -479,9 +588,7 @@ pub fn repair_embedded(force: bool) -> Result<WinUHidActionResult, String> {
     }
 
     let result_raw = script_result_line(&stdout).unwrap_or("").to_string();
-    let needs_reboot = result_raw.to_ascii_lowercase().contains("restart required")
-        || result_raw.contains("需要重启")
-        || output.status.code() == Some(3010);
+    let requested_reboot = script_requests_reboot(&result_raw, output.status.code());
 
     // 安装后重试打开设备
     crate::bridges::xiaomi::hid_injector::reset_and_retry();
@@ -493,25 +600,22 @@ pub fn repair_embedded(force: bool) -> Result<WinUHidActionResult, String> {
         crate::bridges::xiaomi::hid_injector::reset_and_retry();
     }
     let ready = crate::bridges::xiaomi::hid_injector::is_available();
+    // Only tell the user they must reboot when Windows demanded 3010 *and* the device is still down.
+    let needs_reboot = requested_reboot && !ready;
 
-    let message = if ready {
-        "虚拟键盘已就绪：WinUHid 驱动可用，语音键将按硬件方式注入。".into()
-    } else if needs_reboot {
-        "驱动已安装，必须重启 Windows 后虚拟键盘才会生效。重启后再点一次「修复虚拟键盘」。".into()
-    } else if !output.status.success() {
-        format_repair_failure(&output, &result_raw)
-    } else {
-        format!(
-            "脚本已执行，但 WinUHid 仍不可用。{} 可查看日志或重启后再试。",
-            if result_raw.is_empty() {
-                String::new()
-            } else {
-                format!("({result_raw})")
-            }
+    let (message, needs_choice) = if ready {
+        clear_reboot_flag();
+        (
+            "虚拟键盘已就绪：WinUHid 驱动可用，语音键将按硬件方式注入。".into(),
+            false,
         )
+    } else if needs_reboot {
+        (reboot_required_message().to_string(), false)
+    } else if script_device_not_accessible(&result_raw, &stdout) || output.status.success() {
+        (click_auto_repair_message().to_string(), true)
+    } else {
+        (format_repair_failure(&output, &result_raw), true)
     };
-
-    let needs_choice = !ready && !needs_reboot;
 
     Ok(WinUHidActionResult {
         ok: ready || needs_reboot,
@@ -578,5 +682,42 @@ mod tests {
             script_error_phase(text).as_deref(),
             Some("pnputil failed")
         );
+    }
+
+    #[test]
+    fn reboot_only_when_windows_demands_3010() {
+        assert!(script_requests_reboot("Driver installed; Windows restart required", Some(3010)));
+        assert!(script_requests_reboot("restart required", Some(0)));
+        assert!(!script_requests_reboot(
+            "WARNING: WinUHid driver installed but device not accessible yet",
+            Some(1)
+        ));
+        assert!(!script_requests_reboot("OK", Some(0)));
+    }
+
+    #[test]
+    fn not_accessible_is_retry_not_reboot() {
+        assert!(script_device_not_accessible(
+            "WARNING: WinUHid driver installed but device not accessible yet",
+            ""
+        ));
+        assert!(script_device_not_accessible(
+            "",
+            "Phase: Verify | not reachable after bind+scan; retry auto-repair (no reboot)"
+        ));
+        assert!(!script_device_not_accessible("OK", "Phase: Verify | device reachable"));
+    }
+
+    #[test]
+    fn post_reboot_repair_only_after_real_reboot() {
+        let hour = Duration::from_secs(3600);
+        let minute = Duration::from_secs(60);
+        assert!(!should_run_post_reboot_repair(true, Some(hour), Some(minute)));
+        assert!(!should_run_post_reboot_repair(false, None, Some(hour)));
+        // Flag written during this boot: age < uptime → do not auto-elevate.
+        assert!(!should_run_post_reboot_repair(false, Some(minute), Some(hour)));
+        // Flag survived a reboot: age > uptime → one auto-repair.
+        assert!(should_run_post_reboot_repair(false, Some(hour), Some(minute)));
+        assert!(should_run_post_reboot_repair(false, Some(minute), None));
     }
 }

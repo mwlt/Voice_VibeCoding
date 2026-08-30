@@ -47,6 +47,22 @@ pub fn modifiers_still_down(chord: &[u16], is_down: impl Fn(u16) -> bool) -> Vec
         .collect()
 }
 
+pub fn is_win_modifier(vk: u16) -> bool {
+    matches!(vk, 0x5B | 0x5C)
+}
+
+/// UP 后应补 KEYUP 的修饰键。
+///
+/// Win 必须无条件列入：HID 全零后 `GetAsyncKeyState` 常已读成抬起，
+/// 但 Explorer 仍把 LWin 当成按下（菜单键→Win 同一类粘滞）。
+/// 其它修饰键仅在仍 down 时补。
+pub fn modifiers_to_recover(chord: &[u16], is_down: impl Fn(u16) -> bool) -> Vec<u16> {
+    sanitizer_targets(chord)
+        .into_iter()
+        .filter(|&vk| is_win_modifier(vk) || is_down(vk))
+        .collect()
+}
+
 pub fn recover_count() -> u64 {
     RECOVER_COUNT.load(Ordering::Relaxed)
 }
@@ -57,10 +73,10 @@ fn bump_recover(n: u32) {
     }
 }
 
-/// WinUHid UP 后：检查和弦修饰键；若仍 down 则 SendInput KEYUP（仅清键，非唤醒）。
+/// WinUHid UP 后：Win 无条件 SendInput KEYUP；其它修饰键仅在仍 down 时补。
 #[cfg(target_os = "windows")]
 pub fn recover_chord_modifiers(chord: &[u16], send_keyup: impl Fn(&[u16]) -> bool) -> u32 {
-    let stuck = modifiers_still_down(chord, |vk| {
+    let stuck = modifiers_to_recover(chord, |vk| {
         use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
         (unsafe { GetAsyncKeyState(vk as i32) } as u16) & 0x8000 != 0
     });
@@ -110,5 +126,12 @@ mod tests {
         let f = foreign_modifiers_for_chord(&[0xA2, 0x5B]);
         assert!(!f.contains(&0xA2));
         assert!(!f.contains(&0x5B));
+    }
+
+    #[test]
+    fn win_force_recover_when_async_reads_up() {
+        assert_eq!(modifiers_to_recover(&[0xA2, 0x5B], |_| false), vec![0x5B]);
+        assert_eq!(modifiers_to_recover(&[0x5B, 0xA4], |_| false), vec![0x5B]);
+        assert!(modifiers_to_recover(&[0xA5], |_| false).is_empty());
     }
 }

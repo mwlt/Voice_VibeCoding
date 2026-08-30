@@ -107,6 +107,7 @@ pub fn vk_code_to_name(vk: u16) -> String {
         0xB1 => "MediaPrev".to_string(),
         0xB2 => "MediaStop".to_string(),
         0xB3 => "MediaPlayPause".to_string(),
+        0xFC => "VK_NONAME(0xFC)".to_string(),
         _ => format!("VK_{:#04X}", vk),
     }
 }

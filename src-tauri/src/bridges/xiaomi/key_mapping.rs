@@ -13,7 +13,7 @@ use crate::bridges::xiaomi::voice_inject::scan_code_for_vk;
 use crate::config::manager::{ConfigManager, DeviceConfig, KeyAction};
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 
@@ -29,11 +29,19 @@ static ACTION_SEQ: AtomicU64 = AtomicU64::new(1);
 /// 短窗 `direct_signal_recent` 盖不住 typematic，故额外 sticky 抑制直到 F5 抬起或截止。
 static VOICE_NATIVE_SUPPRESS: AtomicBool = AtomicBool::new(false);
 static VOICE_NATIVE_DEADLINE: Mutex<Option<Instant>> = Mutex::new(None);
-/// 对齐 Python `voice_f5_down_suppressed`：一次语音按压周期内吞掉 F5 连发/typematic
+/// 本轮已见过固件 F5 down（诊断用）；**不再**在每次 F5 up 时清除。
 static VOICE_F5_DOWN_SUPPRESSED: AtomicBool = AtomicBool::new(false);
+/// ATVV 语音按压周期（0x08/0x04 → 松开）：周期内无条件吞全部 F5 down/up。
+static VOICE_PERIOD_ACTIVE: AtomicBool = AtomicBool::new(false);
 static INPUT_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 static FIRMWARE_VOICE_HELD: AtomicBool = AtomicBool::new(false);
 static VOICE_HOOK_APP: Mutex<Option<AppHandle>> = Mutex::new(None);
+/// 语音唤醒后端锁定：0=无 1=WinUHid 2=SendInput。DOWN 时写入，UP 时沿用，禁止中途换路双发。
+static VOICE_INJECT_BACKEND_HELD: AtomicU8 = AtomicU8::new(0);
+static VOICE_SENDINPUT_DEGRADED_TOAST_LAST: Mutex<Option<Instant>> = Mutex::new(None);
+const VOICE_BACKEND_NONE: u8 = 0;
+const VOICE_BACKEND_HID: u8 = 1;
+const VOICE_BACKEND_SENDINPUT: u8 = 2;
 
 /// 输入会话（含仅电量）运行中：供 F5 固件泄漏抑制
 pub fn set_input_session_active(active: bool) {
@@ -41,11 +49,34 @@ pub fn set_input_session_active(active: bool) {
     if active {
         // 新连接会话：允许再发一次 ATVV 失败 F5 提示
         reset_atvv_f5_toast_throttle();
+    } else {
+        end_voice_period("session_end");
     }
 }
 
 pub fn input_session_active() -> bool {
     INPUT_SESSION_ACTIVE.load(Ordering::Acquire)
+}
+
+/// ATVV 0x08/0x04：进入语音按压周期（先于/并行于固件 F5）。
+pub fn begin_voice_period() {
+    VOICE_PERIOD_ACTIVE.store(true, Ordering::Release);
+    arm_voice_native_suppress();
+    crate::bridges::xiaomi::key_log::reset_f5_suppress_log_flag();
+}
+
+/// 遥控松开 / 会话结束：结束周期，并清 sticky（仅此处清，勿在每次 F5 up 清）。
+pub fn end_voice_period(reason: &str) {
+    let was = VOICE_PERIOD_ACTIVE.swap(false, Ordering::AcqRel);
+    VOICE_F5_DOWN_SUPPRESSED.store(false, Ordering::Release);
+    VOICE_INJECT_BACKEND_HELD.store(VOICE_BACKEND_NONE, Ordering::Release);
+    if was {
+        log::debug!("XIAOMI VOICE period end reason={reason}");
+    }
+}
+
+pub fn voice_period_active() -> bool {
+    VOICE_PERIOD_ACTIVE.load(Ordering::Acquire)
 }
 
 /// 供 F5 固件回退路径发 UI 事件（ATVV 未订阅时语音键仍走 Windows F5）
@@ -84,6 +115,112 @@ pub fn on_firmware_voice_key(pressed: bool) {
 
 /// 与 special_keys F5 抑制策略对齐（测试/文档）
 pub const VOICE_F5_SUPPRESS_DEADLINE_MS: u64 = 3_000;
+
+/// 方向/OK 固件在 Windows 上的原生 VK（未清 usage 时 BLE HID 的翻译结果）。
+pub fn firmware_vk_for_dpad_ok(button_id: &str) -> Option<u16> {
+    match button_id {
+        "up" | "dpad_up" => Some(0x26),
+        "down" | "dpad_down" => Some(0x28),
+        "left" | "dpad_left" => Some(0x25),
+        "right" | "dpad_right" => Some(0x27),
+        "ok" => Some(0x0D),
+        _ => None,
+    }
+}
+
+/// 映射是否等于固件原生 VK（身份映射：应透传原生，禁止再注入）。
+pub fn is_dpad_ok_identity_mapping(button_id: &str, action: &KeyAction) -> bool {
+    match (firmware_vk_for_dpad_ok(button_id), action) {
+        (Some(fw), KeyAction::SingleKey(vk)) => fw == *vk,
+        _ => false,
+    }
+}
+
+/// 是否应对该方向/OK 做应用侧注入。
+/// 方向/OK 一律注入（gadget 清固件 usage）；身份与自定义都走 SendInput，避免双发/漏发。
+pub fn should_inject_dpad_ok_mapping(button_id: &str, _action: &KeyAction) -> bool {
+    firmware_vk_for_dpad_ok(button_id).is_some()
+}
+
+/// KeyEmitGate 是否允许挡住该键的映射路径。
+/// 方向/OK 必须为 false：否则快速连点会被 60ms 去抖吞成「点三次只跳一格」。
+pub fn should_gate_block_dpad_ok_mapping(button_id: &str) -> bool {
+    firmware_vk_for_dpad_ok(button_id).is_none()
+}
+
+/// 自定义映射的方向/OK 固件 VK 位图（与 Home 同策略：Tap 就绪即吞该固件 VK）。
+/// bit0=Left bit1=Up bit2=Right bit3=Down bit4=Enter
+static DPAD_OK_CUSTOM_SUPPRESS_MASK: AtomicU32 = AtomicU32::new(0);
+
+fn dpad_ok_vk_bit(vk: u16) -> Option<u32> {
+    match vk {
+        0x25 => Some(1 << 0),
+        0x26 => Some(1 << 1),
+        0x27 => Some(1 << 2),
+        0x28 => Some(1 << 3),
+        0x0D => Some(1 << 4),
+        _ => None,
+    }
+}
+
+pub fn set_dpad_ok_custom_suppress_vks(vks: &[u16]) {
+    let mut mask = 0u32;
+    for &vk in vks {
+        if let Some(bit) = dpad_ok_vk_bit(vk) {
+            mask |= bit;
+        }
+    }
+    DPAD_OK_CUSTOM_SUPPRESS_MASK.store(mask, Ordering::Release);
+}
+
+pub fn dpad_ok_custom_suppress_contains(vk: u16) -> bool {
+    let Some(bit) = dpad_ok_vk_bit(vk) else {
+        return false;
+    };
+    DPAD_OK_CUSTOM_SUPPRESS_MASK.load(Ordering::Acquire) & bit != 0
+}
+
+/// 非身份映射的方向/OK：写入吞键表（Up→M 时吞 VK_UP，与 Home→Space 吞 VK_HOME 同理）。
+pub fn refresh_dpad_ok_custom_suppress_mask(config: &DeviceConfig) {
+    let mut vks = Vec::new();
+    for id in [
+        "up",
+        "down",
+        "left",
+        "right",
+        "ok",
+        "dpad_up",
+        "dpad_down",
+        "dpad_left",
+        "dpad_right",
+    ] {
+        let Some(action) = lookup_action(config, id) else {
+            continue;
+        };
+        // 身份映射不进表 → 真实键盘该键仍可用；自定义才吞固件 VK
+        if firmware_vk_for_dpad_ok(id).is_some() && !is_dpad_ok_identity_mapping(id, action) {
+            if let Some(fw) = firmware_vk_for_dpad_ok(id) {
+                if !vks.contains(&fw) {
+                    vks.push(fw);
+                }
+            }
+        }
+    }
+    set_dpad_ok_custom_suppress_vks(&vks);
+    if !vks.is_empty() {
+        log::debug!("XIAOMI DPAD custom suppress vks={vks:?}");
+    }
+}
+
+/// 兼容旧 sticky API（改为 no-op / 读自定义表）。
+pub const DPAD_OK_FIRMWARE_SUPPRESS_MS: u64 = 0;
+pub fn arm_dpad_ok_firmware_suppress(_button_id: &str) {}
+pub fn clear_dpad_ok_firmware_suppress() {
+    // 不清除自定义表；仅测服用
+}
+pub fn dpad_ok_firmware_suppress_active(vk: u16) -> bool {
+    dpad_ok_custom_suppress_contains(vk)
+}
 
 pub fn arm_voice_native_suppress() {
     VOICE_NATIVE_SUPPRESS.store(true, Ordering::Release);
@@ -161,50 +298,29 @@ pub fn direct_signal_recent(name: &str, window: Duration) -> bool {
     false
 }
 
-/// 对齐 Python `_wait_for_direct_signal`：F5 可能比 ATVV 0x04 先到
-fn wait_for_direct_signal(name: &str, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if direct_signal_recent(name, Duration::from_millis(400)) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    direct_signal_recent(name, Duration::from_millis(400))
-}
-
-/// 对齐 Python `_should_suppress_voice_f5`：关联固件 F5 与语音键，避免记事本刷日期时间
-pub fn should_suppress_voice_f5(down: bool, up: bool) -> bool {
-    if !down && !up {
-        return false;
-    }
+/// 固件语音键常被译成 F5。
+///
+/// **DOWN**：会话 / 语音周期 / armed → 吞，并记 sticky。  
+/// **UP**：仅当本进程曾吞过对应 DOWN 时才吞；否则**放行 UP**，
+/// 避免 bump 空窗漏过 KEYDOWN 后再吞 KEYUP → F5 永久粘键。
+pub fn should_suppress_voice_f5(down: bool, up: bool, _tap_ready: bool) -> bool {
     if up {
         return VOICE_F5_DOWN_SUPPRESSED.swap(false, Ordering::AcqRel);
+    }
+    if !down {
+        return false;
     }
     if VOICE_F5_DOWN_SUPPRESSED.load(Ordering::Acquire) {
         return true;
     }
-    // 明确注入语音和弦期间：无条件吞 F5（遥控器原生 F5 会混入 Ctrl+Win，微信「按住说话」不识别）
-    if voice_native_suppress_active() {
-        VOICE_F5_DOWN_SUPPRESSED.store(true, Ordering::Release);
-        return true;
-    }
-    if !input_session_active() {
+    let in_guard = voice_period_active()
+        || voice_native_suppress_active()
+        || input_session_active();
+    if !in_guard {
         return false;
     }
-    if direct_signal_recent("voice", Duration::from_millis(300))
-        || direct_signal_recent("mic", Duration::from_millis(300))
-    {
-        VOICE_F5_DOWN_SUPPRESSED.store(true, Ordering::Release);
-        return true;
-    }
-    if wait_for_direct_signal("mic", Duration::from_millis(80)) {
-        VOICE_F5_DOWN_SUPPRESSED.store(true, Ordering::Release);
-        arm_voice_native_suppress();
-        return true;
-    }
-    // Policy B：关联不上则放行（键盘 F5 可用）。ATVV 挂掉时由 toast 提示，不再会话级全吞。
-    false
+    VOICE_F5_DOWN_SUPPRESSED.store(true, Ordering::Release);
+    true
 }
 
 static ATVV_F5_TOAST_LAST: Mutex<Option<Instant>> = Mutex::new(None);
@@ -278,6 +394,11 @@ fn load_xiaomi_config(app: &AppHandle) -> Option<DeviceConfig> {
 
 /// 按下遥控器物理键后的统一处理
 pub fn on_remote_button(app: &AppHandle, button_id: &str, pressed: bool) {
+    // 录入中禁止映射注入，避免「真实键盘刚被吞录 → 又 SendInput 映射键」干扰录入引擎
+    if crate::bridges::shared::shortcut_capture::is_swallow_active() {
+        log::debug!("XIAOMI MAPPING skipped during shortcut capture key={button_id}");
+        return;
+    }
     if button_id == "voice" || button_id == "mic" {
         mark_direct_signal("voice");
         mark_direct_signal("mic");
@@ -304,11 +425,13 @@ pub fn on_remote_button(app: &AppHandle, button_id: &str, pressed: bool) {
         return;
     };
 
+    // 方向/OK：一律注入（gadget 清固件 usage）；先 mark 再注入，便于 LL 按 recent 吞残留
+    refresh_dpad_ok_custom_suppress_mask(&config);
+    mark_direct_signal(button_id);
     let triggered = perform_button_action(&config, button_id);
     log::debug!("XIAOMI MAPPING key={button_id} mapped={triggered} pressed=true");
 
     if triggered {
-        mark_direct_signal(button_id);
         match button_id {
             "back" => start_hold_repeat(
                 app.clone(),
@@ -381,11 +504,22 @@ fn perform_button_action(config: &DeviceConfig, button_id: &str) -> bool {
     match action {
         KeyAction::None => false,
         KeyAction::SingleKey(vk) => {
-            tap_vks(&[*vk], 20);
+            // 方向/OK 自定义映射：强制 SendInput+EXTRA_INFO，避免 WinUHid 被当成原生再吞
+            if firmware_vk_for_dpad_ok(button_id).is_some() {
+                tap_vks_sendinput_extra(&[*vk], 20);
+            } else {
+                tap_vks(&[*vk], 20);
+            }
+            crate::bridges::xiaomi::key_log::emit_mapped_outputs(&[*vk], true);
             true
         }
         KeyAction::ComboKey(vks) if !vks.is_empty() => {
-            tap_vks(vks, 70);
+            if firmware_vk_for_dpad_ok(button_id).is_some() {
+                tap_vks_sendinput_extra(vks, 70);
+            } else {
+                tap_vks(vks, 70);
+            }
+            crate::bridges::xiaomi::key_log::emit_mapped_outputs(vks, true);
             true
         }
         KeyAction::ComboKey(_) => false,
@@ -400,12 +534,38 @@ fn perform_button_action(config: &DeviceConfig, button_id: &str) -> bool {
     }
 }
 
+/// 方向/OK 自定义映射专用：带 EXTRA_INFO 的 SendInput，LL 钩子认作注入并放行。
+fn tap_vks_sendinput_extra(vks: &[u16], hold_ms: u64) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = key_chord_send_input_with_extra(vks, false, EXTRA_INFO);
+        std::thread::sleep(Duration::from_millis(hold_ms.max(1)));
+        let _ = key_chord_send_input_with_extra(vks, true, EXTRA_INFO);
+        let _ = ACTION_SEQ.fetch_add(1, Ordering::Relaxed);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (vks, hold_ms);
+    }
+}
+
 fn handle_voice(app: &AppHandle, pressed: bool) {
+    // 无论快捷键是否启用：先进入/结束按压周期并吞固件 F5（禁用快捷键也不能漏 F5）
+    if pressed {
+        begin_voice_period();
+        crate::bridges::xiaomi::special_keys::ensure_hook_for_capture();
+    } else {
+        force_release_voice_shortcut("remote_up");
+        crate::bridges::xiaomi::key_log::set_virtual_hid_chord_held(None);
+        end_voice_period("remote_up");
+        return;
+    }
+
     let Some(config) = load_xiaomi_config(app) else {
         return;
     };
     if !config.voice_shortcut_enabled {
-        log::info!("XIAOMI VOICE shortcut disabled");
+        log::info!("XIAOMI VOICE shortcut disabled (F5 still suppressed)");
         return;
     }
     let vks = resolve_voice_hotkey(&config);
@@ -413,26 +573,36 @@ fn handle_voice(app: &AppHandle, pressed: bool) {
         log::warn!("XIAOMI VOICE shortcut empty");
         return;
     }
-    // 纯 hold：按下 → 映射键 DOWN，抬起 → UP（单击=热键按一次，按住=热键持续按住）
-    if pressed {
-        // 语音唤起前把本进程 LL 钩子顶到链头（装到微信钩子之前），
-        // 才能替微信吞掉遥控器原生 F5，避免 Ctrl+Win+F5 使微信「按住说话」不识别
-        crate::bridges::xiaomi::special_keys::bump_hook_to_front();
-        // 注入语音和弦期间吞掉遥控器原生 F5
-        arm_voice_native_suppress();
-        let pressed_ok = {
-            let mut state = VOICE_CHORD.lock();
-            state.press_with(&vks, inject_voice_chord)
-        };
-        if pressed_ok {
-            log::info!("XIAOMI VOICE SHORTCUT DOWN vks={vks:?}");
-        } else {
-            log::warn!("XIAOMI VOICE SHORTCUT DOWN failed vks={vks:?}");
-        }
-    } else {
-        force_release_voice_shortcut("remote_up");
-        disarm_voice_native_suppress();
+    // 固件原生就是 F5：若映射也绑成 F5，等于「吞掉再原样注入」→ 用户只看到 F5
+    if voice_hotkey_is_firmware_f5(&vks) {
+        log::error!(
+            "XIAOMI VOICE shortcut is F5 (vk=0x74) — refusing inject. \
+             Rebind mic to Left Ctrl+Left Win (WeChat) or your IME hotkey; \
+             capturing the remote voice key itself records firmware F5."
+        );
+        return;
     }
+    crate::bridges::xiaomi::key_log::arm_output_watch(
+        crate::bridges::xiaomi::key_log::button_label("mic"),
+    );
+    // PR #8 实证：必须把本进程 LL 钩子顶到微信/输入法之前，才能替它们吞掉固件 F5。
+    // 只吞对本进程有效；微信若在链头已看到 F5，return 1 无法撤回。
+    crate::bridges::xiaomi::special_keys::bump_hook_to_front_and_settle(40);
+    let pressed_ok = {
+        let mut state = VOICE_CHORD.lock();
+        state.press_with(&vks, inject_voice_chord)
+    };
+    if pressed_ok {
+        log::info!("XIAOMI VOICE SHORTCUT DOWN vks={vks:?}");
+    } else {
+        log::warn!("XIAOMI VOICE SHORTCUT DOWN failed vks={vks:?}");
+        crate::bridges::xiaomi::key_log::set_virtual_hid_chord_held(None);
+    }
+}
+
+/// 语音快捷键不可含固件 F5（录入遥控语音键时极易误录成 0x74）。
+fn voice_hotkey_is_firmware_f5(vks: &[u16]) -> bool {
+    vks.iter().any(|v| *v == 0x74)
 }
 
 fn force_release_voice_shortcut(reason: &str) -> bool {
@@ -793,67 +963,183 @@ fn voice_sanitize_keyup(vks: &[u16]) -> bool {
     key_chord_send_input_with_extra(vks, true, EXTRA_INFO)
 }
 
+/// AutoHotkey 同款：Win/Alt 抬起后点一下无键帽 vkE8，避免开始菜单/窗口菜单栏吃掉后续上屏字。
+#[cfg(target_os = "windows")]
+fn inject_shell_menu_suppress_dummy() {
+    use crate::bridges::xiaomi::voice_inject::ALT_MENU_SUPPRESS_DUMMY_VK;
+    let vk = [ALT_MENU_SUPPRESS_DUMMY_VK];
+    let _ = key_chord_send_input_with_extra(&vk, false, EXTRA_INFO);
+    let _ = key_chord_send_input_with_extra(&vk, true, EXTRA_INFO);
+    log::info!("XIAOMI VOICE shell-menu suppress dummy vk=0x{ALT_MENU_SUPPRESS_DUMMY_VK:02X}");
+}
+
+#[cfg(not(target_os = "windows"))]
+fn inject_shell_menu_suppress_dummy() {}
+
 /// 注入前松开不在和弦内、却仍按下的修饰键（SendInput 仅 KEYUP，非唤醒）。
 #[cfg(not(target_os = "windows"))]
 fn voice_sanitize_keyup(_vks: &[u16]) -> bool {
     false
 }
 
-/// 语音和弦注入 — **必须** WinUHid（虚拟硬件 HID）。
-/// SendInput 会被豆包/千问等过滤，不能作为语音唤醒修复方案；仅 UP 后 sanitizer 清键。
+/// 语音和弦注入 — **优先** WinUHid；不可用时互斥降级 SendInput（1.3.15）。
+/// DOWN 锁定后端，UP 沿用同一后端，禁止双发。
+/// F5 不在此中和：靠 gadget 清 0x003E + 会话 LL 吞 + 注入前 bump（见 VOICE_F5_SIMPLE_PLAN）。
 fn inject_voice_chord(vks: &[u16], key_up: bool) -> bool {
     if vks.is_empty() {
         return false;
     }
     #[cfg(target_os = "windows")]
     {
+        use crate::bridges::xiaomi::voice_inject::{
+            should_suppress_shell_menu_after_keyup, voice_inject_backend, VoiceInjectBackend,
+        };
         let vks = crate::bridges::xiaomi::voice_inject::normalize_voice_chord_vks(vks);
         if !key_up {
             recover_foreign_modifiers(&vks, voice_sanitize_keyup);
         }
 
-        if crate::bridges::xiaomi::hid_injector::is_available() {
-            let hid_ok = if !key_up {
-                crate::bridges::xiaomi::hid_injector::press_single(&vks).is_ok()
-            } else {
-                match crate::bridges::xiaomi::hid_injector::release_single(&vks) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        log::error!("XIAOMI VOICE WinUHid release failed: {e}");
-                        let _ = crate::bridges::xiaomi::hid_injector::release_all();
-                        false
+        let backend = if key_up {
+            match VOICE_INJECT_BACKEND_HELD.load(Ordering::Acquire) {
+                VOICE_BACKEND_HID => VoiceInjectBackend::VirtualHid,
+                VOICE_BACKEND_SENDINPUT => VoiceInjectBackend::SendInputFallback,
+                _ => voice_inject_backend(
+                    &vks,
+                    crate::bridges::xiaomi::hid_injector::is_available(),
+                ),
+            }
+        } else {
+            let b = voice_inject_backend(
+                &vks,
+                crate::bridges::xiaomi::hid_injector::is_available(),
+            );
+            VOICE_INJECT_BACKEND_HELD.store(
+                match b {
+                    VoiceInjectBackend::VirtualHid => VOICE_BACKEND_HID,
+                    VoiceInjectBackend::SendInputFallback => VOICE_BACKEND_SENDINPUT,
+                },
+                Ordering::Release,
+            );
+            b
+        };
+
+        match backend {
+            VoiceInjectBackend::VirtualHid => {
+                crate::bridges::xiaomi::key_log::note_virtual_hid_inject(&vks);
+                if !key_up {
+                    crate::bridges::xiaomi::key_log::set_virtual_hid_chord_held(Some(&vks));
+                }
+                let hid_ok = if !key_up {
+                    crate::bridges::xiaomi::hid_injector::press_single(&vks).is_ok()
+                } else {
+                    // 与菜单键→Win 相同：分步松开 + 再发全零，避免 Win 位残留。
+                    // 单报告一次清零时 Explorer 常吃掉 LWin UP。
+                    match crate::bridges::xiaomi::hid_injector::release(&vks) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log::error!("XIAOMI VOICE WinUHid release failed: {e}");
+                            let _ = crate::bridges::xiaomi::hid_injector::release_all();
+                            false
+                        }
+                    }
+                };
+                if key_up {
+                    crate::bridges::xiaomi::key_log::set_virtual_hid_chord_held(None);
+                    VOICE_INJECT_BACKEND_HELD.store(VOICE_BACKEND_NONE, Ordering::Release);
+                    if should_suppress_shell_menu_after_keyup(&vks, true) {
+                        inject_shell_menu_suppress_dummy();
+                    }
+                    let cleared = recover_chord_modifiers(&vks, |stuck| {
+                        if stuck.iter().any(|v| matches!(*v, 0x5B | 0x5C)) {
+                            inject_shell_menu_suppress_dummy();
+                        }
+                        voice_sanitize_keyup(stuck)
+                    });
+                    if !hid_ok && cleared > 0 {
+                        log::warn!(
+                            "XIAOMI VOICE release recovered via sanitizer cleared={cleared} vks={vks:?}"
+                        );
+                        return true;
                     }
                 }
-            };
-            if key_up {
-                let cleared = recover_chord_modifiers(&vks, voice_sanitize_keyup);
-                if !hid_ok && cleared > 0 {
-                    log::warn!(
-                        "XIAOMI VOICE release recovered via sanitizer cleared={cleared} vks={vks:?}"
-                    );
+                if hid_ok {
+                    if !key_up {
+                        crate::bridges::xiaomi::key_log::emit_mapped_outputs(&vks, true);
+                    }
+                    log::info!("XIAOMI VOICE inject via WinUHid key_up={key_up} vks={vks:?}");
                     return true;
                 }
+                if !key_up {
+                    // DOWN 失败：解锁，避免后续 UP 误走 HID
+                    VOICE_INJECT_BACKEND_HELD.store(VOICE_BACKEND_NONE, Ordering::Release);
+                    log::error!("XIAOMI VOICE WinUHid inject failed key_up={key_up} vks={vks:?}");
+                }
+                false
             }
-            if hid_ok {
-                log::info!("XIAOMI VOICE inject via WinUHid key_up={key_up} vks={vks:?}");
-                return true;
+            VoiceInjectBackend::SendInputFallback => {
+                // 互斥：本臂只用 key_chord_send_input_with_extra，不走虚拟键盘 API
+                if !key_up {
+                    log::warn!(
+                        "XIAOMI VOICE inject DEGRADED SendInput (WinUHid unavailable) — 豆包/千问可能无效；请点「修复虚拟键盘」 vks={vks:?}"
+                    );
+                    crate::bridges::xiaomi::key_log::emit_mapped_outputs(&vks, true);
+                    notify_voice_sendinput_degraded();
+                }
+                let ok = key_chord_send_input_with_extra(&vks, key_up, EXTRA_INFO);
+                if key_up {
+                    VOICE_INJECT_BACKEND_HELD.store(VOICE_BACKEND_NONE, Ordering::Release);
+                    if should_suppress_shell_menu_after_keyup(&vks, true) {
+                        inject_shell_menu_suppress_dummy();
+                    }
+                    let _ = recover_chord_modifiers(&vks, voice_sanitize_keyup);
+                }
+                if ok {
+                    log::info!(
+                        "XIAOMI VOICE inject via SendInputFallback key_up={key_up} vks={vks:?}"
+                    );
+                } else if !key_up {
+                    VOICE_INJECT_BACKEND_HELD.store(VOICE_BACKEND_NONE, Ordering::Release);
+                    log::error!(
+                        "XIAOMI VOICE SendInputFallback failed key_up={key_up} vks={vks:?}"
+                    );
+                }
+                ok
             }
-            if !key_up {
-                log::error!("XIAOMI VOICE WinUHid inject failed key_up={key_up} vks={vks:?}");
-            }
-            return false;
         }
-        if !key_up {
-            log::error!(
-                "XIAOMI VOICE inject BLOCKED: WinUHid unavailable — 请点「修复虚拟键盘」安装驱动；SendInput 无法稳定唤醒豆包/千问 vks={vks:?}"
-            );
-        }
-        false
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = (vks, key_up);
         false
+    }
+}
+
+/// 降级通知（节流）：WinUHid 不可用走 SendInput 时提示一次。
+fn notify_voice_sendinput_degraded() {
+    const GAP: Duration = Duration::from_secs(60);
+    {
+        let mut last = VOICE_SENDINPUT_DEGRADED_TOAST_LAST.lock();
+        if let Some(t) = *last {
+            if t.elapsed() < GAP {
+                return;
+            }
+        }
+        *last = Some(Instant::now());
+    }
+    let Some(app) = VOICE_HOOK_APP.lock().clone() else {
+        return;
+    };
+    use tauri_plugin_notification::NotificationExt;
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title("虚拟键盘不可用，已降级")
+        .body(
+            "语音键暂用 SendInput（类似旧版）。微信或可用；豆包/千问常无效。请点「修复虚拟键盘」。",
+        )
+        .show()
+    {
+        log::warn!("voice SendInput degraded notification failed: {e}");
     }
 }
 

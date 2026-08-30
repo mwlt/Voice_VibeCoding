@@ -28,9 +28,12 @@
 ## 技术要点
 
 1. **`press_single` / `release_single`**（`hid_injector.rs`）：多修饰键一次 HID 报告到位（如 Ctrl+Win → modifier `0x09`），避免分步时序导致微信不认。
-2. **F5 抑制**（`key_mapping.rs` + `special_keys.rs`）：语音和弦期间吞遥控器泄漏的 F5；松手路径 **`disarm_voice_native_suppress()`** 与 `force_release_voice_shortcut` 同路径调用。
-3. **钩子前置**：`bump_hook_to_front()` 在语音 DOWN 前执行，确保 LL 钩子先于微信钩子处理 F5。
-4. **非语音键**：仍走分步 `press()` / `release()`。
+2. **F5 抑制（简化，见 `docs/VOICE_F5_SIMPLE_PLAN.md`）**：
+   - **源头**：gadget 清 HID usage `0x003E`（F5；脚本变更会重启 WUDFHost）
+   - **兜底**：会话/语音周期内 LL 钩子吞 F5（记事本）
+   - **微信**：注入前 `bump_hook_to_front`（PR #8），抢在 IME 钩子之前
+   - **不做**：WinUHid/SendInput「中和」F5（易把脏和弦再喂给微信）
+3. **非语音键**：仍走分步 `press()` / `release()`。
 
 ## 前端
 

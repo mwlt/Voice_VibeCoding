@@ -7,8 +7,9 @@ SendInput 模拟按键会被输入法忽略，必须使用本包内的驱动与�
 【推荐】
 1. 双击 Run-Install.cmd，UAC 点「是」
 2. 观察 Phase: … 行；Result: OK 即成功
-3. 若提示需重启，重启后再双击 Run-Status.cmd
-4. 回到应用，确认「虚拟键盘」就绪
+3. 若提示需重启，重启后再双击 Run-Status.cmd（或重开应用）
+4. 未提示重启但仍不可用：再双击一次 Run-Install.cmd
+5. 回到应用，确认「虚拟键盘」就绪
 
 【强制完整重装（测试/排查）】
 双击 Run-Install-Force.cmd

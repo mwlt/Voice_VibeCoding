@@ -388,6 +388,8 @@ fn windows_run_input_session(
     }
 
     crate::bridges::xiaomi::key_mapping::set_input_session_active(true);
+    // 会话一开始就挂上 LL 钩子并保持常驻；语音周期内绝不再 Unhook（否则 F5 空窗直达系统）
+    crate::bridges::xiaomi::special_keys::ensure_hook_for_capture();
 
     let mut since_batt = Instant::now();
     let mut since_pcm_warm = Instant::now();
@@ -1310,6 +1312,10 @@ fn handle_atvv_control(
         0x08 => {
             key_mapping::mark_direct_signal("voice");
             key_mapping::mark_direct_signal("mic");
+            // MIC_OPEN 常比 0x04 / 固件 F5 更早：进入按压周期并吞 F5
+            key_mapping::begin_voice_period();
+            // 只保证钩子在跑。禁止 bump：卸钩空窗会漏 F5。
+            crate::bridges::xiaomi::special_keys::ensure_hook_for_capture();
             if let Some(tx) = tx {
                 atvv_write_tx(tx, &[0x0C, 0x00], "MIC_OPEN");
             }
@@ -1318,10 +1324,12 @@ fn handle_atvv_control(
         0x04 => {
             key_mapping::mark_direct_signal("voice");
             key_mapping::mark_direct_signal("mic");
+            key_mapping::begin_voice_period();
             on_voice_remote_press(app, gate, state);
         }
         0x00 => {
             on_voice_remote_release(app, gate, state);
+            key_mapping::end_voice_period("atvv_0x00");
         }
         0x0A if payload.len() >= 7 => {
             let predictor = i16::from_be_bytes([payload[4], payload[5]]) as i32;

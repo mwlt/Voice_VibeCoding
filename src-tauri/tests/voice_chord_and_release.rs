@@ -73,6 +73,41 @@ fn right_alt_menu_suppress_runs_after_keyup_not_before() {
 }
 
 #[test]
+fn voice_win_chord_release_uses_menu_style_hid_release() {
+    let src = include_str!("../src/bridges/xiaomi/key_mapping.rs");
+    let inject = src
+        .split("fn inject_voice_chord")
+        .nth(1)
+        .and_then(|s| s.split("\nfn ").next())
+        .expect("inject_voice_chord");
+    assert!(
+        inject.contains("hid_injector::release("),
+        "voice HID UP must use hid_injector::release (stagger + extra zero), same as menu→Win"
+    );
+    let hid_arm = inject
+        .split("VoiceInjectBackend::VirtualHid => {")
+        .nth(1)
+        .expect("VirtualHid arm");
+    assert!(
+        !hid_arm
+            .split("VoiceInjectBackend::SendInputFallback")
+            .next()
+            .unwrap_or(hid_arm)
+            .contains("release_single("),
+        "VirtualHid UP must not call release_single (Win sticks)"
+    );
+}
+
+#[test]
+fn win_alt_qianwen_needs_dummy_to_block_start_menu() {
+    use remote_bridge_hub_lib::bridges::xiaomi::voice_inject::should_suppress_shell_menu_after_keyup;
+    // 千问 Win+Alt：松开后必须抑制开始菜单，否则识别字进搜索框
+    assert!(should_suppress_shell_menu_after_keyup(&[0x5B, 0xA4], true));
+    assert!(should_suppress_shell_menu_after_keyup(&[0xA4, 0x5B], true));
+    assert!(!should_suppress_shell_menu_after_keyup(&[0x5B, 0xA4], false));
+}
+
+#[test]
 fn alt_voice_chords_are_detected_for_sendinput_route() {
     assert!(has_alt_modifier(&[0xA5]));
     assert!(has_alt_modifier(&[0xA5, 0x20]));

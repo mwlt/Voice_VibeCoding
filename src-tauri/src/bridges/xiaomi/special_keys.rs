@@ -17,6 +17,8 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 static HID_TAP_READY: AtomicBool = AtomicBool::new(false);
 static HOOK_ENABLED: AtomicBool = AtomicBool::new(true);
+/// 重叠 bump 时新旧钩子同 proc：嵌套进入只转发，避免双处理。
+static HOOK_PROC_DEPTH: AtomicU32 = AtomicU32::new(0);
 
 /// 遥控器正在注入 Alt 开头的组合键（如 Alt+Space, Alt+S），
 /// 由 key_mapping 在 key_chord 注入前设置、注入后清除。
@@ -55,7 +57,8 @@ pub fn set_hook_enabled(enabled: bool) {
     HOOK_ENABLED.store(enabled, Ordering::Release);
 }
 
-/// 语音注入前调用：把本进程 LL 钩子顶到链头，便于清 INJECTED 后输入法仍能看到事件。
+/// ATVV / 诊断用：把钩子顶到链头。
+/// **实现必须先挂新钩再卸旧钩**（重叠），禁止先 Unhook——空窗会让固件 F5 直达系统。
 pub fn bump_hook_to_front() {
     #[cfg(target_os = "windows")]
     {
@@ -71,6 +74,27 @@ pub fn bump_hook_to_front() {
         unsafe {
             let _ = PostThreadMessageW(tid, WM_BUMP_HOOK_FRONT, WPARAM(0), LPARAM(0));
         }
+    }
+}
+
+/// 仅会话连接等「无按键竞态」场景使用。语音 MIC_OPEN / press 禁止调用。
+pub fn bump_hook_to_front_and_settle(settle_ms: u64) {
+    bump_hook_to_front();
+    #[cfg(target_os = "windows")]
+    {
+        let deadline = std::time::Instant::now() + Duration::from_millis(settle_ms.max(1));
+        // 给钩子线程处理 WM_BUMP 的时间；过短则微信仍可能排在我们前面看到 F5
+        while std::time::Instant::now() < deadline {
+            if is_hook_armed() {
+                std::thread::sleep(Duration::from_millis(8));
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = settle_ms;
     }
 }
 
@@ -176,20 +200,43 @@ fn hook_loop() {
         UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL,
     };
 
+    struct HookProcDepthGuard;
+    impl Drop for HookProcDepthGuard {
+        fn drop(&mut self) {
+            HOOK_PROC_DEPTH.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
     unsafe extern "system" fn proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         let hook = load_hook();
+        let depth = HOOK_PROC_DEPTH.fetch_add(1, Ordering::AcqRel);
+        let _depth_guard = HookProcDepthGuard;
+        // 重叠 bump：新旧钩子同 proc；嵌套进入只转发，避免双处理音量/方向等
+        if depth > 0 {
+            return CallNextHookEx(hook, code, wparam, lparam);
+        }
         if code >= 0 {
             let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
             let flags = info.flags.0;
             let vk = info.vkCode;
             let msg = wparam.0 as u32;
             let injected = info.dwExtraInfo == EXTRA_INFO || (flags & 0x10) != 0;
+            // 录入吞键：只把「本进程 EXTRA_INFO 注入」当注入键跳过。
+            // 勿把 LLKHF_INJECTED 传给 try_swallow——部分环境会误标真实键盘，
+            // 导致 try_swallow 直接 false，键既不录、又走下面 if injected 放行 → UI 无反应。
+            let our_inject = info.dwExtraInfo == EXTRA_INFO;
 
             // 快捷键录入：最优先吞掉全部物理键（含 WM_SYSKEY* / Alt+Space / Win 热键）
             // 必须在 CallNextHookEx 之前；第二套短生命周期钩子不可靠（易被超时静默卸掉）
-            if crate::bridges::shared::shortcut_capture::try_swallow_capture_key(vk, msg, injected)
+            if crate::bridges::shared::shortcut_capture::try_swallow_capture_key(vk, msg, our_inject)
             {
                 return LRESULT(1);
+            }
+
+            // 录入进行中：禁止方向/音量/菜单等「固件原生抑制」再吞键，
+            // 避免未进录入引擎的物理键被静默吃掉（表现为完全录不上）。
+            if crate::bridges::shared::shortcut_capture::is_swallow_active() {
+                return CallNextHookEx(hook, code, wparam, lparam);
             }
 
             // Alt 和弦注入中：即使是注入键（带 EXTRA_INFO），
@@ -204,17 +251,48 @@ fn hook_loop() {
                 return LRESULT(1);
             }
 
-            if injected {
-                return CallNextHookEx(hook, code, wparam, lparam);
-            }
-
-            let scan = info.scanCode;
             let down = msg == 0x0100 || msg == 0x0104;
             let up = msg == 0x0101 || msg == 0x0105;
             let tap_ready = HID_TAP_READY.load(Ordering::Acquire);
 
-            // 对齐 Python：音量仅在 Tap 就绪后抑制；其它键在 recent 信号时抑制
-            // v1.5.x 修双发：Tap 接管时无条件吞原生音量（消除 LL 先于 BLE 信号的时序窗口）
+            // 语音 F5：必须在 `if injected` 早退之前处理。
+            // 只用 !our_inject；勿在 special_keys 里用 session OR 强吞 UP——
+            // bump 空窗若漏过 KEYDOWN，再吞 KEYUP 会把 F5 粘死（见 key-probe / diagnosing）。
+            if vk == 0x74 && !our_inject && (down || up) {
+                let suppress = should_suppress_voice_f5(down, up, tap_ready);
+                if suppress {
+                    crate::bridges::xiaomi::key_probe::record(
+                        vk, down, up, injected, our_inject, "suppressed",
+                    );
+                    crate::bridges::xiaomi::key_log::arm_output_watch(
+                        crate::bridges::xiaomi::key_log::button_label("mic"),
+                    );
+                    crate::bridges::xiaomi::key_mapping::on_firmware_voice_key(down);
+                    if down {
+                        crate::bridges::xiaomi::key_log::emit_suppressed_output(0x74);
+                    }
+                    return LRESULT(1);
+                }
+                crate::bridges::xiaomi::key_probe::record(
+                    vk, down, up, injected, our_inject, "passthrough",
+                );
+                if down {
+                    on_uncorrelated_f5_down();
+                    crate::bridges::xiaomi::key_log::report_native_passthrough(0x74, true);
+                }
+            }
+
+            if injected {
+                crate::bridges::xiaomi::key_probe::record(
+                    vk, down, up, injected, our_inject, "injected_pass",
+                );
+                return CallNextHookEx(hook, code, wparam, lparam);
+            }
+
+            let scan = info.scanCode;
+
+            // 音量 / menu-home：Tap 接管时可无条件吞。
+            // 方向/OK：仅自定义映射的固件 VK 在 Tap 就绪时吞（身份映射透传原生）。
             let suppress = match vk {
                 0xAF if should_suppress_volume_native(
                     0xAF,
@@ -259,24 +337,48 @@ fn hook_loop() {
                 {
                     Some("menu")
                 }
-                0x0D if direct_signal_recent("ok", Duration::from_millis(200)) => Some("ok"),
-                0x25 if direct_signal_recent("left", Duration::from_millis(200))
-                    || direct_signal_recent("dpad_left", Duration::from_millis(200)) =>
+                // 方向/OK：自定义映射时 Tap 就绪即吞固件 VK（与 Home 同策略）
+                0x0D if should_suppress_native_dpad_ok(
+                    0x0D,
+                    tap_ready,
+                    direct_signal_recent("ok", Duration::from_millis(200)),
+                ) =>
+                {
+                    Some("ok")
+                }
+                0x25 if should_suppress_native_dpad_ok(
+                    0x25,
+                    tap_ready,
+                    direct_signal_recent("left", Duration::from_millis(200))
+                        || direct_signal_recent("dpad_left", Duration::from_millis(200)),
+                ) =>
                 {
                     Some("left")
                 }
-                0x27 if direct_signal_recent("right", Duration::from_millis(200))
-                    || direct_signal_recent("dpad_right", Duration::from_millis(200)) =>
+                0x27 if should_suppress_native_dpad_ok(
+                    0x27,
+                    tap_ready,
+                    direct_signal_recent("right", Duration::from_millis(200))
+                        || direct_signal_recent("dpad_right", Duration::from_millis(200)),
+                ) =>
                 {
                     Some("right")
                 }
-                0x26 if direct_signal_recent("up", Duration::from_millis(200))
-                    || direct_signal_recent("dpad_up", Duration::from_millis(200)) =>
+                0x26 if should_suppress_native_dpad_ok(
+                    0x26,
+                    tap_ready,
+                    direct_signal_recent("up", Duration::from_millis(200))
+                        || direct_signal_recent("dpad_up", Duration::from_millis(200)),
+                ) =>
                 {
                     Some("up")
                 }
-                0x28 if direct_signal_recent("down", Duration::from_millis(200))
-                    || direct_signal_recent("dpad_down", Duration::from_millis(200)) =>
+                0x28 if should_suppress_native_dpad_ok(
+                    0x28,
+                    tap_ready,
+                    direct_signal_recent("down", Duration::from_millis(200))
+                        || direct_signal_recent("dpad_down", Duration::from_millis(200)),
+                ) =>
                 {
                     Some("down")
                 }
@@ -291,25 +393,28 @@ fn hook_loop() {
                 _ if scan == 0x5E && direct_signal_recent("power", Duration::from_millis(250)) => {
                     Some("power")
                 }
-                0x74 if !injected && (down || up) => {
-                    if should_suppress_voice_f5(down, up) {
-                        crate::bridges::xiaomi::key_mapping::on_firmware_voice_key(down);
-                        Some("voice_f5")
-                    } else {
-                        if down {
-                            on_uncorrelated_f5_down();
-                        }
-                        None
-                    }
-                }
+                // F5 已在上方单独处理
                 _ => None,
             };
 
             if let Some(name) = suppress {
                 if down || up {
+                    crate::bridges::xiaomi::key_probe::record(
+                        vk, down, up, injected, our_inject, "suppressed",
+                    );
                     log::info!("XIAOMI SPECIAL KEY {name} original_suppressed vk=0x{vk:02X}");
                     return LRESULT(1);
                 }
+            }
+
+            // 诊断：监视窗内未吞掉的原生键 = 实际漏到系统的输出（标红）
+            if down || up {
+                crate::bridges::xiaomi::key_probe::record(
+                    vk, down, up, injected, our_inject, "passthrough",
+                );
+            }
+            if down {
+                crate::bridges::xiaomi::key_log::report_native_passthrough(vk as u16, true);
             }
         }
         CallNextHookEx(hook, code, wparam, lparam)
@@ -336,18 +441,37 @@ fn hook_loop() {
                 break;
             }
             if msg.message == WM_BUMP_HOOK_FRONT {
+                // 先挂新钩再卸旧钩：消除 Unhook→Set 之间的 F5 空窗
                 let old = load_hook();
-                if !old.is_invalid() {
-                    let _ = UnhookWindowsHookEx(old);
-                }
                 match SetWindowsHookExW(WH_KEYBOARD_LL, Some(proc), None, 0) {
                     Ok(h) => {
                         store_hook(h);
-                        log::debug!("XIAOMI SPECIAL KEY hook bumped to chain head");
+                        if !old.is_invalid() && old.0 != h.0 {
+                            let _ = UnhookWindowsHookEx(old);
+                        }
+                        log::debug!("XIAOMI SPECIAL KEY hook bumped to chain head (overlap)");
                     }
                     Err(e) => {
-                        store_hook(HHOOK(std::ptr::null_mut()));
-                        log::error!("XIAOMI SPECIAL KEY bump SetWindowsHookExW failed: {e}");
+                        // 旧钩仍在：不要 Unhook，避免空窗
+                        log::error!(
+                            "XIAOMI SPECIAL KEY bump SetWindowsHookExW failed: {e}; keeping old hook"
+                        );
+                        if old.is_invalid() {
+                            match SetWindowsHookExW(WH_KEYBOARD_LL, Some(proc), None, 0) {
+                                Ok(h2) => {
+                                    store_hook(h2);
+                                    log::warn!(
+                                        "XIAOMI SPECIAL KEY hook reinstalled after bump failure"
+                                    );
+                                }
+                                Err(e2) => {
+                                    store_hook(HHOOK(std::ptr::null_mut()));
+                                    log::error!(
+                                        "XIAOMI SPECIAL KEY reinstall also failed: {e2}"
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
                 continue;
@@ -370,7 +494,7 @@ fn hook_loop() {
 ///   消除 LL 钩子先于 BLE/HID-Tap 信号到达时 `direct_signal_recent` 尚未标记的时序窗口；
 /// - `recent_signal`：200ms 窗口内遥控器刚按下过该音量键 → 兜底吞（Tap 未就绪时）。
 ///
-/// 注意：非音量键（方向/OK/返回等）不受此判定影响。
+/// 注意：非音量键不受此判定影响（方向/OK 见 [`should_suppress_native_dpad_ok`]）。
 ///
 /// ```
 /// use remote_bridge_hub_lib::bridges::xiaomi::special_keys::should_suppress_volume_native;
@@ -424,6 +548,24 @@ pub fn should_suppress_volume_native(vk: u16, tap_ready: bool, recent_signal: bo
 pub fn should_suppress_native_menu_home(vk: u16, tap_ready: bool, recent_signal: bool) -> bool {
     let is_menu_or_home = matches!(vk, 0x5D | 0x24 | 0xAC); // VK_APPS / VK_HOME / 0xAC
     is_menu_or_home && (tap_ready || recent_signal)
+}
+
+/// 方向键 / OK 原生抑制（与 Home 同策略，但范围限于「自定义映射」的固件 VK）。
+///
+/// - Up→M：Tap 就绪时吞 VK_UP（否则空闲单点会先 M 后上）；实体「上」在会话中不可用（与
+///   Home→Space 时实体 Home 不可用相同）；
+/// - 左=Left 身份映射：不进自定义表 → 真实键盘左仍可用；
+/// - `recent`：兜底。
+pub fn should_suppress_native_dpad_ok(vk: u16, tap_ready: bool, recent_signal: bool) -> bool {
+    use crate::bridges::xiaomi::key_mapping::dpad_ok_custom_suppress_contains;
+    let is_dpad_or_ok = matches!(vk, 0x25 | 0x26 | 0x27 | 0x28 | 0x0D);
+    if !is_dpad_or_ok {
+        return false;
+    }
+    if recent_signal {
+        return true;
+    }
+    tap_ready && dpad_ok_custom_suppress_contains(vk)
 }
 
 #[cfg(test)]
@@ -510,5 +652,31 @@ mod tests {
         assert!(!should_suppress_native_menu_home(0x20, true, true));
         assert!(!should_suppress_native_menu_home(0xA6, true, true));
         assert!(!should_suppress_native_menu_home(0x0D, true, false));
+    }
+
+    // ---- 方向/OK：自定义映射 + tap_ready（Home 同策略）----
+
+    use super::should_suppress_native_dpad_ok;
+    use crate::bridges::xiaomi::key_mapping::set_dpad_ok_custom_suppress_vks;
+
+    #[test]
+    fn custom_up_suppressed_when_tap_ready() {
+        set_dpad_ok_custom_suppress_vks(&[0x26]);
+        assert!(should_suppress_native_dpad_ok(0x26, true, false));
+        assert!(!should_suppress_native_dpad_ok(0x25, true, false));
+        set_dpad_ok_custom_suppress_vks(&[]);
+    }
+
+    #[test]
+    fn identity_not_suppressed_on_tap_ready_alone() {
+        set_dpad_ok_custom_suppress_vks(&[]);
+        assert!(!should_suppress_native_dpad_ok(0x26, true, false));
+        assert!(!should_suppress_native_dpad_ok(0x0D, true, false));
+    }
+
+    #[test]
+    fn dpad_ok_suppressed_on_recent() {
+        set_dpad_ok_custom_suppress_vks(&[]);
+        assert!(should_suppress_native_dpad_ok(0x26, false, true));
     }
 }

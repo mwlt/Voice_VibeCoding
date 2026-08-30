@@ -9,20 +9,20 @@
 ```
 语音键按下/抬起
     ↓
-WinUHid press / release（唯一唤醒通道 — 豆包/千问会过滤 SendInput）
+voice_inject_backend(WinUHid available?)
+    ├─ VirtualHid → press_single / release（分步松开+全零；Win 无条件补 KEYUP）
+    └─ SendInputFallback → SendInput 整段（检测失效时；豆包/千问可能无效）
     ↓
-VoiceChordState（连点时先 recover 再 press；以 release 卫生为准）
+VoiceChordState（连点时先 recover 再 press）
     ↓
-Release Sanitizer（UP 后必发全零 HID 报告 + 必要时 SendInput 仅 KEYUP）
-    ↓
-SendInput 仅作「清键器」，不作唤醒兜底
+Release：HID 全零报告 和/或 SendInput 仅 KEYUP sanitizer（清键，非第二路唤醒）
 ```
 
 | 场景 | SendInput | 说明 |
 | --- | --- | --- |
-| 语音唤醒 DOWN | ❌ | IME 过滤，已验证 |
+| 语音唤醒 DOWN（WinUHid 可用） | ❌ | 仅 WinUHid |
+| 语音唤醒（WinUHid 不可用） | ✅ 降级 | 互斥；日志 `DEGRADED` + 通知；见 `VOICE_SENDINPUT_FALLBACK_PLAN.md` |
 | WinUHid UP 后 sanitizer | ✅ 仅 KEYUP | 清 Win/Ctrl 残留 |
-| WinUHid 不可用 | ❌ 静默回落 | 阻断 +「修复虚拟键盘」 |
 | 普通按键映射 | ✅ fallback | 与语音路径分离 |
 
 ## TDD 测试缝
@@ -32,7 +32,7 @@ SendInput 仅作「清键器」，不作唤醒兜底
 | R1 | `voice_chord_sanitizer::sanitizer_targets` | 和弦修饰键列表（含 Ctrl+Win） | `voice_chord_sanitizer.rs` + integration test |
 | R2 | `hid_injector::release_all` / `release` | UP 后必达全零报告 | `hid_injector.rs` |
 | R3 | `VoiceChordState::press_with` | 已 held 时先 release 再 press | `voice_chord_state.rs` + test |
-| R4 | `inject_voice_chord` | UP 路径调用 sanitizer；DOWN 不 SendInput 唤醒 | `key_mapping.rs` + `ime_voice_wake_route` |
+| R4 | `inject_voice_chord` | UP sanitizer；WinUHid 优先，不可用时 SendInput 降级（见 FALLBACK 计划） | `key_mapping.rs` + `ime_voice_wake_route` |
 | R5 | `on_voice_remote_release` | 先 UP 快捷键，再 sleep/PCM 收尾 | `input_session.rs`（逻辑审查 + 现有 rust 测） |
 
 ## 步骤清单

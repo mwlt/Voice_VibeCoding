@@ -14,9 +14,9 @@ Write-Host ""
 if ($rc -eq 0) {
   Write-Host "OK: WinUHid ready. Check virtual keyboard status in the app." -ForegroundColor Green
 } elseif ($rc -eq 3010) {
-  Write-Host "REBOOT REQUIRED: Restart Windows, then run Run-Status.cmd" -ForegroundColor Yellow
+  Write-Host "REBOOT REQUIRED: Restart Windows, then run Run-Status.cmd (or reopen the app)." -ForegroundColor Yellow
 } else {
-  Write-Host "FAILED: exit code $rc. Copy all Phase: lines above for support." -ForegroundColor Red
+  Write-Host "NOT READY: device not accessible yet. Run Run-Install.cmd once more, or copy Phase: lines if it keeps failing." -ForegroundColor Yellow
 }
 Write-Host ""
 exit $rc

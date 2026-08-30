@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 const FORWARDED: &[u16] = &[
     0x00F1, 0x0028, 0x0035, 0x004A, 0x004F, 0x0050, 0x0051, 0x0052, 0x0065, 0x0066, 0x007F,
@@ -378,12 +378,29 @@ fn run_hub(app: AppHandle, gate_slot: Arc<Mutex<Arc<KeyEmitGate>>>, stop: Arc<At
                                             );
                                         }
                                     }
+                                    "cleared_f5" => {
+                                        tap_log(&format!(
+                                            "XIAOMI HID TAP cleared_f5 raw={}",
+                                            msg.raw
+                                        ));
+                                    }
                                     "gatt_read" => {
                                         if let Some(data) = decode_hex(msg.raw.trim()) {
                                             if !data.is_empty() {
                                                 if !io_announced {
                                                     io_announced = true;
                                                     special_keys::set_hid_tap_ready(true);
+                                                    // 尽早按绑定表武装「自定义方向/OK」吞键（Up→M 防先上移）
+                                                    if let Some(mgr) =
+                                                        app.try_state::<crate::config::manager::ConfigManager>()
+                                                    {
+                                                        if let Ok(cfg) = mgr.get_device_config("xiaomi")
+                                                        {
+                                                            crate::bridges::xiaomi::key_mapping::refresh_dpad_ok_custom_suppress_mask(
+                                                                &cfg,
+                                                            );
+                                                        }
+                                                    }
                                                     arm_input_grace();
                                                     emit_message(
                                                         &app,
@@ -482,8 +499,14 @@ fn handle_ioctl(
         if id == "unknown" {
             continue;
         }
-        // gate 挡住 = 短窗重复边沿：不偷偷注入，保持日志与行为一致
-        if !gate.try_emit(id) {
+        // 录入会话中不映射注入（与 key_mapping::on_remote_button 一致）
+        if crate::bridges::shared::shortcut_capture::is_swallow_active() {
+            continue;
+        }
+        // 方向/OK：禁止 KeyEmitGate 挡映射（连点会被 60ms 去抖吞成只跳一格）
+        if crate::bridges::xiaomi::key_mapping::should_gate_block_dpad_ok_mapping(id)
+            && !gate.try_emit(id)
+        {
             continue;
         }
         emit_key_and_map(app, id, button_label(id), true);

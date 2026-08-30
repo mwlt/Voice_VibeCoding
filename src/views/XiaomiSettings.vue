@@ -75,6 +75,11 @@ const showVoiceReboot = ref(false);
 const voiceRebootMsg = ref("");
 const showLogModal = ref(false);
 const showSetupTips = ref(false);
+const keyProbeActive = ref(false);
+const keyProbePath = ref("");
+const keyProbeHint = ref("");
+const keyProbeLive = ref<string[]>([]);
+const keyProbeAnalysis = ref("");
 const setupApplyHint = ref("");
 const setupImeTab = ref<ImeTabId>("wechat");
 const imeTabs = listImeTabs();
@@ -110,12 +115,15 @@ const voiceMeter = ref<VoiceMeterSnapshot>({
   atvvOk: false,
 });
 
-/** 「按键映射」标题旁：最近一次 按下/抬起 + 遥控键：映射 */
+/** 「按键映射」标题旁：最近一次 按下/抬起 + 遥控键：实际输出（extra 标红） */
 const lastMappingFlash = ref<{
   seq: number;
   phase: "down" | "up";
   remote: string;
+  /** 配置映射兜底（尚无实际输出事件时） */
   mapped: string | null;
+  /** 真实输出；unexpected=true 为漏键/多出来的原生键 */
+  outputs: { label: string; unexpected: boolean; count: number }[];
 } | null>(null);
 let mappingFlashSeq = 0;
 let mappingFlashClearTimer: ReturnType<typeof setTimeout> | null = null;
@@ -616,6 +624,8 @@ const logs = ref<LogEntry[]>([]);
 const logAreaRef = ref<HTMLElement | null>(null);
 let logSeq = 0;
 let unlistenKey: UnlistenFn | null = null;
+let unlistenKeyOutput: UnlistenFn | null = null;
+let unlistenKeyProbe: UnlistenFn | null = null;
 let unlistenMeter: UnlistenFn | null = null;
 let unlistenAtvvRepair: UnlistenFn | null = null;
 let unlistenAtvvCancel: UnlistenFn | null = null;
@@ -724,11 +734,20 @@ function resolveMappedActionLabel(buttonId: string): string {
 function formatKeyEventLine(
   phase: "down" | "up",
   remoteLabel: string,
-  mappedLabel: string | null
+  mappedLabel: string | null,
+  outputs?: { label: string; unexpected: boolean; count: number }[]
 ): string {
   const phaseLabel = phase === "up" ? "抬起" : "按下";
+  if (outputs && outputs.length > 0) {
+    const parts = outputs.map((o) => {
+      const n = o.count > 1 ? `×${o.count}` : "";
+      return o.unexpected ? `[漏]${o.label}${n}` : `${o.label}${n}`;
+    });
+    return `真实输出 ${phaseLabel} ${remoteLabel}：${parts.join(" + ")}`;
+  }
+  // 尚无钩子/注入回报：只记遥控相位；映射名作说明，不装作「已确认发出」
   if (mappedLabel) {
-    return `${phaseLabel} ${remoteLabel}：${mappedLabel}`;
+    return `${phaseLabel} ${remoteLabel} → ${mappedLabel}`;
   }
   return `${phaseLabel} ${remoteLabel}`;
 }
@@ -743,12 +762,69 @@ function showMappingFlash(
     phase,
     remote: remoteLabel,
     mapped: mappedLabel,
+    outputs: [],
   };
   if (mappingFlashClearTimer) clearTimeout(mappingFlashClearTimer);
   mappingFlashClearTimer = setTimeout(() => {
     lastMappingFlash.value = null;
     mappingFlashClearTimer = null;
   }, 4500);
+  // 抬起且无实际输出事件时不写状态日志（避免「抬起 … 待确认」噪音）；
+  // 按下先等注入/漏键汇总，由 appendMappingOutput 或超时兜底。
+  if (phase === "down") {
+    scheduleKeyOutputLogFlush();
+  }
+}
+
+function appendMappingOutput(label: string, unexpected: boolean, phase: "down" | "up") {
+  const cur = lastMappingFlash.value;
+  if (!cur) {
+    lastMappingFlash.value = {
+      seq: ++mappingFlashSeq,
+      phase,
+      remote: "—",
+      mapped: null,
+      outputs: [{ label, unexpected, count: 1 }],
+    };
+  } else {
+    const same = cur.outputs.find((o) => o.label === label && o.unexpected === unexpected);
+    if (same) {
+      same.count += 1;
+      lastMappingFlash.value = {
+        ...cur,
+        phase,
+        seq: ++mappingFlashSeq,
+        outputs: [...cur.outputs],
+      };
+    } else {
+      lastMappingFlash.value = {
+        ...cur,
+        phase,
+        seq: ++mappingFlashSeq,
+        outputs: [...cur.outputs, { label, unexpected, count: 1 }],
+      };
+    }
+  }
+  if (mappingFlashClearTimer) clearTimeout(mappingFlashClearTimer);
+  mappingFlashClearTimer = setTimeout(() => {
+    lastMappingFlash.value = null;
+    mappingFlashClearTimer = null;
+  }, 4500);
+  scheduleKeyOutputLogFlush();
+}
+
+/** 有实际输出时写「真实输出」一行；仅有配置映射时写「按下 键 → 映射」 */
+let keyOutputLogTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleKeyOutputLogFlush() {
+  if (keyOutputLogTimer) clearTimeout(keyOutputLogTimer);
+  keyOutputLogTimer = setTimeout(() => {
+    keyOutputLogTimer = null;
+    const flash = lastMappingFlash.value;
+    if (!flash) return;
+    // 抬起且仍无 outputs：不刷日志（注入只在按下报一次即可）
+    if (flash.phase === "up" && flash.outputs.length === 0) return;
+    prependLog(formatKeyEventLine(flash.phase, flash.remote, flash.mapped, flash.outputs));
+  }, 180);
 }
 
 async function refreshHost() {
@@ -869,6 +945,52 @@ async function openLogExternally() {
     await invoke("open_app_log");
   } catch (e) {
     logCopyHint.value = `打开失败: ${e}`;
+  }
+}
+
+async function toggleKeyProbe() {
+  keyProbeHint.value = "";
+  try {
+    if (keyProbeActive.value) {
+      await invoke("stop_xiaomi_key_probe");
+      keyProbeActive.value = false;
+      const a = await invoke<{
+        path: string;
+        f5Leak: boolean;
+        f5StuckSuspect: boolean;
+        ctrlWithoutWin: boolean;
+        f5PassthroughDown: number;
+        f5SuppressedDown: number;
+        ctrlDownSeen: number;
+        winDownSeen: number;
+      }>("analyze_xiaomi_key_probe");
+      keyProbePath.value = a.path || "";
+      keyProbeAnalysis.value = [
+        a.f5Leak ? "F5泄漏=是" : "F5泄漏=否",
+        a.f5StuckSuspect ? "F5粘键嫌疑=是" : "F5粘键嫌疑=否",
+        a.ctrlWithoutWin ? "仅Ctrl无Win=是" : "仅Ctrl无Win=否",
+        `F5↓pass=${a.f5PassthroughDown} F5↓supp=${a.f5SuppressedDown}`,
+        `Ctrl↓=${a.ctrlDownSeen} Win↓=${a.winDownSeen}`,
+      ].join(" · ");
+      keyProbeHint.value = "探测已停，见分析结果；完整记录在 key-probe.log";
+    } else {
+      const path = await invoke<string>("start_xiaomi_key_probe");
+      keyProbePath.value = path;
+      keyProbeActive.value = true;
+      keyProbeLive.value = [];
+      keyProbeAnalysis.value = "";
+      keyProbeHint.value = "探测中：请按遥控语音键，再点一次结束";
+    }
+  } catch (e) {
+    keyProbeHint.value = `键盘探测失败: ${e}`;
+  }
+}
+
+async function openKeyProbeLog() {
+  try {
+    await invoke("open_xiaomi_key_probe_log");
+  } catch (e) {
+    keyProbeHint.value = `打开失败: ${e}`;
   }
 }
 
@@ -1108,10 +1230,47 @@ onMounted(async () => {
       // D1：语音映射关闭时只显示按下/抬起，不写映射段
       const lineMapped = isVoice && !voiceMapOn ? null : resolveMappedActionLabel(id);
       showMappingFlash(label, lineMapped, phase);
-      prependLog(formatKeyEventLine(phase, label, lineMapped));
+      // 状态日志等真实输出汇总后再写（见 scheduleKeyOutputLogFlush）
     });
   } catch (e) {
     console.warn("listen xiaomi-key failed:", e);
+  }
+
+  try {
+    unlistenKeyOutput = await listen<{
+      label?: string;
+      role?: string;
+      phase?: string;
+    }>("xiaomi-key-output", (event) => {
+      const p = event.payload;
+      const label = p.label || "?";
+      const role = p.role || "mapped";
+      const unexpected = role === "extra";
+      const phase: "down" | "up" = p.phase === "up" ? "up" : "down";
+      // suppressed（已吞 F5）也记入，便于确认吞键生效
+      appendMappingOutput(
+        role === "suppressed" ? `已吞${label}` : label,
+        unexpected,
+        phase,
+      );
+    });
+  } catch (e) {
+    console.warn("listen xiaomi-key-output failed:", e);
+  }
+
+  try {
+    unlistenKeyProbe = await listen<{
+      label?: string;
+      phase?: string;
+      decision?: string;
+      vk?: number;
+    }>("xiaomi-key-probe", (event) => {
+      const p = event.payload;
+      const tag = `${p.label || `0x${(p.vk ?? 0).toString(16)}`}${p.phase === "up" ? "↑" : "↓"}/${p.decision || "?"}`;
+      keyProbeLive.value = [tag, ...keyProbeLive.value].slice(0, 24);
+    });
+  } catch (e) {
+    console.warn("listen xiaomi-key-probe failed:", e);
   }
 
   try {
@@ -1204,6 +1363,11 @@ onMounted(async () => {
 
 onUnmounted(() => {
   unlistenKey?.();
+  unlistenKeyOutput?.();
+  unlistenKeyProbe?.();
+  if (keyProbeActive.value) {
+    void invoke("stop_xiaomi_key_probe").catch(() => undefined);
+  }
   unlistenMeter?.();
   unlistenAtvvRepair?.();
   unlistenAtvvCancel?.();
@@ -1474,7 +1638,7 @@ async function retryLoadConfig() {
                     </ul>
                   </div>
                   <p class="tip-foot">
-                    会弹出 UAC 管理员确认，请点允许。点按钮后会打开修复选项：自动修复、强制重装、导出到桌面或从 Release 下载。这和「虚拟声卡检测与修复」「修复 ATVV 连接」不是一回事。
+                    会弹出 UAC 管理员确认，请点允许。点按钮后会打开修复选项：自动修复、强制重装、导出到桌面或从 Release 下载。仅当 Windows 返回必须重启时才重启；否则再点一次「自动修复」。这和「虚拟声卡检测与修复」「修复 ATVV 连接」不是一回事。
                   </p>
                 </div>
               </Teleport>
@@ -1601,11 +1765,34 @@ async function retryLoadConfig() {
             <button
               class="btn btn-secondary"
               type="button"
+              :class="{ 'btn-probe-on': keyProbeActive }"
+              @click="toggleKeyProbe"
+            >
+              {{ keyProbeActive ? "停止键盘探测" : "键盘探测" }}
+            </button>
+            <button
+              class="btn btn-secondary"
+              type="button"
+              @click="openKeyProbeLog"
+              title="打开 key-probe.log"
+            >
+              探测日志
+            </button>
+            <button
+              class="btn btn-secondary"
+              type="button"
               @click="showSetupTips = true"
             >
               输入法设置
             </button>
           </div>
+          <p v-if="keyProbeHint || keyProbeAnalysis" class="key-probe-hint">
+            <span v-if="keyProbeHint">{{ keyProbeHint }}</span>
+            <span v-if="keyProbeAnalysis"> · {{ keyProbeAnalysis }}</span>
+          </p>
+          <p v-if="keyProbeLive.length" class="key-probe-live">
+            最近：{{ keyProbeLive.slice(0, 12).join(" ") }}
+          </p>
         </section>
       </div>
 
@@ -1826,7 +2013,7 @@ async function retryLoadConfig() {
           <h3>虚拟键盘修复</h3>
           <p>{{ winuhidChoiceMsg || "请选择修复或安装方式：" }}</p>
           <p class="voice-modal-uac-tip">自动修复会弹出 UAC；导出包请阅读「安装说明.txt」后双击 Run-Install.cmd</p>
-          <p class="voice-modal-reboot-tip">部分电脑安装后必须重启 Windows</p>
+          <p class="voice-modal-reboot-tip">仅在 Windows 明确要求时才必须重启；否则再点一次「自动修复」即可</p>
 
           <div
             v-if="winuhidDownloadPhase !== 'idle'"
@@ -1924,7 +2111,7 @@ async function retryLoadConfig() {
             </button>
           </div>
           <p class="voice-modal-note">
-            导出/下载包内含「安装说明.txt」与 Run-Install.cmd。虚拟键盘已就绪时「自动修复」会跳过；需完整验证请选「强制重装」。
+            导出/下载包内含「安装说明.txt」与 Run-Install.cmd。虚拟键盘已就绪时「自动修复」会跳过；需完整验证请选「强制重装」。未就绪且未要求重启时，再点一次「自动修复」即可。
           </p>
         </div>
       </div>
@@ -1959,7 +2146,23 @@ async function retryLoadConfig() {
               lastMappingFlash.phase === "up" ? "抬起" : "按下"
             }}</span>
             <span class="mapping-flash-remote">{{ lastMappingFlash.remote }}</span>
-            <template v-if="lastMappingFlash.mapped">
+            <template v-if="lastMappingFlash.outputs.length">
+              <span class="mapping-flash-sep" aria-hidden="true">：</span>
+              <template
+                v-for="(out, idx) in lastMappingFlash.outputs"
+                :key="`${out.label}-${out.unexpected}-${idx}`"
+              >
+                <span v-if="idx > 0" class="mapping-flash-sep">+</span>
+                <span
+                  class="mapping-flash-mapped"
+                  :class="{ 'mapping-flash-extra': out.unexpected }"
+                  :title="out.unexpected ? '多出来的原生键（漏键/双触发）' : '本程序注入的映射键'"
+                >
+                  {{ out.label }}<template v-if="out.count > 1">×{{ out.count }}</template>
+                </span>
+              </template>
+            </template>
+            <template v-else-if="lastMappingFlash.mapped">
               <span class="mapping-flash-sep" aria-hidden="true">：</span>
               <span class="mapping-flash-mapped">{{ lastMappingFlash.mapped }}</span>
             </template>
@@ -2226,6 +2429,10 @@ async function retryLoadConfig() {
 .mapping-flash-mapped {
   color: var(--accent, #0f766e);
   font-weight: 600;
+}
+.mapping-flash-extra {
+  color: #dc2626;
+  font-weight: 700;
 }
 @keyframes mapping-flash-in {
   from {
@@ -2576,6 +2783,19 @@ async function retryLoadConfig() {
 }
 .btn-secondary:hover:not(:disabled) {
   background: #e2e8f0;
+}
+.btn-probe-on {
+  background: #fef3c7;
+  border-color: #f59e0b;
+  color: #92400e;
+}
+.key-probe-hint,
+.key-probe-live {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted, #64748b);
+  line-height: 1.4;
+  word-break: break-all;
 }
 .btn-primary {
   background: var(--primary, #2563eb);

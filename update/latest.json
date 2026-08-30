@@ -1,8 +1,8 @@
 {
-  "version": "1.5.7",
-  "notes": "v1.5.7：\n- 最小化到托盘修复：点 X / 启动后进托盘用 minimize+skip_taskbar，禁止 hide，避免 WebView2 被系统回收致白屏/黑屏\n- 含 v1.5.6：语音键按住说话 WinUHid 单报告注入，吞遥控器泄漏 F5；输入法设置说明与参考图\n- 含 PR #8：press_single/release_single、handle_voice 纯 hold、disarm 统一\n- 含 v1.5.5：WebView reload→recreate→重启；关闭到托盘改 minimize",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.7",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.7",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.5.7/Voice%20VibeCoding_1.5.7_x64-setup.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.5.7/Voice.VibeCoding_1.5.7_x64-setup.exe"
+  "version": "1.5.8",
+  "notes": "v1.5.8：\n- 语音键 Ctrl+Win / Win+Alt 松开不再粘滞 Win（分步 HID 释放 + 无条件补 KEYUP）\n- 修复虚拟键盘：仅 Windows 真正要求重启时才提示；否则再点自动修复；重启后未就绪会自动补一次\n- 微信输入法偶发不认 Electron 输入框：先打一两个字再按语音键\n- 含 v1.5.7：托盘 minimize+skip_taskbar，禁止 hide，避免 WebView2 白屏\n- 含 v1.5.6：语音键按住说话 WinUHid 单报告注入，吞遥控器泄漏 F5",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.8",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.8",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.5.8/Voice%20VibeCoding_1.5.8_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.5.8/Voice.VibeCoding_1.5.8_x64-setup.exe"
 }
