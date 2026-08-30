@@ -154,7 +154,11 @@ fn windows_injector_main(args: &[String]) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn windows_launch_or_inject(pid: u32) -> Result<bool, String> {
     use windows::core::{HSTRING, PCWSTR};
-    use windows::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
+    use windows::Win32::Foundation::{GetLastError, ERROR_CANCELLED};
+    use windows::Win32::UI::Shell::{
+        IsUserAnAdmin, ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
     if find_gadget_archive().is_none() {
         return Err("Gadget 资源缺失，无法注入".into());
@@ -179,25 +183,47 @@ fn windows_launch_or_inject(pid: u32) -> Result<bool, String> {
     let verb = HSTRING::from("runas");
 
     injector_log(&format!(
-        "ShellExecute runas exe={} params={}",
+        "ShellExecuteEx runas exe={} params={}",
         exe.display(),
         params
     ));
 
-    // SW_HIDE：提权后的注入进程不闪窗口。UAC 由系统 consent UI 单独弹出，不受此标志影响。
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            PCWSTR(verb.as_ptr()),
-            PCWSTR(exe_h.as_ptr()),
-            PCWSTR(params_h.as_ptr()),
-            PCWSTR(cwd_h.as_ptr()),
-            windows::Win32::UI::WindowsAndMessaging::SW_HIDE,
-        )
+    // ShellExecuteEx + NOCLOSEPROCESS：才能可靠区分「用户拒 UAC」与其它失败。
+    // 旧 ShellExecuteW 在拒 UAC 时只给 ≤32 错误码，调用方无法走 Ok(false) 短退避。
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(exe_h.as_ptr()),
+        lpParameters: PCWSTR(params_h.as_ptr()),
+        lpDirectory: PCWSTR(cwd_h.as_ptr()),
+        nShow: SW_HIDE.0 as i32,
+        ..Default::default()
     };
-    let code = result.0 as isize;
-    if code <= 32 {
-        return Err(format!("ShellExecuteW failed code={code}"));
+
+    let ok = unsafe { ShellExecuteExW(&mut info).is_ok() };
+    if !ok {
+        let err = unsafe { GetLastError() };
+        if err == ERROR_CANCELLED {
+            injector_log("ShellExecuteEx cancelled by user (UAC declined)");
+            return Ok(false);
+        }
+        // SE_ERR_ACCESSDENIED 等也会在拒 UAC / 策略拦截时出现
+        let code = err.0;
+        if code == 5 {
+            injector_log(&format!(
+                "ShellExecuteEx access denied (treat as UAC declined) code={code}"
+            ));
+            return Ok(false);
+        }
+        return Err(format!("ShellExecuteExW failed GetLastError={code}"));
+    }
+
+    // 子进程句柄：注入器自行退出；此处关闭即可（不阻塞等结果，结果由 Tap 附着/超时观测）
+    if !info.hProcess.is_invalid() {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(info.hProcess);
+        }
     }
     Ok(true)
 }

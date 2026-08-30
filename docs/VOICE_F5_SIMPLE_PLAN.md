@@ -61,5 +61,6 @@ WinUHid 发映射键     → IME 能认（无 INJECTED）
 
 ## 相关
 
+- **后续强化（无 helper）：** `docs/VOICE_F5_LONGTERM_PLAN.md`（sticky / voice_dispatch / bump generation / 嵌套仍吞 F5 / UAC 短退避）
 - `docs/VOICE_HOLD_PR8.md`
 - `scripts/hitl-key-probe-voice.ps1`

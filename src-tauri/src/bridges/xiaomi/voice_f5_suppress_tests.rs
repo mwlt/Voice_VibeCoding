@@ -55,10 +55,10 @@ fn suppress_firmware_f5_while_voice_native_armed() {
         "sticky down suppress covers typematic repeats"
     );
     assert!(
-        should_suppress_voice_f5(false, true, false),
-        "F5 up must still be swallowed during armed period (no up-pair clear)"
+        !should_suppress_voice_f5(false, true, false),
+        "F5 KEYUP must always pass to unstick leaked DOWN"
     );
-    // 周期内再来 down：仍吞（旧逻辑在 up 时 swap(false) 会破窗）
+    // UP 已清 sticky；周期/armed 仍在则再 DOWN 仍吞
     assert!(should_suppress_voice_f5(true, false, false));
     disarm_voice_native_suppress();
     assert!(!should_suppress_voice_f5(true, false, false));
@@ -74,7 +74,7 @@ fn session_suppresses_f5_without_tap_ready() {
         should_suppress_voice_f5(true, false, false),
         "session alone must swallow firmware F5 before ATVV marks"
     );
-    assert!(should_suppress_voice_f5(false, true, false));
+    assert!(!should_suppress_voice_f5(false, true, false));
     assert!(should_suppress_voice_f5(true, false, false));
     set_input_session_active(false);
     disarm_voice_native_suppress();
@@ -87,9 +87,10 @@ fn voice_period_swallows_f5_without_session() {
     set_input_session_active(false);
     begin_voice_period();
     assert!(should_suppress_voice_f5(true, false, false));
-    assert!(should_suppress_voice_f5(false, true, false));
+    assert!(!should_suppress_voice_f5(false, true, false));
     assert!(should_suppress_voice_f5(true, false, false));
     end_voice_period("test");
+    // sticky 保留到 disarm（与 end_voice_period 不清 sticky 对齐）
     disarm_voice_native_suppress();
     assert!(!should_suppress_voice_f5(true, false, false));
 }

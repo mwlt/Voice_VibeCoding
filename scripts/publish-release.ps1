@@ -2,12 +2,12 @@
 # Usage:
 #   $env:GITEE_TOKEN = 'your_gitee_personal_access_token'
 #   $env:GITHUB_TOKEN = 'your_github_pat_with_repo_scope'
-#   .\scripts\pack-winuhid-release.ps1 -Version 1.5.8
-#   .\scripts\publish-release.ps1 -Version 1.5.8 -Tag v1.5.8
+#   .\scripts\pack-winuhid-release.ps1 -Version 1.5.9
+#   .\scripts\publish-release.ps1 -Version 1.5.9 -Tag v1.5.9
 
 param(
-    [string]$Version = "1.5.8",
-    [string]$Tag = "v1.5.8"
+    [string]$Version = "1.5.9",
+    [string]$Tag = "v1.5.9"
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,11 +27,11 @@ Copy-Item $msi $ghMsi -Force
 $body = @"
 ## v$Version
 
-- 语音键 Ctrl+Win / Win+Alt 松开不再粘滞 Win（对齐菜单键：分步 HID 释放 + 无条件补 KEYUP）
-- 修复虚拟键盘：仅 Windows 返回 3010 才提示必须重启；否则再点「自动修复」；重启后若仍未就绪自动补一次
-- 微信输入法偶发不认 Electron 输入框（Cursor 等）：先在框里打一两个字再按语音键
-- 含 v1.5.7：托盘 minimize+skip_taskbar，禁止 hide，避免 WebView2 白屏
-- 含 v1.5.6：语音键按住说话 WinUHid 单报告注入，吞遥控器泄漏 F5
+- 语音键 F5：KEYUP 永远放行，避免漏 DOWN 后 F5 粘死（Ctrl+Win+F5）导致微信无法唤醒
+- 钩子快进快出（voice_dispatch）+ bump 真落地 + 嵌套仍吞 F5
+- HID Tap：拒 UAC 可识别并短退避（8s→60s）；gadget 清 F5 usage 0x003E
+- 偶发漏 F5 时可再按一两下（详见 README）
+- 含 v1.5.8：Win 和弦不粘滞、WinUHid 重启策略、Electron 输入框提示
 "@
 
 function Ensure-GiteeRelease {

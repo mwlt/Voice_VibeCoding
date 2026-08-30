@@ -6,6 +6,12 @@
 >
 > **建议：先在该输入框里打一两个字，再按遥控语音键，一般就可以正常调用。** 或先点一下记事本 / 浏览器地址栏，再切回来。记事本里能稳定唤醒、只有这类软件里偶发失败，属于输入法挂接问题，不是映射故障。
 
+> **偶尔：按语音键时键盘测试页会闪一下 F5（或出现孤立的 F5 抬起）**
+>
+> 遥控器语音键在 Windows 上常被译成 F5。本软件会尽量吞掉它并注入你映射的组合键（如 Ctrl+Win），但低级钩子无法 100% 抢在所有软件前面，偶发仍可能漏一帧。常见于：刚改完语音键映射、刚启动/重启软件、钩子重挂空窗、或 HID Tap 尚未就绪。
+>
+> **这不影响正常使用：再按一两下语音键即可。** 松手后 F5 不应一直处于按下；若真键盘 F5「粘住」，点一下真键盘 F5 松开即可。技术细节见 `docs/VOICE_F5_LONGTERM_PLAN.md`。
+
 本项目：   rust语言 windows版（基于python版本重构） 作者 ：mwlt
 
 *gitee:* 
@@ -30,7 +36,7 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 
 
-**v1.5.8** · Windows 桌面应用
+**v1.5.9** · Windows 桌面应用
 
 把小米遥控器 2 Pro（及预留的 T1 / 汉王 V60）接到电脑：按键可映射成键盘快捷键，语音可送到输入法听写。
 
@@ -60,7 +66,7 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 | ATVV 状态红字提示 | 桥接已运行但语音通道未订阅时，在「音频信号」旁显示「ATVV 未连接」 | 新增 |
 | ATVV 失败系统通知 | 语音通道未就绪时按语音键，右下角通知引导去点「修复 ATVV 连接」（限流，避免刷屏） | 新增 |
 | 按键录入扩展 | 对齐常见 108 键显示名；录入会话旁听 Consumer 媒体键（音量±/静音）；常驻「设置为：」按钮兜底计算器等；默认语音触发为「按住」 | 增强 |
-| F5 抑制策略 | **重叠 bump**（先挂再卸，无空窗）+ gadget 清 `0x003E` + 会话 LL 吞；见 `docs/VOICE_F5_ZERO_LEAK_PLAN.md` | 修复 |
+| 语音键偶发漏 F5 | 无法 100% 杜绝；常见于改映射 / 刚启动 / 钩子空窗。再按一两下即可；详见文首说明 | 说明 |
 | ATVV / HID Tap 时序 | 订阅语音通道前暂停 HID Tap，降低 AccessDenied；订阅成功后再启 Tap | 优化 |
 | 语音路由占用策略 | 默认 `hold_device`：启动握 CABLE 设备，仅说话时 play；空闲不常驻写静音（见下文「VB-CABLE 占用方式」） | 优化 |
 | 虚拟声卡状态探测 | 优先读系统 MMDevices 注册表判断 CABLE 是否就绪；已就绪后停探，避免设置页轮询经 WASAPI 枚举导致 `audiodg` 句柄异常上涨 | 优化 |
@@ -68,7 +74,7 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 | HID 注入闪窗 | 提权注入 WUDFHost 时隐藏控制台闪窗（UAC 仍保留） | 优化 |
 | 音频信号波形 | 设置页实时显示 BLE 解码电平 / 波形，便于判断语音是否真正进机 | 增强 |
 | 虚拟声卡检测与安装 | 应用内检测 VB-CABLE，支持内嵌驱动或官网安装指引，结果写回主机状态 | 增强 |
-| 语音键按住说话（微信等） | WinUHid 单报告注入 Ctrl+Win；吞遥控器泄漏 F5；松手统一 disarm；输入法设置说明与参考图 | 修复 |
+| 语音键按住说话（微信等） | WinUHid 单报告注入 Ctrl+Win；尽量吞遥控固件 F5（偶发漏见文首）；松手统一 disarm；输入法设置说明与参考图 | 修复 |
 | 语音键含 Win 不粘滞 | Ctrl+Win / Win+Alt 松开走菜单键同款分步 HID 释放，并无条件补 Win KEYUP，避免 Win 粘住 | 修复 |
 | 修复虚拟键盘重启策略 | 仅 Windows 返回 3010 才提示必须重启；否则再点「自动修复」；重启后若仍未就绪自动补一次 | 优化 |
 | 微信/Electron 输入框 | README 置顶说明：偶发不认网页输入框，先打一两个字再按语音键 | 增强 |
@@ -101,16 +107,16 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 ## 下载安装包
 
-正式安装包在两边的 Release 页（当前 **v1.5.8**）：
+正式安装包在两边的 Release 页（当前 **v1.5.9**）：
 
-- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.8)（国内优先）
-- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.8)
+- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.5.9)（国内优先）
+- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.5.9)
 
 常用文件：
 
-- `Voice VibeCoding_1.5.8_x64-setup.exe`（NSIS）
-- `Voice VibeCoding_1.5.8_x64_zh-CN.msi`
-- `WinUHid_Manual_1.5.8.zip`（WinUHid 虚拟键盘手动安装包，也可在应用内「修复虚拟键盘 → 下载驱动包」下载）
+- `Voice VibeCoding_1.5.9_x64-setup.exe`（NSIS）
+- `Voice VibeCoding_1.5.9_x64_zh-CN.msi`
+- `WinUHid_Manual_1.5.9.zip`（WinUHid 虚拟键盘手动安装包，也可在应用内「修复虚拟键盘 → 下载驱动包」下载）
 
 安装时若提示无法覆盖 `remote-bridge-hub.exe`，请先退出本软件（含托盘）再重试。
 
@@ -237,8 +243,8 @@ npm run tauri:build
 | 类型       | 路径                                                                            |
 | -------- | ----------------------------------------------------------------------------- |
 | 可执行文件    | `src-tauri/target/release/remote-bridge-hub.exe`                              |
-| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.5.8_x64_zh-CN.msi`  |
-| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.5.8_x64-setup.exe` |
+| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.5.9_x64_zh-CN.msi`  |
+| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.5.9_x64-setup.exe` |
 
 
 发新版时请同步更新仓库根目录 `update/latest.json`（提高 `version`，填写 Gitee/GitHub 页面与安装包直链）。应用会优先读 Gitee raw，失败再读 GitHub raw。有新版本时在顶栏显示「新版本」与「查看更新内容」；弹窗内可选「不再提醒此版本」（仅抑制自动提醒，不影响设置页「检查更新」）。详见 [docs/UPDATE_IGNORE_PLAN.md](docs/UPDATE_IGNORE_PLAN.md)。

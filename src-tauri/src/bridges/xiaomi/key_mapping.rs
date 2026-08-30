@@ -29,8 +29,13 @@ static ACTION_SEQ: AtomicU64 = AtomicU64::new(1);
 /// 短窗 `direct_signal_recent` 盖不住 typematic，故额外 sticky 抑制直到 F5 抬起或截止。
 static VOICE_NATIVE_SUPPRESS: AtomicBool = AtomicBool::new(false);
 static VOICE_NATIVE_DEADLINE: Mutex<Option<Instant>> = Mutex::new(None);
-/// 本轮已见过固件 F5 down（诊断用）；**不再**在每次 F5 up 时清除。
+/// 本轮已吞过固件 F5 DOWN（sticky）。UP 到达或空闲超时才解粘；
+/// **`end_voice_period` 不得清除**（ATVV 松开通常早于 F5 KEYUP）。
 static VOICE_F5_DOWN_SUPPRESSED: AtomicBool = AtomicBool::new(false);
+/// 最近一次参与抑制判定的 F5 事件时刻（空闲解粘基准）。
+static VOICE_F5_LAST_EVENT: Mutex<Option<Instant>> = Mutex::new(None);
+/// sticky 在无 F5 事件超过此时长后自动解粘，避免永久吞真键盘 F5。
+pub const VOICE_F5_STICKY_MAX_IDLE_MS: u64 = 10_000;
 /// ATVV 语音按压周期（0x08/0x04 → 松开）：周期内无条件吞全部 F5 down/up。
 static VOICE_PERIOD_ACTIVE: AtomicBool = AtomicBool::new(false);
 static INPUT_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -51,6 +56,8 @@ pub fn set_input_session_active(active: bool) {
         reset_atvv_f5_toast_throttle();
     } else {
         end_voice_period("session_end");
+        // 会话结束 = 明确停手：清 sticky，避免断连后最多 10s 仍吞真键盘 F5
+        disarm_voice_native_suppress();
     }
 }
 
@@ -65,10 +72,13 @@ pub fn begin_voice_period() {
     crate::bridges::xiaomi::key_log::reset_f5_suppress_log_flag();
 }
 
-/// 遥控松开 / 会话结束：结束周期，并清 sticky（仅此处清，勿在每次 F5 up 清）。
+/// 遥控松开 / 会话结束：结束周期。
+///
+/// **不清** `VOICE_F5_DOWN_SUPPRESSED`：ATVV 松开（0x00）通常早于固件 F5 KEYUP，
+/// 此处清标志会让后续 typematic 漏到系统（记事本插日期）。
+/// sticky 由 [`should_suppress_voice_f5`] 管理（UP 到达或长时间无 F5 事件时解粘）。
 pub fn end_voice_period(reason: &str) {
     let was = VOICE_PERIOD_ACTIVE.swap(false, Ordering::AcqRel);
-    VOICE_F5_DOWN_SUPPRESSED.store(false, Ordering::Release);
     VOICE_INJECT_BACKEND_HELD.store(VOICE_BACKEND_NONE, Ordering::Release);
     if was {
         log::debug!("XIAOMI VOICE period end reason={reason}");
@@ -228,11 +238,21 @@ pub fn arm_voice_native_suppress() {
         Some(Instant::now() + Duration::from_millis(VOICE_F5_SUPPRESS_DEADLINE_MS));
 }
 
+/// 显式解除语音 F5 抑制：**一并清掉 sticky 与事件计时**。
+///
+/// 与 [`end_voice_period`] 不同：period end 保留 sticky（等 F5 KEYUP）；
+/// disarm 是明确停手信号，sticky 残留会把 F5 永久吞掉。
 pub fn disarm_voice_native_suppress() {
     VOICE_NATIVE_SUPPRESS.store(false, Ordering::Release);
     *VOICE_NATIVE_DEADLINE.lock() = None;
+    VOICE_F5_DOWN_SUPPRESSED.store(false, Ordering::Release);
+    *VOICE_F5_LAST_EVENT.lock() = None;
 }
 
+/// armed 窗口是否仍然有效。
+///
+/// 当 F5 仍处于按住状态（sticky）时，截止到期**续期**而非失效——
+/// 语音长按 >3s 是常态，旧实现会让判据在 3s 后消失。
 pub fn voice_native_suppress_active() -> bool {
     if !VOICE_NATIVE_SUPPRESS.load(Ordering::Acquire) {
         return false;
@@ -240,6 +260,10 @@ pub fn voice_native_suppress_active() -> bool {
     let mut g = VOICE_NATIVE_DEADLINE.lock();
     match *g {
         Some(deadline) if Instant::now() <= deadline => true,
+        Some(_) if VOICE_F5_DOWN_SUPPRESSED.load(Ordering::Acquire) => {
+            *g = Some(Instant::now() + Duration::from_millis(VOICE_F5_SUPPRESS_DEADLINE_MS));
+            true
+        }
         _ => {
             VOICE_NATIVE_SUPPRESS.store(false, Ordering::Release);
             *g = None;
@@ -298,20 +322,49 @@ pub fn direct_signal_recent(name: &str, window: Duration) -> bool {
     false
 }
 
+fn touch_f5_event() {
+    *VOICE_F5_LAST_EVENT.lock() = Some(Instant::now());
+}
+
+fn voice_f5_sticky_valid(now: Instant, last: Option<Instant>) -> bool {
+    match last {
+        Some(t) => now.duration_since(t) <= Duration::from_millis(VOICE_F5_STICKY_MAX_IDLE_MS),
+        None => false,
+    }
+}
+
 /// 固件语音键常被译成 F5。
 ///
-/// **DOWN**：会话 / 语音周期 / armed → 吞，并记 sticky。  
-/// **UP**：仅当本进程曾吞过对应 DOWN 时才吞；否则**放行 UP**，
-/// 避免 bump 空窗漏过 KEYDOWN 后再吞 KEYUP → F5 永久粘键。
+/// **DOWN**：会话 / 语音周期 / armed → 吞，并记 sticky；
+///          已 sticky 且未超时 → 一律吞（覆盖 typematic）。
+/// **UP**：**永远放行**（并清 sticky）。
+///        LL 钩子若不是链头，KEYDOWN 可能已被前面的钩子/系统吃进；
+///        若此时再吞 KEYUP → F5 永久粘死 → Ctrl+Win 变成 Ctrl+Win+F5，微信无法唤醒。
+///        多放行一次 KEYUP 对「DOWN 已被我们吞掉」的情况无害。
+///
+/// 调用方约束：运行在 `WH_KEYBOARD_LL` 回调里，禁止 sleep / IO。
 pub fn should_suppress_voice_f5(down: bool, up: bool, _tap_ready: bool) -> bool {
     if up {
-        return VOICE_F5_DOWN_SUPPRESSED.swap(false, Ordering::AcqRel);
+        // 无论是否吞过 DOWN：必须放行 KEYUP，并解除 sticky。
+        VOICE_F5_DOWN_SUPPRESSED.store(false, Ordering::Release);
+        *VOICE_F5_LAST_EVENT.lock() = None;
+        return false;
     }
     if !down {
         return false;
     }
+    let now = Instant::now();
+    let last = *VOICE_F5_LAST_EVENT.lock();
     if VOICE_F5_DOWN_SUPPRESSED.load(Ordering::Acquire) {
-        return true;
+        if voice_f5_sticky_valid(now, last) {
+            touch_f5_event();
+            let _ = voice_native_suppress_active();
+            return true;
+        }
+        VOICE_F5_DOWN_SUPPRESSED.store(false, Ordering::Release);
+        log::warn!(
+            "XIAOMI VOICE F5 sticky auto-released (no F5 event for >{VOICE_F5_STICKY_MAX_IDLE_MS}ms)"
+        );
     }
     let in_guard = voice_period_active()
         || voice_native_suppress_active()
@@ -320,7 +373,40 @@ pub fn should_suppress_voice_f5(down: bool, up: bool, _tap_ready: bool) -> bool 
         return false;
     }
     VOICE_F5_DOWN_SUPPRESSED.store(true, Ordering::Release);
+    touch_f5_event();
     true
+}
+
+/// 复位全部 F5 抑制相关状态。仅供测试使用。
+#[doc(hidden)]
+pub fn voice_f5_reset_for_test() {
+    VOICE_F5_DOWN_SUPPRESSED.store(false, Ordering::Release);
+    VOICE_NATIVE_SUPPRESS.store(false, Ordering::Release);
+    *VOICE_NATIVE_DEADLINE.lock() = None;
+    *VOICE_F5_LAST_EVENT.lock() = None;
+    VOICE_PERIOD_ACTIVE.store(false, Ordering::Release);
+    VOICE_INJECT_BACKEND_HELD.store(VOICE_BACKEND_NONE, Ordering::Release);
+    INPUT_SESSION_ACTIVE.store(false, Ordering::Release);
+}
+
+/// sticky 是否已置位（诊断/测试）。
+pub fn voice_f5_down_suppressed() -> bool {
+    VOICE_F5_DOWN_SUPPRESSED.load(Ordering::Acquire)
+}
+
+#[doc(hidden)]
+pub fn voice_f5_expire_suppress_deadline_for_test() {
+    *VOICE_NATIVE_DEADLINE.lock() = Some(Instant::now() - Duration::from_millis(1));
+}
+
+#[doc(hidden)]
+pub fn voice_f5_set_last_event_age_for_test(age_ms: u64) {
+    *VOICE_F5_LAST_EVENT.lock() = Some(Instant::now() - Duration::from_millis(age_ms));
+}
+
+#[doc(hidden)]
+pub fn voice_f5_sticky_valid_for_test(now: Instant, last: Option<Instant>) -> bool {
+    voice_f5_sticky_valid(now, last)
 }
 
 static ATVV_F5_TOAST_LAST: Mutex<Option<Instant>> = Mutex::new(None);
@@ -587,7 +673,19 @@ fn handle_voice(app: &AppHandle, pressed: bool) {
     );
     // PR #8 实证：必须把本进程 LL 钩子顶到微信/输入法之前，才能替它们吞掉固件 F5。
     // 只吞对本进程有效；微信若在链头已看到 F5，return 1 无法撤回。
-    crate::bridges::xiaomi::special_keys::bump_hook_to_front_and_settle(40);
+    // 现在 handle_voice 跑在 voice_dispatch 工作线程上，等待 bump 才有意义。
+    match crate::bridges::xiaomi::special_keys::bump_hook_to_front_and_settle(40) {
+        crate::bridges::xiaomi::hook_bump::BumpOutcome::Settled => {}
+        crate::bridges::xiaomi::hook_bump::BumpOutcome::TimedOut => {
+            log::warn!("XIAOMI VOICE bump settle timed out — hook may not be at chain head");
+        }
+        crate::bridges::xiaomi::hook_bump::BumpOutcome::SelfDeadlock => {
+            log::error!("XIAOMI VOICE bump settle self-deadlock (called from hook thread)");
+        }
+        crate::bridges::xiaomi::hook_bump::BumpOutcome::NoHookThread => {
+            log::debug!("XIAOMI VOICE bump: hook thread not ready yet");
+        }
+    }
     let pressed_ok = {
         let mut state = VOICE_CHORD.lock();
         state.press_with(&vks, inject_voice_chord)

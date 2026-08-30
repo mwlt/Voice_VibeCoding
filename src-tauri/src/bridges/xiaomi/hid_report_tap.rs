@@ -275,9 +275,13 @@ fn run_hub(app: AppHandle, gate_slot: Arc<Mutex<Arc<KeyEmitGate>>>, stop: Arc<At
 
         // 对齐 Python：每个存活 HostPid 只请求一次 UAC 注入；accept 超时不重置
         if injection_attempted_pid.is_none() {
+            crate::bridges::xiaomi::hid_inject_result::begin_watch(pid);
             match launch_elevated_injector(pid) {
                 Ok(true) => {
                     injection_attempted_pid = Some(pid);
+                    crate::bridges::xiaomi::hid_tap_health::set_phase(
+                        crate::bridges::xiaomi::hid_tap_health::TapPhase::Injecting,
+                    );
                     emit_message(
                         &app,
                         &format!("已请求注入 WUDFHost pid={pid}（若弹出 UAC 请允许）"),
@@ -285,13 +289,40 @@ fn run_hub(app: AppHandle, gate_slot: Arc<Mutex<Arc<KeyEmitGate>>>, stop: Arc<At
                     tap_log(&format!("XIAOMI HID TAP injection requested pid={pid}"));
                 }
                 Ok(false) => {
-                    emit_message(&app, "UAC 注入被拒绝，返回/音量键将无效；Windows 原生音量仍可用");
-                    tap_log("XIAOMI HID TAP UAC declined");
+                    crate::bridges::xiaomi::hid_inject_result::resolve(
+                        pid,
+                        crate::bridges::xiaomi::hid_inject_result::InjectResult::Declined,
+                    );
+                    crate::bridges::xiaomi::hid_tap_health::set_phase(
+                        crate::bridges::xiaomi::hid_tap_health::TapPhase::Declined,
+                    );
+                    let streak = crate::bridges::xiaomi::hid_tap_health::declined_streak();
+                    let backoff = crate::bridges::xiaomi::hid_tap_health::uac_backoff(
+                        streak.saturating_sub(1),
+                    );
+                    emit_message(
+                        &app,
+                        &format!(
+                            "UAC 注入被拒绝；{} 秒后重试（源头清除暂停，仅钩子兜底）",
+                            backoff.as_secs()
+                        ),
+                    );
+                    tap_log(&format!(
+                        "XIAOMI HID TAP UAC declined streak={streak} backoff={}s",
+                        backoff.as_secs()
+                    ));
                     drop(listener);
-                    sleep_interruptible(&stop, retry);
+                    sleep_interruptible(&stop, backoff);
                     continue;
                 }
                 Err(e) => {
+                    crate::bridges::xiaomi::hid_inject_result::resolve(
+                        pid,
+                        crate::bridges::xiaomi::hid_inject_result::InjectResult::Err(1),
+                    );
+                    crate::bridges::xiaomi::hid_tap_health::set_phase(
+                        crate::bridges::xiaomi::hid_tap_health::TapPhase::Failed,
+                    );
                     emit_message(&app, &format!("HID Tap 注入失败: {e}"));
                     tap_log(&format!("XIAOMI HID TAP injection error: {e}"));
                     drop(listener);
@@ -390,6 +421,13 @@ fn run_hub(app: AppHandle, gate_slot: Arc<Mutex<Arc<KeyEmitGate>>>, stop: Arc<At
                                                 if !io_announced {
                                                     io_announced = true;
                                                     special_keys::set_hid_tap_ready(true);
+                                                    crate::bridges::xiaomi::hid_tap_health::set_phase(
+                                                        crate::bridges::xiaomi::hid_tap_health::TapPhase::Attached,
+                                                    );
+                                                    crate::bridges::xiaomi::hid_inject_result::resolve(
+                                                        pid,
+                                                        crate::bridges::xiaomi::hid_inject_result::InjectResult::Ok,
+                                                    );
                                                     // 尽早按绑定表武装「自定义方向/OK」吞键（Up→M 防先上移）
                                                     if let Some(mgr) =
                                                         app.try_state::<crate::config::manager::ConfigManager>()

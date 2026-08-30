@@ -7,7 +7,7 @@
 
 use remote_bridge_hub_lib::bridges::xiaomi::key_mapping::{
     arm_voice_native_suppress, begin_voice_period, disarm_voice_native_suppress, end_voice_period,
-    set_input_session_active, should_suppress_voice_f5,
+    set_input_session_active, should_suppress_voice_f5, voice_f5_down_suppressed,
 };
 
 #[test]
@@ -19,7 +19,11 @@ fn session_alone_suppresses_f5_before_atvv_without_tap() {
         should_suppress_voice_f5(true, false, false),
         "session active + tap_ready=false must still swallow F5 before ATVV"
     );
-    assert!(should_suppress_voice_f5(false, true, false));
+    assert!(
+        !should_suppress_voice_f5(false, true, false),
+        "KEYUP must always pass (unstick if DOWN leaked ahead of our hook)"
+    );
+    assert!(!voice_f5_down_suppressed());
     assert!(should_suppress_voice_f5(true, false, false));
     set_input_session_active(false);
     disarm_voice_native_suppress();
@@ -31,7 +35,8 @@ fn tap_ready_session_suppresses_f5_before_atvv() {
     disarm_voice_native_suppress();
     set_input_session_active(true);
     assert!(should_suppress_voice_f5(true, false, true));
-    assert!(should_suppress_voice_f5(false, true, true));
+    assert!(!should_suppress_voice_f5(false, true, true));
+    assert!(!voice_f5_down_suppressed());
     set_input_session_active(false);
     disarm_voice_native_suppress();
 }
@@ -52,7 +57,7 @@ fn armed_still_suppresses_without_session() {
     set_input_session_active(false);
     arm_voice_native_suppress();
     assert!(should_suppress_voice_f5(true, false, false));
-    assert!(should_suppress_voice_f5(false, true, false));
+    assert!(!should_suppress_voice_f5(false, true, false));
     disarm_voice_native_suppress();
 }
 
@@ -63,8 +68,9 @@ fn voice_period_swallows_without_session() {
     set_input_session_active(false);
     begin_voice_period();
     assert!(should_suppress_voice_f5(true, false, false));
-    assert!(should_suppress_voice_f5(false, true, false));
+    assert!(!should_suppress_voice_f5(false, true, false));
     end_voice_period("test");
+    // period 结束保留 sticky；须 disarm 才彻底放开物理 F5 DOWN
     disarm_voice_native_suppress();
     assert!(!should_suppress_voice_f5(true, false, false));
 }
@@ -97,8 +103,12 @@ fn suppress_path_must_not_sleep_and_keys_off_session() {
         "ATVV path must key off input session, not only tap_ready"
     );
     assert!(
-        body.contains("swap(false"),
-        "F5 KEYUP must clear sticky so orphan UP can pass (unstick)"
+        body.contains("return false"),
+        "F5 KEYUP path must return false (always pass UP to unstick)"
+    );
+    assert!(
+        body.contains("VOICE_F5_DOWN_SUPPRESSED"),
+        "F5 KEYUP path must clear sticky"
     );
 }
 

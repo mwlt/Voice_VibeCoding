@@ -59,7 +59,9 @@ pub fn set_hook_enabled(enabled: bool) {
 
 /// ATVV / 诊断用：把钩子顶到链头。
 /// **实现必须先挂新钩再卸旧钩**（重叠），禁止先 Unhook——空窗会让固件 F5 直达系统。
-pub fn bump_hook_to_front() {
+/// 返回本次 bump 请求的 generation，供 [`bump_hook_to_front_and_settle`] 等待。
+pub fn bump_hook_to_front() -> u64 {
+    let gen = crate::bridges::xiaomi::hook_bump::next_generation();
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Foundation::{LPARAM, WPARAM};
@@ -69,32 +71,32 @@ pub fn bump_hook_to_front() {
         let tid = HOOK_THREAD_ID.load(Ordering::Acquire);
         if tid == 0 {
             start_special_key_hook();
-            return;
+            return gen;
         }
         unsafe {
             let _ = PostThreadMessageW(tid, WM_BUMP_HOOK_FRONT, WPARAM(0), LPARAM(0));
         }
     }
+    gen
 }
 
-/// 仅会话连接等「无按键竞态」场景使用。语音 MIC_OPEN / press 禁止调用。
-pub fn bump_hook_to_front_and_settle(settle_ms: u64) {
-    bump_hook_to_front();
+/// 请求置顶并**等待其真正落地**。
+///
+/// **不得在 LL 钩子回调线程上调用**：旧实现在回调里 Post 再 sleep，该线程无法泵消息，
+/// bump 从未真正生效。现在 `handle_voice` 跑在 voice_dispatch 工作线程上，等待才有意义。
+pub fn bump_hook_to_front_and_settle(settle_ms: u64) -> crate::bridges::xiaomi::hook_bump::BumpOutcome {
+    let gen = bump_hook_to_front();
     #[cfg(target_os = "windows")]
     {
-        let deadline = std::time::Instant::now() + Duration::from_millis(settle_ms.max(1));
-        // 给钩子线程处理 WM_BUMP 的时间；过短则微信仍可能排在我们前面看到 F5
-        while std::time::Instant::now() < deadline {
-            if is_hook_armed() {
-                std::thread::sleep(Duration::from_millis(8));
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        let current_tid = unsafe { GetCurrentThreadId() };
+        let hook_tid = HOOK_THREAD_ID.load(Ordering::Acquire);
+        crate::bridges::xiaomi::hook_bump::wait_for(gen, current_tid, hook_tid, settle_ms)
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = settle_ms;
+        crate::bridges::xiaomi::hook_bump::BumpOutcome::NoHookThread
     }
 }
 
@@ -126,6 +128,8 @@ pub fn start_special_key_hook() {
         log::info!("XIAOMI SPECIAL KEY hook disabled by config");
         return;
     }
+    // 钩子只投递、不执行：先把真实处理器接到派发队列上（幂等）。
+    crate::bridges::xiaomi::voice_worker::install();
     if RUNNING.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -211,53 +215,62 @@ fn hook_loop() {
         let hook = load_hook();
         let depth = HOOK_PROC_DEPTH.fetch_add(1, Ordering::AcqRel);
         let _depth_guard = HookProcDepthGuard;
-        // 重叠 bump：新旧钩子同 proc；嵌套进入只转发，避免双处理音量/方向等
-        if depth > 0 {
+        if code < 0 {
             return CallNextHookEx(hook, code, wparam, lparam);
         }
-        if code >= 0 {
-            let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-            let flags = info.flags.0;
-            let vk = info.vkCode;
-            let msg = wparam.0 as u32;
-            let injected = info.dwExtraInfo == EXTRA_INFO || (flags & 0x10) != 0;
-            // 录入吞键：只把「本进程 EXTRA_INFO 注入」当注入键跳过。
-            // 勿把 LLKHF_INJECTED 传给 try_swallow——部分环境会误标真实键盘，
-            // 导致 try_swallow 直接 false，键既不录、又走下面 if injected 放行 → UI 无反应。
-            let our_inject = info.dwExtraInfo == EXTRA_INFO;
+        let info = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+        let flags = info.flags.0;
+        let vk = info.vkCode;
+        let msg = wparam.0 as u32;
+        let injected = info.dwExtraInfo == EXTRA_INFO || (flags & 0x10) != 0;
+        let our_inject = info.dwExtraInfo == EXTRA_INFO;
+        let down = msg == 0x0100 || msg == 0x0104;
+        let up = msg == 0x0101 || msg == 0x0105;
+        let tap_ready = HID_TAP_READY.load(Ordering::Acquire);
 
-            // 快捷键录入：最优先吞掉全部物理键（含 WM_SYSKEY* / Alt+Space / Win 热键）
-            // 必须在 CallNextHookEx 之前；第二套短生命周期钩子不可靠（易被超时静默卸掉）
-            if crate::bridges::shared::shortcut_capture::try_swallow_capture_key(vk, msg, our_inject)
-            {
-                return LRESULT(1);
-            }
+        // 快捷键录入：最优先（含嵌套路径）
+        if crate::bridges::shared::shortcut_capture::try_swallow_capture_key(vk, msg, our_inject) {
+            return LRESULT(1);
+        }
+        if crate::bridges::shared::shortcut_capture::is_swallow_active() {
+            return CallNextHookEx(hook, code, wparam, lparam);
+        }
 
-            // 录入进行中：禁止方向/音量/菜单等「固件原生抑制」再吞键，
-            // 避免未进录入引擎的物理键被静默吃掉（表现为完全录不上）。
-            if crate::bridges::shared::shortcut_capture::is_swallow_active() {
+        // 重叠 bump：新旧钩子同 proc。旧实现此处一刀切转发 → F5 抑制真空。
+        // 现：注入键放行；F5 仍抑制；其余转发。
+        if depth > 0 {
+            if our_inject {
                 return CallNextHookEx(hook, code, wparam, lparam);
             }
+            if vk == 0x74 && (down || up) {
+                let suppress = should_suppress_voice_f5(down, up, tap_ready);
+                if suppress {
+                    crate::bridges::xiaomi::key_probe::record(
+                        vk, down, up, injected, our_inject, "suppressed",
+                    );
+                    crate::bridges::xiaomi::key_log::arm_output_watch(
+                        crate::bridges::xiaomi::key_log::button_label("mic"),
+                    );
+                    crate::bridges::xiaomi::voice_dispatch::submit_firmware_voice_key(down);
+                    if down {
+                        crate::bridges::xiaomi::key_log::emit_suppressed_output(0x74);
+                    }
+                    return LRESULT(1);
+                }
+            }
+            return CallNextHookEx(hook, code, wparam, lparam);
+        }
 
+        // ---- 非嵌套主路径 ----
+        {
             // Alt 和弦注入中：即使是注入键（带 EXTRA_INFO），
             // 也不能直接放行 Alt/Space 等系统键 —— 否则会触发系统菜单。
-            // 这里走抑制路径，让调用方（key_mapping）通过 WM_KEYDOWN 路径
-            // 单独投递按键，避免 WM_SYSKEYDOWN。
-            if alt_chord_active()
-                && injected
-                && is_alt_system_key(vk)
-            {
+            if alt_chord_active() && injected && is_alt_system_key(vk) {
                 log::info!("XIAOMI SPECIAL KEY alt_chord suppressed vk=0x{vk:02X}");
                 return LRESULT(1);
             }
 
-            let down = msg == 0x0100 || msg == 0x0104;
-            let up = msg == 0x0101 || msg == 0x0105;
-            let tap_ready = HID_TAP_READY.load(Ordering::Acquire);
-
             // 语音 F5：必须在 `if injected` 早退之前处理。
-            // 只用 !our_inject；勿在 special_keys 里用 session OR 强吞 UP——
-            // bump 空窗若漏过 KEYDOWN，再吞 KEYUP 会把 F5 粘死（见 key-probe / diagnosing）。
             if vk == 0x74 && !our_inject && (down || up) {
                 let suppress = should_suppress_voice_f5(down, up, tap_ready);
                 if suppress {
@@ -267,7 +280,8 @@ fn hook_loop() {
                     crate::bridges::xiaomi::key_log::arm_output_watch(
                         crate::bridges::xiaomi::key_log::button_label("mic"),
                     );
-                    crate::bridges::xiaomi::key_mapping::on_firmware_voice_key(down);
+                    // 只投递，不就地执行：firmware voice sink → handle_voice
+                    crate::bridges::xiaomi::voice_dispatch::submit_firmware_voice_key(down);
                     if down {
                         crate::bridges::xiaomi::key_log::emit_suppressed_output(0x74);
                     }
@@ -419,6 +433,9 @@ fn hook_loop() {
         }
         CallNextHookEx(hook, code, wparam, lparam)
     }
+    // ---- END LL HOOK PROC ----
+    // 上方 proc 内禁止 sleep / IO / 同步调用 firmware voice 处理函数；
+    // `tests/hook_callback_nonblocking.rs` 对此有源码级守卫。
 
     unsafe {
         HOOK_THREAD_ID.store(GetCurrentThreadId(), Ordering::Release);
@@ -474,6 +491,8 @@ fn hook_loop() {
                         }
                     }
                 }
+                // 无论成功失败都要标记，否则等待方白等到超时
+                crate::bridges::xiaomi::hook_bump::mark_handled();
                 continue;
             }
             let _ = TranslateMessage(&msg);

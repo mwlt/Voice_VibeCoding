@@ -24,3 +24,8 @@ pub mod connect;
 pub mod key_log;
 pub mod key_probe;
 pub mod input_session;
+pub mod voice_dispatch;
+pub mod voice_worker;
+pub mod hook_bump;
+pub mod hid_tap_health;
+pub mod hid_inject_result;
