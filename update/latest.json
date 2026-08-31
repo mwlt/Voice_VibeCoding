@@ -1,8 +1,8 @@
 {
-  "version": "1.6.1",
-  "notes": "v1.6.1：\n- 微信输入法务必按「输入法设置」说明配置（F5 + 本软件快捷键）\n- 唤醒语音优化（首包/延迟）\n- F5 策略：仅语音按住相关窗口吞键，不误伤真键盘\n- 「不再提醒此版本」忽略优化\n- 界面优化（示意遥控、输入法引导、按键映射等）\n- 再次点击遥控器按键可取消选定\n- 修复真键盘 Home / 音量± / Menu 被整键误吞\n- 初始化过程任务栏/托盘显示黄黑图标，语音就绪后恢复蓝标",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.1",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.1",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.6.1/Voice%20VibeCoding_1.6.1_x64-setup.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.6.1/Voice.VibeCoding_1.6.1_x64-setup.exe"
+  "version": "1.6.2",
+  "notes": "v1.6.2：\n- 更新升级安装逻辑，一键装完，无需操作\n- 更换图标与托盘三态：黄=初始化中，红=异常，绿=正常运行",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.2",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.2",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.6.2/Voice%20VibeCoding_1.6.2_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.6.2/Voice.VibeCoding_1.6.2_x64-setup.exe"
 }

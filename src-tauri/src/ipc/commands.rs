@@ -527,7 +527,15 @@ pub fn xiaomi_host_status_now(app: &AppHandle) -> XiaomiHostStatus {
 
     let voice_ready =
         bridge_alive && audio_alive && cable_ready && winuhid_ready && atvv_ok;
-    crate::ipc::tray::sync_runtime_icons(app, voice_ready);
+    // 托盘：绿=语音就绪；红=桥接在跑但未完全就绪；黄=尚未起来
+    let tray_kind = if voice_ready {
+        crate::ipc::tray::TrayIconKind::Ready
+    } else if bridge_alive {
+        crate::ipc::tray::TrayIconKind::Error
+    } else {
+        crate::ipc::tray::TrayIconKind::Init
+    };
+    crate::ipc::tray::sync_runtime_icons(app, tray_kind);
 
     XiaomiHostStatus {
         bridge_alive,
@@ -559,7 +567,7 @@ pub fn restart_xiaomi_bridge_inner(
 ) -> Result<(), String> {
     log::info!("XIAOMI host: restart bridge requested");
     append_host_log(config_manager, "bridge restart requested");
-    crate::ipc::tray::sync_runtime_icons(app, false);
+    crate::ipc::tray::sync_runtime_icons(app, crate::ipc::tray::TrayIconKind::Init);
 
     // 仅停 BLE worker；HID Tap 为进程级单例，重启不解绑 30684（避免自占用）
     if let Some(runtime) = app.try_state::<Arc<XiaomiRuntime>>() {

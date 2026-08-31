@@ -347,18 +347,167 @@ fn download_setup(app: &AppHandle, url: &str, dest: &Path) -> Result<(), String>
     Ok(())
 }
 
+/// 从 UninstallString（可能带引号/参数）解析 uninstall.exe 路径。
+pub fn parse_uninstall_exe_path(uninstall_string: &str) -> Option<PathBuf> {
+    let s = uninstall_string.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let path = if s.starts_with('"') {
+        let rest = &s[1..];
+        let end = rest.find('"')?;
+        rest[..end].to_string()
+    } else {
+        s.split_whitespace().next()?.to_string()
+    };
+    let p = PathBuf::from(path);
+    let name = p.file_name()?.to_string_lossy();
+    if name.eq_ignore_ascii_case("uninstall.exe")
+        || p.extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+    {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+const PRODUCT_DISPLAY_NAME: &str = "Voice VibeCoding";
+
 #[cfg(target_os = "windows")]
-fn launch_installer(path: &Path) -> Result<(), String> {
-    std::process::Command::new(path)
+fn lookup_uninstall_string_in_hive(hive: winreg::HKEY, subkey: &str) -> Option<String> {
+    use winreg::enums::KEY_READ;
+    use winreg::RegKey;
+    let root = RegKey::predef(hive);
+    let uninstall = root.open_subkey_with_flags(subkey, KEY_READ).ok()?;
+    for name in uninstall.enum_keys().filter_map(|k| k.ok()) {
+        let key = uninstall.open_subkey_with_flags(&name, KEY_READ).ok()?;
+        let display: String = key.get_value("DisplayName").ok()?;
+        if display.trim() != PRODUCT_DISPLAY_NAME {
+            continue;
+        }
+        let uninstall_string: String = key.get_value("UninstallString").ok()?;
+        if !uninstall_string.trim().is_empty() {
+            return Some(uninstall_string);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+pub fn find_installed_uninstall_exe() -> Option<PathBuf> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    const UNINSTALL: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
+    const UNINSTALL_WOW: &str =
+        r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall";
+    for (hive, sub) in [
+        (HKEY_CURRENT_USER, UNINSTALL),
+        (HKEY_LOCAL_MACHINE, UNINSTALL),
+        (HKEY_LOCAL_MACHINE, UNINSTALL_WOW),
+    ] {
+        if let Some(s) = lookup_uninstall_string_in_hive(hive, sub) {
+            if let Some(p) = parse_uninstall_exe_path(&s) {
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn find_installed_uninstall_exe() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn launch_silent_upgrade(setup: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+    let uninstall = find_installed_uninstall_exe();
+    let pid = std::process::id();
+    let batch = build_silent_upgrade_batch(pid, uninstall.as_deref(), setup);
+    let bat_path = std::env::temp_dir().join(format!(
+        "voice_vibecoding_silent_upgrade_{pid}.cmd"
+    ));
+    std::fs::write(&bat_path, batch.as_bytes())
+        .map_err(|e| format!("写入升级脚本失败: {e}"))?;
+
+    std::process::Command::new("cmd.exe")
+        .args(["/C", &bat_path.display().to_string()])
+        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
         .spawn()
-        .map_err(|e| format!("启动安装程序失败: {e}"))?;
+        .map_err(|e| format!("启动静默升级失败: {e}"))?;
+    log::info!(
+        "UPDATE silent upgrade scheduled setup={} uninstall={} bat={}",
+        setup.display(),
+        uninstall
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(none)".into()),
+        bat_path.display()
+    );
     Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
-fn launch_installer(path: &Path) -> Result<(), String> {
-    let _ = path;
+fn launch_silent_upgrade(setup: &Path) -> Result<(), String> {
+    let _ = setup;
     Err("仅支持 Windows 安装包".into())
+}
+
+#[cfg(target_os = "windows")]
+fn launch_installer(path: &Path) -> Result<(), String> {
+    launch_silent_upgrade(path)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn launch_installer(path: &Path) -> Result<(), String> {
+    launch_silent_upgrade(path)
+}
+
+/// Tauri NSIS：静默安装 + 装完自动运行主程序。
+pub fn silent_install_args() -> [&'static str; 2] {
+    ["/S", "/R"]
+}
+
+/// Tauri NSIS：静默卸载且保留用户数据（AppData）。
+pub fn silent_uninstall_keep_data_args() -> [&'static str; 2] {
+    ["/S", "/UPDATE"]
+}
+
+/// 生成升级批处理：等旧进程退出 →（可选）静默卸旧 → 静默装新并 `/R` 启动。
+pub fn build_silent_upgrade_batch(
+    wait_pid: u32,
+    uninstall_exe: Option<&Path>,
+    setup_exe: &Path,
+) -> String {
+    let setup = setup_exe.display().to_string();
+    let mut lines = vec![
+        "@echo off".to_string(),
+        "setlocal".to_string(),
+        format!("set \"WAIT_PID={wait_pid}\""),
+        ":wait_exit".to_string(),
+        "tasklist /FI \"PID eq %WAIT_PID%\" 2>nul | findstr /I \"%WAIT_PID%\" >nul".to_string(),
+        "if not errorlevel 1 (".to_string(),
+        "  timeout /t 1 /nobreak >nul".to_string(),
+        "  goto wait_exit".to_string(),
+        ")".to_string(),
+    ];
+    if let Some(un) = uninstall_exe {
+        let un_s = un.display().to_string();
+        let uargs = silent_uninstall_keep_data_args().join(" ");
+        lines.push(format!("if exist \"{un_s}\" ("));
+        lines.push(format!("  start /wait \"\" \"{un_s}\" {uargs}"));
+        lines.push(")".to_string());
+    }
+    let iargs = silent_install_args().join(" ");
+    lines.push(format!("start \"\" \"{setup}\" {iargs}"));
+    lines.push("endlocal".to_string());
+    lines.join("\r\n") + "\r\n"
 }
 
 pub fn spawn_download(
@@ -394,13 +543,18 @@ pub fn spawn_download(
             match result {
                 Ok(()) => match launch_installer(&dest) {
                     Ok(()) => {
-                        log::info!("UPDATE download complete, installer launched: {}", dest.display());
+                        log::info!(
+                            "UPDATE download complete, silent upgrade scheduled: {}",
+                            dest.display()
+                        );
                         let _ = app_bg.emit(
                             "app-update-download-complete",
                             DownloadCompletePayload {
                                 path: dest.display().to_string(),
                             },
                         );
+                        // 批处理会等本进程退出后再卸旧/装新
+                        app_bg.exit(0);
                     }
                     Err(e) => {
                         log::warn!("UPDATE installer launch failed: {e}");
@@ -485,5 +639,49 @@ mod tests {
         };
         assert!(should_emit_passive_prompt(&active));
         assert!(!should_emit_passive_prompt(&suppressed));
+    }
+
+    #[test]
+    fn silent_install_args_are_s_and_r() {
+        // /S 静默；/R 装完自动打开（Tauri NSIS .onInstSuccess）
+        assert_eq!(silent_install_args(), ["/S", "/R"]);
+    }
+
+    #[test]
+    fn silent_uninstall_keep_data_args_are_s_and_update() {
+        // /S 静默卸；/UPDATE 保留 AppData（不删用户配置）
+        assert_eq!(silent_uninstall_keep_data_args(), ["/S", "/UPDATE"]);
+    }
+
+    #[test]
+    fn upgrade_batch_waits_then_uninstalls_then_installs() {
+        let batch = build_silent_upgrade_batch(
+            4242,
+            Some(Path::new(r"C:\Program Files\Voice VibeCoding\uninstall.exe")),
+            Path::new(r"C:\Users\me\updates\VoiceVibeCoding_1.6.2_x64-setup.exe"),
+        );
+        assert!(batch.contains("WAIT_PID=4242"), "must wait for old pid");
+        assert!(
+            batch.contains(r#""C:\Program Files\Voice VibeCoding\uninstall.exe" /S /UPDATE"#),
+            "uninstall keep-data: {batch}"
+        );
+        assert!(
+            batch.contains(r#""C:\Users\me\updates\VoiceVibeCoding_1.6.2_x64-setup.exe" /S /R"#),
+            "silent install+run: {batch}"
+        );
+        let un_pos = batch.find("/S /UPDATE").expect("uninstall args");
+        let in_pos = batch.find("/S /R").expect("install args");
+        assert!(un_pos < in_pos, "uninstall must run before install");
+    }
+
+    #[test]
+    fn upgrade_batch_skips_uninstall_when_absent() {
+        let batch = build_silent_upgrade_batch(
+            7,
+            None,
+            Path::new(r"D:\setup.exe"),
+        );
+        assert!(!batch.to_ascii_lowercase().contains("uninstall.exe"));
+        assert!(batch.contains(r#""D:\setup.exe" /S /R"#));
     }
 }

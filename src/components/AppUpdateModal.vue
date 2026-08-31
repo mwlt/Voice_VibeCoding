@@ -88,7 +88,7 @@ function progressWidth(): string {
             :disabled="isDownloading || downloadPhase === 'complete'"
             @click="store.startDownload()"
           >
-            {{ isDownloading ? "下载中…" : downloadPhase === "complete" ? "已启动安装" : "下载并安装" }}
+            {{ isDownloading ? "下载中…" : downloadPhase === "complete" ? "正在升级…" : "下载并安装" }}
           </button>
           <button
             class="update-btn update-btn-secondary"
