@@ -1,0 +1,10 @@
+D:\00vscode_workspace\remote-bridge-hub-master\xiaomi_remote_2_pro_rust_deepseek\tools\silent-updater\target\release\deps\litemap-aba1d24df9943d9b.d: C:\Users\mwlt_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\litemap-0.8.3\src\lib.rs C:\Users\mwlt_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\litemap-0.8.3\src\map.rs C:\Users\mwlt_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\litemap-0.8.3\src\store\mod.rs C:\Users\mwlt_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\litemap-0.8.3\src\store\slice_impl.rs
+
+D:\00vscode_workspace\remote-bridge-hub-master\xiaomi_remote_2_pro_rust_deepseek\tools\silent-updater\target\release\deps\liblitemap-aba1d24df9943d9b.rlib: C:\Users\mwlt_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\litemap-0.8.3\src\lib.rs C:\Users\mwlt_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\litemap-0.8.3\src\map.rs C:\Users\mwlt_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\litemap-0.8.3\src\store\mod.rs C:\Users\mwlt_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\litemap-0.8.3\src\store\slice_impl.rs
+
+D:\00vscode_workspace\remote-bridge-hub-master\xiaomi_remote_2_pro_rust_deepseek\tools\silent-updater\target\release\deps\liblitemap-aba1d24df9943d9b.rmeta: C:\Users\mwlt_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\litemap-0.8.3\src\lib.rs C:\Users\mwlt_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\litemap-0.8.3\src\map.rs C:\Users\mwlt_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\litemap-0.8.3\src\store\mod.rs C:\Users\mwlt_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\litemap-0.8.3\src\store\slice_impl.rs
+
+C:\Users\mwlt_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\litemap-0.8.3\src\lib.rs:
+C:\Users\mwlt_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\litemap-0.8.3\src\map.rs:
+C:\Users\mwlt_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\litemap-0.8.3\src\store\mod.rs:
+C:\Users\mwlt_\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\litemap-0.8.3\src\store\slice_impl.rs:

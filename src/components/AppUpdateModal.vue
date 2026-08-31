@@ -38,7 +38,7 @@ function progressWidth(): string {
         <div class="update-dialog-scroll">
           <h3 id="app-update-title">发现新版本 V{{ updateInfo.latestVersion }}</h3>
           <p class="update-intro">
-            当前版本 V{{ updateInfo.currentVersion }}。可在软件内下载安装包，完成后自动启动安装程序（安装前请先退出本软件）。
+            当前版本 V{{ updateInfo.currentVersion }}。点击「下载并安装」后将自动静默升级（保留配置），一般只需确认一次系统权限（UAC）。
           </p>
           <p v-if="updateInfo.promptSuppressed" class="update-suppressed-hint" role="note">
             您已关闭此版本的自动提醒；仍可在此下载安装。

@@ -1,0 +1,1 @@
+D:\00vscode_workspace\remote-bridge-hub-master\xiaomi_remote_2_pro_rust_deepseek\tools\silent-updater\target\release\voice-vibecoding-silent-updater.exe: D:\00vscode_workspace\remote-bridge-hub-master\xiaomi_remote_2_pro_rust_deepseek\tools\silent-updater\src\main.rs

@@ -505,7 +505,8 @@ pub fn build_silent_upgrade_batch(
         lines.push(")".to_string());
     }
     let iargs = silent_install_args().join(" ");
-    lines.push(format!("start \"\" \"{setup}\" {iargs}"));
+    // /wait：等 UAC/安装结束；引号标题占位避免路径被 start 误解析
+    lines.push(format!("start /wait \"\" \"{setup}\" {iargs}"));
     lines.push("endlocal".to_string());
     lines.join("\r\n") + "\r\n"
 }
@@ -668,6 +669,10 @@ mod tests {
         assert!(
             batch.contains(r#""C:\Users\me\updates\VoiceVibeCoding_1.6.2_x64-setup.exe" /S /R"#),
             "silent install+run: {batch}"
+        );
+        assert!(
+            batch.contains("start /wait"),
+            "install must wait for UAC/setup: {batch}"
         );
         let un_pos = batch.find("/S /UPDATE").expect("uninstall args");
         let in_pos = batch.find("/S /R").expect("install args");
