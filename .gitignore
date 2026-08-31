@@ -48,3 +48,6 @@ credentials.json
 /*.msi
 /*-setup.exe
 docs/install-winuhid(1).ps1
+
+tools/silent-updater/target/
+
