@@ -194,7 +194,11 @@ export const IME_PRESETS: Record<ImePresetId, ImePresetDefinition> = {
 };
 
 /** 千问 Tab：共用说明 + 三个快速应用按钮 */
-export const QIANWEN_GUIDE = {
+export const QIANWEN_GUIDE: {
+  title: string;
+  tag: string;
+  steps: ImeSetupStep[];
+} = {
   title: "按住说话",
   tag: "三选一",
   steps: [
@@ -204,7 +208,7 @@ export const QIANWEN_GUIDE = {
     { text: "Ctrl+Win、Win+Alt 需要虚拟键盘就绪。" },
     { text: "按住遥控语音键说话，松手结束并上屏。" },
   ],
-} as const;
+};
 
 export const QIANWEN_PRESET_IDS: ImePresetId[] = [
   "qianwen-ctrl-win",
