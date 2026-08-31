@@ -253,7 +253,7 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
       unlistenComplete = await listen<{ path: string }>("app-update-download-complete", () => {
         downloadPhase.value = "complete";
         downloadMessage.value =
-          "已开始静默升级：将自动退出并卸载旧版（保留配置），安装新版后自动打开。";
+          "已开始静默升级：本程序即将退出，随后显示升级进度窗（卸旧装新、保留配置），完成后自动打开新版。";
       });
     } catch (e) {
       console.warn("listen app-update-download-complete failed:", e);

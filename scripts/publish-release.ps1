@@ -6,8 +6,8 @@
 #   .\scripts\publish-release.ps1 -Version 1.6.1 -Tag v1.6.1 -NotesPath update\release-notes-v1.6.1.md
 
 param(
-    [string]$Version = "1.6.3",
-    [string]$Tag = "v1.6.3",
+    [string]$Version = "1.6.4",
+    [string]$Tag = "v1.6.4",
     [string]$NotesPath = ""
 )
 

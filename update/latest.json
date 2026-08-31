@@ -1,8 +1,8 @@
 {
-  "version": "1.6.3",
-  "notes": "v1.6.3：\n- 启动后按顺序自动修复未就绪项：虚拟声卡 → 虚拟键盘 → 等语音路由 → 等桥接落定 → ATVV\n- 图标更换为更易识别：托盘蓝=正常、黄=初始化中、红=异常",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.3",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.3",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.6.3/Voice%20VibeCoding_1.6.3_x64-setup.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.6.3/Voice.VibeCoding_1.6.3_x64-setup.exe"
+  "version": "1.6.4",
+  "notes": "v1.6.4：\n- 修复应用内静默升级：去掉 cmd 黑框，改用隐藏 PowerShell；显示升级进度窗；确保卸旧装新后自动打开\n- 承袭 v1.6.3：启动环境自动修复；托盘蓝/黄/红三态图标",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.4",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.4",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.6.4/Voice%20VibeCoding_1.6.4_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.6.4/Voice.VibeCoding_1.6.4_x64-setup.exe"
 }

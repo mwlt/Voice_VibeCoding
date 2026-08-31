@@ -425,30 +425,32 @@ pub fn find_installed_uninstall_exe() -> Option<PathBuf> {
 fn launch_silent_upgrade(setup: &Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
 
     let uninstall = find_installed_uninstall_exe();
     let pid = std::process::id();
-    let batch = build_silent_upgrade_batch(pid, uninstall.as_deref(), setup);
-    let bat_path = std::env::temp_dir().join(format!(
-        "voice_vibecoding_silent_upgrade_{pid}.cmd"
+    let script = build_silent_upgrade_ps1(pid, uninstall.as_deref(), setup);
+    let ps_path = std::env::temp_dir().join(format!(
+        "voice_vibecoding_silent_upgrade_{pid}.ps1"
     ));
-    std::fs::write(&bat_path, batch.as_bytes())
-        .map_err(|e| format!("写入升级脚本失败: {e}"))?;
+    // UTF-8 BOM：避免中文进度文案在 powershell -File 下乱码
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend_from_slice(script.as_bytes());
+    std::fs::write(&ps_path, bytes).map_err(|e| format!("写入升级脚本失败: {e}"))?;
 
-    std::process::Command::new("cmd.exe")
-        .args(["/C", &bat_path.display().to_string()])
-        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+    let args = silent_upgrade_powershell_args(&ps_path);
+    std::process::Command::new("powershell.exe")
+        .args(&args)
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("启动静默升级失败: {e}"))?;
     log::info!(
-        "UPDATE silent upgrade scheduled setup={} uninstall={} bat={}",
+        "UPDATE silent upgrade scheduled setup={} uninstall={} ps1={}",
         setup.display(),
         uninstall
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(none)".into()),
-        bat_path.display()
+        ps_path.display()
     );
     Ok(())
 }
@@ -479,36 +481,137 @@ pub fn silent_uninstall_keep_data_args() -> [&'static str; 2] {
     ["/S", "/UPDATE"]
 }
 
-/// 生成升级批处理：等旧进程退出 →（可选）静默卸旧 → 静默装新并 `/R` 启动。
+/// 启动升级脚本用的 powershell.exe 参数（无窗口）。
+pub fn silent_upgrade_powershell_args(script_path: &Path) -> Vec<String> {
+    vec![
+        "-NoProfile".into(),
+        "-WindowStyle".into(),
+        "Hidden".into(),
+        "-ExecutionPolicy".into(),
+        "Bypass".into(),
+        "-File".into(),
+        script_path.display().to_string(),
+    ]
+}
+
+fn ps_single_quote(path: &Path) -> String {
+    let s = path.display().to_string().replace('\'', "''");
+    format!("'{s}'")
+}
+
+/// 生成静默升级 PowerShell：等旧进程退出 → 清残留 →（可选）卸旧 → 装新并 `/R`。
+/// 子进程 Hidden；仅显示一个无按钮的进度窗（非 MessageBox）。
+pub fn build_silent_upgrade_ps1(
+    wait_pid: u32,
+    uninstall_exe: Option<&Path>,
+    setup_exe: &Path,
+) -> String {
+    let setup_q = ps_single_quote(setup_exe);
+    let uninstall_block = if let Some(un) = uninstall_exe {
+        let un_q = ps_single_quote(un);
+        format!(
+            r#"
+$Uninstall = {un_q}
+if (Test-Path -LiteralPath $Uninstall) {{
+  Set-ProgressText '正在卸载旧版本（保留配置）…'
+  [void](Invoke-HiddenProcess -FilePath $Uninstall -ArgumentList @('/S','/UPDATE'))
+  Start-Sleep -Milliseconds 800
+}}
+"#
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        r#"$ErrorActionPreference = 'Continue'
+$WaitPid = {wait_pid}
+$Setup = {setup_q}
+$Log = Join-Path $env:TEMP 'voice_vibecoding_silent_upgrade.log'
+function Write-UpgradeLog([string]$Message) {{
+  $line = '[{{0}}] {{1}}' -f (Get-Date -Format 'o'), $Message
+  Add-Content -LiteralPath $Log -Value $line -Encoding UTF8
+}}
+Write-UpgradeLog ("begin wait_pid=" + $WaitPid + " setup=" + $Setup)
+
+try {{ Wait-Process -Id $WaitPid -ErrorAction SilentlyContinue }} catch {{ }}
+Start-Sleep -Seconds 2
+Get-Process -Name 'remote-bridge-hub' -ErrorAction SilentlyContinue | ForEach-Object {{
+  Write-UpgradeLog ("stop leftover pid=" + $_.Id)
+  Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+}}
+Start-Sleep -Seconds 1
+
+Add-Type -AssemblyName System.Windows.Forms | Out-Null
+Add-Type -AssemblyName System.Drawing | Out-Null
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'Voice VibeCoding'
+$form.StartPosition = 'CenterScreen'
+$form.FormBorderStyle = 'FixedDialog'
+$form.MaximizeBox = $false
+$form.MinimizeBox = $false
+$form.ControlBox = $false
+$form.TopMost = $true
+$form.ShowInTaskbar = $true
+$form.ClientSize = New-Object System.Drawing.Size(380, 110)
+$label = New-Object System.Windows.Forms.Label
+$label.AutoSize = $false
+$label.SetBounds(16, 16, 348, 28)
+$label.Text = '正在升级，请稍候…'
+$label.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10)
+$bar = New-Object System.Windows.Forms.ProgressBar
+$bar.Style = 'Marquee'
+$bar.MarqueeAnimationSpeed = 30
+$bar.SetBounds(16, 56, 348, 22)
+$form.Controls.Add($label)
+$form.Controls.Add($bar)
+$form.Show()
+[System.Windows.Forms.Application]::DoEvents()
+
+function Set-ProgressText([string]$Text) {{
+  $label.Text = $Text
+  [System.Windows.Forms.Application]::DoEvents()
+}}
+
+function Invoke-HiddenProcess {{
+  param([string]$FilePath, [string[]]$ArgumentList)
+  Write-UpgradeLog ("run " + $FilePath + " " + ($ArgumentList -join ' '))
+  $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WindowStyle Hidden -PassThru
+  while ($null -ne $p -and -not $p.HasExited) {{
+    [System.Windows.Forms.Application]::DoEvents()
+    Start-Sleep -Milliseconds 200
+  }}
+  $code = if ($null -eq $p) {{ -1 }} else {{ $p.ExitCode }}
+  Write-UpgradeLog ("exit_code=" + $code)
+  return $code
+}}
+{uninstall_block}
+Set-ProgressText '正在安装新版本…'
+$installCode = Invoke-HiddenProcess -FilePath $Setup -ArgumentList @('/S','/R')
+Start-Sleep -Seconds 1
+$exe = Join-Path $env:ProgramFiles 'Voice VibeCoding\remote-bridge-hub.exe'
+if (-not (Get-Process -Name 'remote-bridge-hub' -ErrorAction SilentlyContinue)) {{
+  if (Test-Path -LiteralPath $exe) {{
+    Write-UpgradeLog 'fallback launch after install'
+    Start-Process -FilePath $exe
+  }}
+}}
+Set-ProgressText '升级完成'
+[System.Windows.Forms.Application]::DoEvents()
+Start-Sleep -Milliseconds 600
+$form.Close()
+Write-UpgradeLog ("done install_code=" + $installCode)
+"#
+    )
+}
+
+/// 兼容旧测试名：现改为生成 PowerShell 脚本内容。
 pub fn build_silent_upgrade_batch(
     wait_pid: u32,
     uninstall_exe: Option<&Path>,
     setup_exe: &Path,
 ) -> String {
-    let setup = setup_exe.display().to_string();
-    let mut lines = vec![
-        "@echo off".to_string(),
-        "setlocal".to_string(),
-        format!("set \"WAIT_PID={wait_pid}\""),
-        ":wait_exit".to_string(),
-        "tasklist /FI \"PID eq %WAIT_PID%\" 2>nul | findstr /I \"%WAIT_PID%\" >nul".to_string(),
-        "if not errorlevel 1 (".to_string(),
-        "  timeout /t 1 /nobreak >nul".to_string(),
-        "  goto wait_exit".to_string(),
-        ")".to_string(),
-    ];
-    if let Some(un) = uninstall_exe {
-        let un_s = un.display().to_string();
-        let uargs = silent_uninstall_keep_data_args().join(" ");
-        lines.push(format!("if exist \"{un_s}\" ("));
-        lines.push(format!("  start /wait \"\" \"{un_s}\" {uargs}"));
-        lines.push(")".to_string());
-    }
-    let iargs = silent_install_args().join(" ");
-    // /wait：等 UAC/安装结束；引号标题占位避免路径被 start 误解析
-    lines.push(format!("start /wait \"\" \"{setup}\" {iargs}"));
-    lines.push("endlocal".to_string());
-    lines.join("\r\n") + "\r\n"
+    build_silent_upgrade_ps1(wait_pid, uninstall_exe, setup_exe)
 }
 
 pub fn spawn_download(
@@ -655,38 +758,53 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_batch_waits_then_uninstalls_then_installs() {
-        let batch = build_silent_upgrade_batch(
+    fn upgrade_ps1_waits_then_uninstalls_then_installs() {
+        let script = build_silent_upgrade_ps1(
             4242,
             Some(Path::new(r"C:\Program Files\Voice VibeCoding\uninstall.exe")),
             Path::new(r"C:\Users\me\updates\VoiceVibeCoding_1.6.2_x64-setup.exe"),
         );
-        assert!(batch.contains("WAIT_PID=4242"), "must wait for old pid");
+        assert!(script.contains("4242"), "must wait for old pid");
+        assert!(script.contains("Wait-Process"));
+        assert!(!script.to_ascii_lowercase().contains("timeout"));
+        assert!(!script.to_ascii_lowercase().contains("start /wait"));
         assert!(
-            batch.contains(r#""C:\Program Files\Voice VibeCoding\uninstall.exe" /S /UPDATE"#),
-            "uninstall keep-data: {batch}"
+            script.contains(r"C:\Program Files\Voice VibeCoding\uninstall.exe"),
+            "uninstall path: {script}"
         );
+        assert!(script.contains("/UPDATE"));
         assert!(
-            batch.contains(r#""C:\Users\me\updates\VoiceVibeCoding_1.6.2_x64-setup.exe" /S /R"#),
-            "silent install+run: {batch}"
+            script.contains(r"C:\Users\me\updates\VoiceVibeCoding_1.6.2_x64-setup.exe"),
+            "setup path: {script}"
         );
-        assert!(
-            batch.contains("start /wait"),
-            "install must wait for UAC/setup: {batch}"
-        );
-        let un_pos = batch.find("/S /UPDATE").expect("uninstall args");
-        let in_pos = batch.find("/S /R").expect("install args");
+        assert!(script.contains("/R"));
+        assert!(script.contains("Hidden"));
+        let un_pos = script.find("/UPDATE").expect("uninstall args");
+        let in_pos = script.find("/R").expect("install args");
         assert!(un_pos < in_pos, "uninstall must run before install");
     }
 
     #[test]
-    fn upgrade_batch_skips_uninstall_when_absent() {
-        let batch = build_silent_upgrade_batch(
-            7,
-            None,
-            Path::new(r"D:\setup.exe"),
+    fn upgrade_ps1_skips_uninstall_when_absent() {
+        let script = build_silent_upgrade_ps1(7, None, Path::new(r"D:\setup.exe"));
+        assert!(!script.to_ascii_lowercase().contains("uninstall.exe"));
+        assert!(script.contains(r"D:\setup.exe"));
+    }
+
+    #[test]
+    fn powershell_launch_args_hidden() {
+        let args = silent_upgrade_powershell_args(Path::new(r"C:\Temp\u.ps1"));
+        assert_eq!(
+            args,
+            vec![
+                "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                r"C:\Temp\u.ps1",
+            ]
         );
-        assert!(!batch.to_ascii_lowercase().contains("uninstall.exe"));
-        assert!(batch.contains(r#""D:\setup.exe" /S /R"#));
     }
 }
