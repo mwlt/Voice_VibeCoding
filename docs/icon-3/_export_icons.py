@@ -1,6 +1,13 @@
-"""Export docs/icon-3 masters into src-tauri/icons at the sizes the app expects."""
+"""Export docs/icon-3 masters into src-tauri/icons at the sizes the app expects.
+
+Important for Windows/Tauri:
+- icon.ico first entry must be 32x32 (Tauri codegen embeds entries[0] as the
+  runtime window/taskbar icon). A leading 16x16 loses mic detail and looks wrong.
+"""
 from __future__ import annotations
 
+import io
+import struct
 from pathlib import Path
 
 from PIL import Image
@@ -26,7 +33,7 @@ def content_bbox(im: Image.Image, a_thr: int = 8):
     return (minx, miny, maxx + 1, maxy + 1)
 
 
-def square_crop_pad(im: Image.Image, pad_ratio: float = 0.04, out_size: int = 1024) -> Image.Image:
+def square_crop_pad(im: Image.Image, pad_ratio: float = 0.02, out_size: int = 1024) -> Image.Image:
     bb = content_bbox(im)
     if not bb:
         return im.resize((out_size, out_size), Image.Resampling.LANCZOS)
@@ -42,7 +49,7 @@ def square_crop_pad(im: Image.Image, pad_ratio: float = 0.04, out_size: int = 10
     return canvas.resize((out_size, out_size), Image.Resampling.LANCZOS)
 
 
-def harden_alpha(im: Image.Image, cut: int = 20) -> Image.Image:
+def harden_alpha(im: Image.Image, cut: int = 16) -> Image.Image:
     im = im.copy()
     px = im.load()
     w, h = im.size
@@ -54,7 +61,7 @@ def harden_alpha(im: Image.Image, cut: int = 20) -> Image.Image:
     return im
 
 
-def load_master(name: str, pad_ratio: float = 0.04) -> Image.Image:
+def load_master(name: str, pad_ratio: float = 0.02) -> Image.Image:
     path = SRC / name
     if not path.exists():
         raise FileNotFoundError(path)
@@ -69,31 +76,52 @@ def save_png(img: Image.Image, path: Path) -> None:
     print(f"  {path.name} {img.size[0]}x{img.size[1]}")
 
 
-def make_ico(src: Image.Image, path: Path) -> None:
-    sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-    # PNG-compressed ICO entries keep alpha (BMP path often collapses to tiny/broken files)
-    src.save(path, format="ICO", sizes=sizes, bitmap_format="png")
-    print(f"  {path.name} ico {path.stat().st_size} bytes")
+def png_bytes(im: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def write_ico(path: Path, images: list[Image.Image]) -> None:
+    """Write multi-size ICO. Caller controls entry order (first = Tauri window icon)."""
+    entries: list[tuple[int, int, int, int]] = []
+    blobs: list[bytes] = []
+    offset = 6 + 16 * len(images)
+    for im in images:
+        blob = png_bytes(im)
+        w, h = im.size
+        entries.append((0 if w >= 256 else w, 0 if h >= 256 else h, len(blob), offset))
+        blobs.append(blob)
+        offset += len(blob)
+    out = io.BytesIO()
+    out.write(struct.pack("<HHH", 0, 1, len(images)))
+    for w, h, size, off in entries:
+        out.write(struct.pack("<BBBBHHII", w, h, 0, 0, 1, 32, size, off))
+    for b in blobs:
+        out.write(b)
+    path.write_bytes(out.getvalue())
+    print(f"  {path.name} ico {path.stat().st_size} bytes, first={images[0].size[0]}x{images[0].size[1]}")
 
 
 def main() -> None:
-    # 主图 → 窗口/任务栏/安装包图标
-    app = load_master("主.png", pad_ratio=0.03)
-    app512 = app.resize((512, 512), Image.Resampling.LANCZOS)
+    app = load_master("主.png", pad_ratio=0.02)
     save_png(app.resize((32, 32), Image.Resampling.LANCZOS), ICONS / "32x32.png")
     save_png(app.resize((128, 128), Image.Resampling.LANCZOS), ICONS / "128x128.png")
     save_png(app.resize((256, 256), Image.Resampling.LANCZOS), ICONS / "128x128@2x.png")
-    save_png(app512, ICONS / "icon.png")
-    make_ico(app, ICONS / "icon.ico")
+    save_png(app.resize((512, 512), Image.Resampling.LANCZOS), ICONS / "icon.png")
 
-    # 初始化态命名资源（窗口仍用主图；保留 init 变体供备用）
-    init = load_master("托盘_黄色初始化.png", pad_ratio=0.03)
-    init512 = init.resize((512, 512), Image.Resampling.LANCZOS)
-    save_png(init512, ICONS / "icon-init.png")
+    # Tauri embeds ICO entries[0] as runtime window/taskbar icon — put 32x32 first.
+    ico_order = [32, 16, 24, 48, 64, 128, 256]
+    write_ico(
+        ICONS / "icon.ico",
+        [app.resize((s, s), Image.Resampling.LANCZOS) for s in ico_order],
+    )
+
+    init = load_master("托盘_黄色初始化.png", pad_ratio=0.02)
+    save_png(init.resize((512, 512), Image.Resampling.LANCZOS), ICONS / "icon-init.png")
     save_png(init.resize((32, 32), Image.Resampling.LANCZOS), ICONS / "32x32-init.png")
     save_png(init.resize((128, 128), Image.Resampling.LANCZOS), ICONS / "128x128-init.png")
 
-    # 托盘三态（文件名「拖盘」为源文件拼写）
     trays = [
         ("托盘_蓝色正常运行.png", "tray-icon"),
         ("托盘_黄色初始化.png", "tray-icon-init"),

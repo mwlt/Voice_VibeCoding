@@ -49,8 +49,9 @@ fn load_tray_icon(kind: TrayIconKind) -> Result<Image<'static>, tauri::Error> {
 }
 
 fn load_window_icon(_app: &AppHandle) -> Result<Image<'static>, tauri::Error> {
-    // 左上角 / 任务栏：固定用软件主图标（docs/icon-3/主.png → icon.ico / icon.png）
-    Image::from_bytes(include_bytes!("../../icons/icon.ico"))
+    // 任务栏/标题栏：用清晰的 128 PNG（不要用多尺寸 ICO——Tauri 常只取第一帧，
+    // 若第一帧是 16x16 会糊细节，看起来像“旧图标/糊图”）。
+    Image::from_bytes(include_bytes!("../../icons/128x128.png"))
         .or_else(|_| Image::from_bytes(include_bytes!("../../icons/icon.png")))
         .or_else(|_| Image::from_bytes(include_bytes!("../../icons/32x32.png")))
 }
@@ -64,9 +65,25 @@ fn apply_window_icon(app: &AppHandle) {
         if let Err(e) = win.set_icon(icon) {
             log::warn!("set window icon failed: {e}");
         } else {
-            log::info!("window/taskbar icon applied (main)");
+            log::info!("window/taskbar icon applied (128x128 main)");
         }
+    } else {
+        log::warn!("window icon: main webview not ready yet");
     }
+}
+
+/// 窗口显示后再设一次，避免启动早期 HWND 未就绪时 set_icon 无效。
+pub fn reapply_window_icon_later(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::Builder::new()
+        .name("reapply-window-icon".into())
+        .spawn(move || {
+            for delay_ms in [300_u64, 1200, 3000] {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                apply_window_icon(&app);
+            }
+        })
+        .ok();
 }
 
 fn tray_tooltip(kind: TrayIconKind) -> &'static str {
@@ -262,6 +279,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<TrayIcon, Box<dyn std::error::Error
     let icon = load_tray_icon(TrayIconKind::Init)?;
     TRAY_ICON_STATE.store(TrayIconKind::Init.code(), Ordering::SeqCst);
     apply_window_icon(app);
+    reapply_window_icon_later(app);
 
     let tray = TrayIconBuilder::with_id("main")
         .icon(icon)

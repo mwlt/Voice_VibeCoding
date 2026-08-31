@@ -1,8 +1,8 @@
 {
-  "version": "1.6.5",
-  "notes": "v1.6.5：\n- 任务栏/窗口/安装包主图标统一为 icon-3 蓝色麦克风主图\n- 便于从 v1.6.4 验证应用内静默升级",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.5",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.5",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.6.5/Voice%20VibeCoding_1.6.5_x64-setup.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.6.5/Voice.VibeCoding_1.6.5_x64-setup.exe"
+  "version": "1.6.6",
+  "notes": "v1.6.6：\n- 修复任务栏仍显示最早旧图标：ICO 改为 32x32 打头；运行时用 128 PNG 强制 set_icon\n- 请取消任务栏固定后重开，或注销一次以清 Windows 图标缓存",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.6",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.6",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.6.6/Voice%20VibeCoding_1.6.6_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.6.6/Voice.VibeCoding_1.6.6_x64-setup.exe"
 }
