@@ -2,7 +2,7 @@
 # Output: dist/WinUHid_Manual_<version>.zip
 
 param(
-    [string]$Version = "1.5.3"
+    [string]$Version = "1.6.1"
 )
 
 $ErrorActionPreference = "Stop"

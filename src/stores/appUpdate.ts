@@ -5,6 +5,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
 import type { AppUpdateDownloadProgress, AppUpdateInfo } from "../types";
 import {
+  APP_UPDATE_AUTO_OPEN_DELAY_MS,
+  shouldAutoOpenForSession as sessionAllowsAutoOpen,
   shouldAutoOpenModal,
   shouldOpenModalFromManualCheck,
   shouldShowPassivePrompt as passivePromptVisible,
@@ -57,6 +59,7 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
   let unlistenComplete: UnlistenFn | null = null;
   let unlistenError: UnlistenFn | null = null;
   let initialized = false;
+  let autoOpenTimer: ReturnType<typeof setTimeout> | null = null;
 
   const isDownloading = computed(() => downloadPhase.value === "downloading");
 
@@ -72,6 +75,13 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
     return `已下载 ${downloaded}`;
   });
 
+  function clearAutoOpenTimer() {
+    if (autoOpenTimer != null) {
+      clearTimeout(autoOpenTimer);
+      autoOpenTimer = null;
+    }
+  }
+
   function resetDownloadState() {
     downloadPhase.value = "idle";
     downloadProgress.value = null;
@@ -82,6 +92,17 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
     if (!info) return;
     const normalized = normalizeUpdateInfo(info);
     if (normalized.updateAvailable) {
+      const prev = updateInfo.value;
+      // 启动检测晚到的旧 payload 可能仍带 promptSuppressed=false；
+      // 不要覆盖本会话已忽略成功后的抑制态。
+      if (
+        prev?.latestVersion === normalized.latestVersion &&
+        prev.promptSuppressed &&
+        !normalized.promptSuppressed
+      ) {
+        normalized.promptSuppressed = true;
+        normalized.ignored = true;
+      }
       if (updateInfo.value?.latestVersion !== normalized.latestVersion) {
         resetDownloadState();
       }
@@ -95,8 +116,24 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
     }
   }
 
-  function shouldAutoOpenForSession(version: string): boolean {
-    return dismissedVersion() !== version;
+  function sessionAllowsOpen(version: string): boolean {
+    return sessionAllowsAutoOpen(version, dismissedVersion());
+  }
+
+  function scheduleAutoOpen(version: string) {
+    clearAutoOpenTimer();
+    autoOpenTimer = setTimeout(() => {
+      autoOpenTimer = null;
+      const cur = updateInfo.value;
+      if (
+        cur &&
+        cur.latestVersion === version &&
+        shouldAutoOpenModal(cur) &&
+        sessionAllowsOpen(cur.latestVersion)
+      ) {
+        showModal.value = true;
+      }
+    }, APP_UPDATE_AUTO_OPEN_DELAY_MS);
   }
 
   function onUpdateAvailable(info: AppUpdateInfo, autoOpen = false) {
@@ -106,15 +143,17 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
       autoOpen &&
       normalized &&
       shouldAutoOpenModal(normalized) &&
-      shouldAutoOpenForSession(normalized.latestVersion)
+      sessionAllowsOpen(normalized.latestVersion)
     ) {
-      showModal.value = true;
+      // 推迟弹窗，避免启动早期挡住桥接初始化与语音键操作
+      scheduleAutoOpen(normalized.latestVersion);
     }
   }
 
   function openModal(force = false) {
     const info = updateInfo.value;
     if (!info) return;
+    clearAutoOpenTimer();
     if (force) {
       if (shouldOpenModalFromManualCheck(info)) showModal.value = true;
       return;
@@ -124,6 +163,7 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
 
   function closeModal() {
     if (isDownloading.value) return;
+    clearAutoOpenTimer();
     showModal.value = false;
     const ver = updateInfo.value?.latestVersion;
     if (ver) markDismissed(ver);
@@ -164,14 +204,17 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
   async function ignoreCurrentUpdate() {
     const ver = updateInfo.value?.latestVersion;
     if (!ver || isDownloading.value) return;
+    // 先关窗 + session dismiss：否则启动检测晚到的 app-update-available
+    // 会再次 autoOpen，表现为「不再提醒没反应」。
+    clearAutoOpenTimer();
+    markDismissed(ver);
+    showModal.value = false;
     try {
       const result = await invoke<AppUpdateInfo>("ignore_app_update", { version: ver });
       applyUpdateInfo(result);
-      showModal.value = false;
       resetDownloadState();
     } catch (e) {
       console.warn("ignore_app_update failed:", e);
-      throw e;
     }
   }
 
@@ -235,6 +278,7 @@ export const useAppUpdateStore = defineStore("appUpdate", () => {
   }
 
   function dispose() {
+    clearAutoOpenTimer();
     unlistenUpdate?.();
     unlistenProgress?.();
     unlistenComplete?.();

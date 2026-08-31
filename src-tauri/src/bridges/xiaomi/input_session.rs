@@ -1002,12 +1002,12 @@ fn on_voice_remote_press(app: &AppHandle, gate: &KeyEmitGate, state: &Arc<Mutex<
     // ArmSessionState
     arm_atvv_voice_session(state, true);
 
-    // EnsurePcmReady — 同步优先，避免首包才 PING
-    voice_pcm::ensure_pcm_ready_on_press();
-
-    // ShortcutDown — 输入法先于 VB-CABLE CLEAR
+    // ShortcutDown — 先于 PCM ensure，唤醒不得被 UDP 冷启动阻塞
     key_mapping::on_remote_button(app, "mic", true);
     log::info!("XIAOMI ATVV AUDIO_START → shortcut DOWN");
+
+    // EnsurePcmReady — 注入后再 ensure（仍同步，避免首包才 PING）
+    voice_pcm::ensure_pcm_ready_on_press();
 
     // PcmClear
     voice_pcm::clear();
@@ -1312,9 +1312,7 @@ fn handle_atvv_control(
         0x08 => {
             key_mapping::mark_direct_signal("voice");
             key_mapping::mark_direct_signal("mic");
-            // MIC_OPEN 常比 0x04 / 固件 F5 更早：进入按压周期并吞 F5
-            key_mapping::begin_voice_period();
-            // 只保证钩子在跑。禁止 bump：卸钩空窗会漏 F5。
+            // 对齐 Python mark_voice_signal：只关联 mic，供 F5 钩子 wait；不 begin period / 不注入。
             crate::bridges::xiaomi::special_keys::ensure_hook_for_capture();
             if let Some(tx) = tx {
                 atvv_write_tx(tx, &[0x0C, 0x00], "MIC_OPEN");
@@ -1324,12 +1322,12 @@ fn handle_atvv_control(
         0x04 => {
             key_mapping::mark_direct_signal("voice");
             key_mapping::mark_direct_signal("mic");
-            key_mapping::begin_voice_period();
+            // period begin owned by handle_voice(pressed) — avoid double begin
             on_voice_remote_press(app, gate, state);
         }
         0x00 => {
             on_voice_remote_release(app, gate, state);
-            key_mapping::end_voice_period("atvv_0x00");
+            // period end owned by handle_voice(false) — avoid double end
         }
         0x0A if payload.len() >= 7 => {
             let predictor = i16::from_be_bytes([payload[4], payload[5]]) as i32;

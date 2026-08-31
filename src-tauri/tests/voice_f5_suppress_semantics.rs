@@ -5,7 +5,8 @@
 //! - 已 sticky 时，armed 3s 截止到期仍续期吞键（长按 typematic）
 //! - 长时间无 F5 事件 → 自动解粘（防永久吞真键盘 F5）
 //! - `disarm` 才是明确停手，一并清 sticky
-//! - orphan KEYUP 放行；无会话不吞物理 F5
+//! - **配对 KEYUP**：sticky 时吞 UP（Python parity）；无 sticky 的孤儿 UP 放行
+//! - 无会话不吞物理 F5 DOWN
 //!
 //! 运行: cargo test --test voice_f5_suppress_semantics -- --nocapture
 
@@ -13,7 +14,8 @@ use remote_bridge_hub_lib::bridges::xiaomi::key_mapping::{
     arm_voice_native_suppress, begin_voice_period, disarm_voice_native_suppress, end_voice_period,
     set_input_session_active, should_suppress_voice_f5, voice_f5_down_suppressed,
     voice_f5_expire_suppress_deadline_for_test, voice_f5_reset_for_test,
-    voice_f5_set_last_event_age_for_test, voice_native_suppress_active, VOICE_F5_STICKY_MAX_IDLE_MS,
+    voice_f5_set_last_event_age_for_test, voice_f5_expire_post_tail_for_test,
+    voice_native_suppress_active, VOICE_F5_STICKY_MAX_IDLE_MS,
 };
 use std::time::Duration;
 
@@ -34,8 +36,8 @@ fn end_voice_period_must_not_unstick_held_f5() {
         "end_voice_period must NOT clear sticky while F5 still held (DOWN path)"
     );
     assert!(
-        !should_suppress_voice_f5(false, true, false),
-        "KEYUP always passes and clears sticky"
+        should_suppress_voice_f5(false, true, false),
+        "paired KEYUP must suppress while sticky (Python parity)"
     );
     assert!(!voice_f5_down_suppressed());
     disarm_voice_native_suppress();
@@ -69,8 +71,8 @@ fn typematic_repeats_stay_suppressed_while_held() {
         assert!(should_suppress_voice_f5(true, false, false));
     }
     assert!(
-        !should_suppress_voice_f5(false, true, false),
-        "KEYUP always passes"
+        should_suppress_voice_f5(false, true, false),
+        "paired KEYUP must suppress after sticky typematic (Python parity)"
     );
     assert!(!voice_f5_down_suppressed());
     end_voice_period("test");
@@ -87,6 +89,7 @@ fn sticky_unsticks_when_f5_stream_stops() {
     assert!(voice_f5_down_suppressed());
     voice_f5_expire_suppress_deadline_for_test();
     voice_f5_set_last_event_age_for_test(VOICE_F5_STICKY_MAX_IDLE_MS + 50);
+    voice_f5_expire_post_tail_for_test();
     assert!(
         !should_suppress_voice_f5(true, false, false),
         "after idle > {VOICE_F5_STICKY_MAX_IDLE_MS}ms sticky must auto-release so physical F5 works"
@@ -124,17 +127,64 @@ fn disarm_clears_sticky_completely() {
 }
 
 #[test]
-fn f5_keyup_always_passes_even_after_suppressed_down() {
-    // 回归：网页键盘测试见 Ctrl+Win+F5 且 F5 粘死 → 因吞了 KEYUP。
-    // DOWN 可能已漏到链前钩子/系统；UP 必须放行才能解粘，否则微信热键变成 Ctrl+Win+F5。
+fn f5_keyup_suppressed_when_sticky_python_parity() {
+    // Python `_should_suppress_voice_f5`: UP returns matched sticky, then clears.
+    // Swallow paired UP so OS never sees orphan KEYUP after we ate DOWN.
     reset();
     begin_voice_period();
     assert!(should_suppress_voice_f5(true, false, false));
     assert!(voice_f5_down_suppressed());
-    assert!(!should_suppress_voice_f5(false, true, false));
-    assert!(!voice_f5_down_suppressed());
+    assert!(
+        should_suppress_voice_f5(false, true, false),
+        "paired F5 KEYUP must suppress when sticky (Python parity)"
+    );
+    assert!(
+        !voice_f5_down_suppressed(),
+        "UP path must clear sticky after swallow"
+    );
     end_voice_period("test");
     disarm_voice_native_suppress();
+}
+
+#[test]
+fn f5_keyup_must_pass_after_leaked_passthrough_even_if_sticky() {
+    // 实机 14:18：DOWN 先 leak_extra 进 OS，随后 sticky + keyup_suppress → F5 永久按下。
+    // 凡有过 passthrough DOWN，UP 必须放行解粘（即使 late mic 已补 sticky）。
+    use remote_bridge_hub_lib::bridges::xiaomi::key_mapping::{
+        mark_direct_signal, note_passthrough_f5_down,
+    };
+    reset();
+    set_input_session_active(true);
+    assert!(
+        !should_suppress_voice_f5(true, false, false),
+        "no guard → first F5 DOWN passthrough (leak)"
+    );
+    note_passthrough_f5_down();
+    mark_direct_signal("mic");
+    assert!(
+        voice_f5_down_suppressed(),
+        "late mic may set sticky after leaked DOWN"
+    );
+    assert!(
+        !should_suppress_voice_f5(false, true, false),
+        "UP must pass after leaked DOWN so OS can unstick F5"
+    );
+    assert!(!voice_f5_down_suppressed());
+    set_input_session_active(false);
+    disarm_voice_native_suppress();
+}
+
+#[test]
+fn f5_keyup_passes_when_never_sticky() {
+    // Orphan UP: DOWN leaked past us (sticky never set) → must pass to unstick OS.
+    reset();
+    set_input_session_active(true);
+    assert!(!voice_f5_down_suppressed());
+    assert!(
+        !should_suppress_voice_f5(false, true, false),
+        "F5 KEYUP must pass when no KEYDOWN was swallowed"
+    );
+    set_input_session_active(false);
 }
 
 #[test]
@@ -168,15 +218,23 @@ fn sticky_idle_constant_is_sane() {
 }
 
 #[test]
-fn suppress_path_must_not_sleep() {
+fn suppress_path_uses_bounded_mic_wait() {
     let src = include_str!("../src/bridges/xiaomi/key_mapping.rs");
     let body = src
+        .split("fn wait_for_mic_correlate")
+        .nth(1)
+        .and_then(|s| s.split("pub fn ").next())
+        .expect("wait_for_mic_correlate body");
+    assert!(
+        body.contains("thread::sleep"),
+        "bounded mic wait helper may sleep (Python parity, max 80ms)"
+    );
+    let suppress = src
         .split("pub fn should_suppress_voice_f5")
         .nth(1)
         .and_then(|s| s.split("pub fn ").next())
-        .expect("fn body");
-    assert!(!body.contains("thread::sleep"));
-    assert!(!body.contains("wait_for_direct_signal"));
+        .expect("should_suppress_voice_f5 body");
+    assert!(!suppress.contains("thread::sleep"));
 }
 
 #[test]

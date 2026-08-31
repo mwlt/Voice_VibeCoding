@@ -53,13 +53,13 @@ pub fn is_win_modifier(vk: u16) -> bool {
 
 /// UP 后应补 KEYUP 的修饰键。
 ///
-/// Win 必须无条件列入：HID 全零后 `GetAsyncKeyState` 常已读成抬起，
-/// 但 Explorer 仍把 LWin 当成按下（菜单键→Win 同一类粘滞）。
-/// 其它修饰键仅在仍 down 时补。
+/// **实验（2026-08-31）**：不再对 Win 无条件补 SendInput KEYUP。
+/// 原先 HID 松开后再补一次会导致键盘测试软件见双 SYSKeyUp；
+/// 用户实测是否影响微信语音唤醒。仅当 `GetAsyncKeyState` 仍报按下时才补。
 pub fn modifiers_to_recover(chord: &[u16], is_down: impl Fn(u16) -> bool) -> Vec<u16> {
     sanitizer_targets(chord)
         .into_iter()
-        .filter(|&vk| is_win_modifier(vk) || is_down(vk))
+        .filter(|&vk| is_down(vk))
         .collect()
 }
 
@@ -73,7 +73,7 @@ fn bump_recover(n: u32) {
     }
 }
 
-/// WinUHid UP 后：Win 无条件 SendInput KEYUP；其它修饰键仅在仍 down 时补。
+/// WinUHid UP 后：仅当修饰键仍 down 时补 SendInput KEYUP（含 Win，不再强制）。
 #[cfg(target_os = "windows")]
 pub fn recover_chord_modifiers(chord: &[u16], send_keyup: impl Fn(&[u16]) -> bool) -> u32 {
     let stuck = modifiers_to_recover(chord, |vk| {
@@ -129,9 +129,15 @@ mod tests {
     }
 
     #[test]
-    fn win_force_recover_when_async_reads_up() {
-        assert_eq!(modifiers_to_recover(&[0xA2, 0x5B], |_| false), vec![0x5B]);
-        assert_eq!(modifiers_to_recover(&[0x5B, 0xA4], |_| false), vec![0x5B]);
+    fn win_not_force_recovered_when_async_reads_up() {
+        // 实验：取消 Win 无条件补 KEYUP；async 已抬起则不补
+        assert!(modifiers_to_recover(&[0xA2, 0x5B], |_| false).is_empty());
+        assert!(modifiers_to_recover(&[0x5B, 0xA4], |_| false).is_empty());
+        assert_eq!(
+            modifiers_to_recover(&[0xA2, 0x5B], |vk| vk == 0x5B),
+            vec![0x5B],
+            "still recover Win when async reports down"
+        );
         assert!(modifiers_to_recover(&[0xA5], |_| false).is_empty());
     }
 }

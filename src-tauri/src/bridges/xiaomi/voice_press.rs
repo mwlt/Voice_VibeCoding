@@ -15,11 +15,12 @@ pub enum VoicePressStep {
 }
 
 /// 遥控语音键按下时的执行顺序。
+/// ShortcutDown 必须先于 EnsurePcmReady：唤醒输入法不得被 PCM UDP 冷启动阻塞。
 pub fn voice_remote_press_steps() -> &'static [VoicePressStep] {
     &[
         VoicePressStep::ArmSessionState,
-        VoicePressStep::EnsurePcmReady,
         VoicePressStep::ShortcutDown,
+        VoicePressStep::EnsurePcmReady,
         VoicePressStep::PcmClear,
         VoicePressStep::NotifyUi,
         VoicePressStep::MeterOn,

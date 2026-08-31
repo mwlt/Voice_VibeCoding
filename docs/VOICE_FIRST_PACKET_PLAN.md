@@ -36,3 +36,4 @@
 - Step 1：`voice_press.rs` + `voice_first_packet` 测例（快捷键先于 CLEAR）。
 - Step 2–3：`on_voice_remote_press` 重排；`ensure_pcm_ready_on_press()`；PING 间隔 50ms→15ms。
 - Step 4：2026-08-27 复跑 — `npm run test:rust` 19 passed、`npm test` 4 passed、`cargo check` ok。
+- 2026-08-31：唤醒路径进一步把 **ShortcutDown 提到 EnsurePcmReady 之前**（见 [`VOICE_WAKE_LATENCY_PLAN.md`](./VOICE_WAKE_LATENCY_PLAN.md)）；首包计划的「先 DOWN 再 CLEAR」仍成立，但 PCM ensure 不再挡注入。

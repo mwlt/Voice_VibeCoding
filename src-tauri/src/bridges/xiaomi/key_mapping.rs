@@ -2,6 +2,7 @@
 //!
 //! 遥控器按键 → 读取 xiaomi.json 的 button_bindings / voice_hotkey → SendInput 注入
 
+use crate::bridges::xiaomi::voice_f5_trace::{self, Guards as F5Guards};
 use crate::bridges::xiaomi::connect;
 use crate::bridges::xiaomi::key_log::{button_label, emit_key_phase};
 use crate::bridges::xiaomi::tv_gate;
@@ -20,6 +21,14 @@ use tauri::{AppHandle, Manager};
 /// 与 Python `EXTRA_INFO = 0x584D4952` ('XMIR') 一致，供 LL hook 放行虚拟键
 pub const EXTRA_INFO: usize = 0x584D_4952;
 
+/// 语音注入前 bump settle 上限（ms）。
+/// 微信「F5+映射」场景下长等待收益小；仍请求置顶，但不再空等 40ms。
+pub const VOICE_BUMP_SETTLE_MS: u64 = 8;
+
+pub fn voice_bump_settle_ms() -> u64 {
+    VOICE_BUMP_SETTLE_MS
+}
+
 static VOICE_CHORD: Mutex<VoiceChordState> = Mutex::new(VoiceChordState::empty());
 static DIRECT_MARKS: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 static REPEAT_GEN: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
@@ -32,10 +41,23 @@ static VOICE_NATIVE_DEADLINE: Mutex<Option<Instant>> = Mutex::new(None);
 /// 本轮已吞过固件 F5 DOWN（sticky）。UP 到达或空闲超时才解粘；
 /// **`end_voice_period` 不得清除**（ATVV 松开通常早于 F5 KEYUP）。
 static VOICE_F5_DOWN_SUPPRESSED: AtomicBool = AtomicBool::new(false);
+/// 本按压周期内曾有 F5 DOWN **放行进 OS**（leak）。此后 UP 必须放行解粘，
+/// 即使 late mic 已补 sticky（实机 14:18：keyup_suppress → F5 永久按下）。
+static F5_DOWN_REACHED_OS: AtomicBool = AtomicBool::new(false);
 /// 最近一次参与抑制判定的 F5 事件时刻（空闲解粘基准）。
 static VOICE_F5_LAST_EVENT: Mutex<Option<Instant>> = Mutex::new(None);
 /// sticky 在无 F5 事件超过此时长后自动解粘，避免永久吞真键盘 F5。
 pub const VOICE_F5_STICKY_MAX_IDLE_MS: u64 = 10_000;
+/// 非阻塞关联窗：mic/voice 标记与 F5 的最大间隔。
+pub const VOICE_F5_CORRELATE_MS: u64 = 120;
+/// Python `_should_suppress_voice_f5`：F5 先到时在钩子里 wait mic≈80ms。
+pub const VOICE_F5_CORRELATE_WAIT_MS: u64 = 80;
+/// ATVV/remote 松开后仍可能收到固件 F5 typematic；tail 内继续吞，避免 11:49:13 类泄漏。
+pub const VOICE_F5_POST_TAIL_MS: u64 = 3_000;
+/// F5 放行时刻：若随后 mic 在关联窗内到达，补 sticky 堵住 typematic。
+static LAST_PASSTHROUGH_F5_DOWN: Mutex<Option<Instant>> = Mutex::new(None);
+/// `end_voice_period` 后至此时刻：无 period/arm 时仍吞遥控 F5 typematic。
+static VOICE_F5_POST_TAIL_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
 /// ATVV 语音按压周期（0x08/0x04 → 松开）：周期内无条件吞全部 F5 down/up。
 static VOICE_PERIOD_ACTIVE: AtomicBool = AtomicBool::new(false);
 static INPUT_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -48,16 +70,36 @@ const VOICE_BACKEND_NONE: u8 = 0;
 const VOICE_BACKEND_HID: u8 = 1;
 const VOICE_BACKEND_SENDINPUT: u8 = 2;
 
+/// 当前 F5 guard 快照（供全链路 TRACE 与冲突检测）
+pub fn voice_f5_guards_snapshot() -> F5Guards {
+    F5Guards {
+        session: input_session_active(),
+        period: voice_period_active(),
+        armed: voice_native_suppress_active(),
+        correlate: voice_mic_correlate_active(),
+        tail: post_voice_f5_tail_active(),
+        sticky: voice_f5_down_suppressed(),
+    }
+}
+
 /// 输入会话（含仅电量）运行中：供 F5 固件泄漏抑制
 pub fn set_input_session_active(active: bool) {
     INPUT_SESSION_ACTIVE.store(active, Ordering::Release);
     if active {
-        // 新连接会话：允许再发一次 ATVV 失败 F5 提示
         reset_atvv_f5_toast_throttle();
+        voice_f5_trace::state(
+            "session_on",
+            "input_session_active=true",
+            voice_f5_guards_snapshot(),
+        );
     } else {
         end_voice_period("session_end");
-        // 会话结束 = 明确停手：清 sticky，避免断连后最多 10s 仍吞真键盘 F5
         disarm_voice_native_suppress();
+        voice_f5_trace::state(
+            "session_off",
+            "input_session_active=false disarm+period_end",
+            voice_f5_guards_snapshot(),
+        );
     }
 }
 
@@ -68,8 +110,11 @@ pub fn input_session_active() -> bool {
 /// ATVV 0x08/0x04：进入语音按压周期（先于/并行于固件 F5）。
 pub fn begin_voice_period() {
     VOICE_PERIOD_ACTIVE.store(true, Ordering::Release);
+    *VOICE_F5_POST_TAIL_UNTIL.lock() = None;
+    *LAST_PASSTHROUGH_F5_DOWN.lock() = None;
     arm_voice_native_suppress();
     crate::bridges::xiaomi::key_log::reset_f5_suppress_log_flag();
+    voice_f5_trace::state("period_begin", "voice_period+arm", voice_f5_guards_snapshot());
 }
 
 /// 遥控松开 / 会话结束：结束周期。
@@ -80,8 +125,15 @@ pub fn begin_voice_period() {
 pub fn end_voice_period(reason: &str) {
     let was = VOICE_PERIOD_ACTIVE.swap(false, Ordering::AcqRel);
     VOICE_INJECT_BACKEND_HELD.store(VOICE_BACKEND_NONE, Ordering::Release);
+    *LAST_PASSTHROUGH_F5_DOWN.lock() = None;
+    *VOICE_F5_POST_TAIL_UNTIL.lock() =
+        Some(Instant::now() + Duration::from_millis(VOICE_F5_POST_TAIL_MS));
     if was {
-        log::debug!("XIAOMI VOICE period end reason={reason}");
+        voice_f5_trace::state(
+            "period_end",
+            &format!("reason={reason} post_tail_ms={VOICE_F5_POST_TAIL_MS}"),
+            voice_f5_guards_snapshot(),
+        );
     }
 }
 
@@ -106,6 +158,14 @@ pub fn on_firmware_voice_key(pressed: bool) {
         if FIRMWARE_VOICE_HELD.swap(true, Ordering::SeqCst) {
             return;
         }
+        voice_f5_trace::event(
+            "firmware_fallback",
+            "down",
+            "atvv_unsub",
+            "firmware F5→handle_voice (no ATVV)",
+            voice_f5_guards_snapshot(),
+            None,
+        );
         mark_direct_signal("voice");
         mark_direct_signal("mic");
         emit_key_phase(&app, "mic", button_label("mic"), true);
@@ -115,6 +175,14 @@ pub fn on_firmware_voice_key(pressed: bool) {
         if !FIRMWARE_VOICE_HELD.swap(false, Ordering::SeqCst) {
             return;
         }
+        voice_f5_trace::event(
+            "firmware_fallback",
+            "up",
+            "atvv_unsub",
+            "firmware F5 up→handle_voice",
+            voice_f5_guards_snapshot(),
+            None,
+        );
         mark_direct_signal("voice");
         mark_direct_signal("mic");
         emit_key_phase(&app, "mic", button_label("mic"), false);
@@ -236,6 +304,7 @@ pub fn arm_voice_native_suppress() {
     VOICE_NATIVE_SUPPRESS.store(true, Ordering::Release);
     *VOICE_NATIVE_DEADLINE.lock() =
         Some(Instant::now() + Duration::from_millis(VOICE_F5_SUPPRESS_DEADLINE_MS));
+    voice_f5_trace::state("arm", "voice_native_suppress deadline armed", voice_f5_guards_snapshot());
 }
 
 /// 显式解除语音 F5 抑制：**一并清掉 sticky 与事件计时**。
@@ -246,7 +315,11 @@ pub fn disarm_voice_native_suppress() {
     VOICE_NATIVE_SUPPRESS.store(false, Ordering::Release);
     *VOICE_NATIVE_DEADLINE.lock() = None;
     VOICE_F5_DOWN_SUPPRESSED.store(false, Ordering::Release);
+    F5_DOWN_REACHED_OS.store(false, Ordering::Release);
     *VOICE_F5_LAST_EVENT.lock() = None;
+    *LAST_PASSTHROUGH_F5_DOWN.lock() = None;
+    *VOICE_F5_POST_TAIL_UNTIL.lock() = None;
+    voice_f5_trace::state("disarm", "clear sticky+tail+passthrough", voice_f5_guards_snapshot());
 }
 
 /// armed 窗口是否仍然有效。
@@ -300,10 +373,137 @@ pub fn mark_direct_signal(name: &str) {
                 .insert((*alt).to_string(), Instant::now());
         }
     }
-    // 语音键原生多为 F5：提前 sticky 抑制，避免 120ms 后 typematic 漏进记事本
+    // 语音键原生多为 F5：提前 arm，避免关联窗后 typematic 漏进记事本
     if name == "mic" || name == "voice" || binding_aliases(name).iter().any(|a| *a == "mic") {
+        voice_f5_trace::event(
+            "correlate",
+            "-",
+            "mark_signal",
+            &format!("signal={name}"),
+            voice_f5_guards_snapshot(),
+            None,
+        );
         arm_voice_native_suppress();
+        apply_late_correlate_from_passthrough_f5();
     }
+}
+
+/// 记录「未吞掉的 F5 DOWN」时刻，供迟到 mic 关联补 sticky。
+/// 同时标记本周期 DOWN 已进 OS：后续 UP 不得吞，否则 F5 粘键。
+pub fn note_passthrough_f5_down() {
+    *LAST_PASSTHROUGH_F5_DOWN.lock() = Some(Instant::now());
+    F5_DOWN_REACHED_OS.store(true, Ordering::Release);
+    voice_f5_trace::event(
+        "correlate",
+        "down",
+        "passthrough_record",
+        &format!("await_late_ms={VOICE_F5_CORRELATE_MS} reached_os=1"),
+        voice_f5_guards_snapshot(),
+        None,
+    );
+}
+
+fn apply_late_correlate_from_passthrough_f5() {
+    let mut g = LAST_PASSTHROUGH_F5_DOWN.lock();
+    let Some(passthrough_at) = *g else {
+        voice_f5_trace::event(
+            "correlate",
+            "-",
+            "late_miss",
+            "reason=no_passthrough_record",
+            voice_f5_guards_snapshot(),
+            None,
+        );
+        return;
+    };
+    let age_ms = passthrough_at.elapsed().as_millis();
+    let within = age_ms <= u128::from(VOICE_F5_CORRELATE_MS);
+    if within {
+        VOICE_F5_DOWN_SUPPRESSED.store(true, Ordering::Release);
+        drop(g);
+        touch_f5_event();
+        voice_f5_trace::event(
+            "correlate",
+            "down",
+            "late_hit",
+            &format!("f5_to_mic_ms={age_ms} window_ms={VOICE_F5_CORRELATE_MS}"),
+            voice_f5_guards_snapshot(),
+            None,
+        );
+        *LAST_PASSTHROUGH_F5_DOWN.lock() = None;
+    } else {
+        voice_f5_trace::event(
+            "correlate",
+            "-",
+            "late_miss",
+            &format!("reason=outside_window f5_to_mic_ms={age_ms} window_ms={VOICE_F5_CORRELATE_MS}"),
+            voice_f5_guards_snapshot(),
+            None,
+        );
+        *g = None;
+    }
+}
+
+fn log_voice_f5_suppress_down(reason: &str) {
+    voice_f5_trace::event(
+        "correlate",
+        "down",
+        "decide_suppress",
+        &format!("reason={reason}"),
+        voice_f5_guards_snapshot(),
+        None,
+    );
+}
+
+/// mic/voice 标记是否仍在非阻塞关联窗内。
+pub fn voice_mic_correlate_active() -> bool {
+    let window = Duration::from_millis(VOICE_F5_CORRELATE_MS);
+    direct_signal_recent("mic", window) || direct_signal_recent("voice", window)
+}
+
+/// 语音松开后 tail 窗：吞迟到的固件 F5 typematic（日志 11:49:13 类泄漏）。
+pub fn post_voice_f5_tail_active() -> bool {
+    match *VOICE_F5_POST_TAIL_UNTIL.lock() {
+        Some(deadline) => Instant::now() <= deadline,
+        None => false,
+    }
+}
+
+/// Python `wait_for_direct_signal("mic", timeout≈0.08)`：仅在 BLE 会话在线时调用。
+fn wait_for_mic_correlate(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    voice_f5_trace::event(
+        "correlate",
+        "down",
+        "wait_mic_start",
+        &format!("max_ms={}", timeout.as_millis()),
+        voice_f5_guards_snapshot(),
+        None,
+    );
+    while Instant::now() < deadline {
+        if voice_mic_correlate_active() {
+            voice_f5_trace::event(
+                "correlate",
+                "down",
+                "wait_mic_hit",
+                "mic arrived during bounded wait",
+                voice_f5_guards_snapshot(),
+                None,
+            );
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let hit = voice_mic_correlate_active();
+    voice_f5_trace::event(
+        "correlate",
+        "down",
+        if hit { "wait_mic_hit" } else { "wait_mic_miss" },
+        &format!("elapsed_ms={}", timeout.as_millis()),
+        voice_f5_guards_snapshot(),
+        None,
+    );
+    hit
 }
 
 pub fn direct_signal_recent(name: &str, window: Duration) -> bool {
@@ -335,22 +535,37 @@ fn voice_f5_sticky_valid(now: Instant, last: Option<Instant>) -> bool {
 
 /// 固件语音键常被译成 F5。
 ///
-/// **DOWN**：仅 **语音周期 / armed** → 吞，并记 sticky；
+/// **DOWN**：语音周期 / armed / **mic·voice 关联窗** → 吞，并记 sticky；
 ///          已 sticky 且未超时 → 一律吞（覆盖 typematic）。
 ///          **不用** `input_session_active`：会话在线时吞全体 F5 会让真键盘 F5 完全失效。
-///          遥控器裸 F5 靠 gadget 清 `0x003E` + 语音窗口 LL 兜底。
-/// **UP**：**永远放行**（并清 sticky）。
-///        LL 钩子若不是链头，KEYDOWN 可能已被前面的钩子/系统吃进；
-///        若此时再吞 KEYUP → F5 永久粘死 → Ctrl+Win 变成 Ctrl+Win+F5，微信无法唤醒。
-///        多放行一次 KEYUP 对「DOWN 已被我们吞掉」的情况无害。
+///          遥控器裸 F5 靠 gadget 清 `0x003E` + 语音窗口 / 关联窗 LL 兜底。
+/// **UP**：对齐 Python 配对吞，但加安全阀——
+///        若本周期曾有 DOWN 放行进 OS（`F5_DOWN_REACHED_OS`），UP **必须放行**解粘；
+///        仅当全部 DOWN 都被本钩吞掉（sticky 且未 leak）时才吞 UP。
 ///
-/// 调用方约束：运行在 `WH_KEYBOARD_LL` 回调里，禁止 sleep / IO。
+/// 运行在 `WH_KEYBOARD_LL` 回调里。无 guard 且会话在线时允许 **bounded** wait mic（Python 对齐）。
 pub fn should_suppress_voice_f5(down: bool, up: bool, _tap_ready: bool) -> bool {
     if up {
-        // 无论是否吞过 DOWN：必须放行 KEYUP，并解除 sticky。
-        VOICE_F5_DOWN_SUPPRESSED.store(false, Ordering::Release);
+        let leaked = F5_DOWN_REACHED_OS.swap(false, Ordering::AcqRel);
+        let was_sticky = VOICE_F5_DOWN_SUPPRESSED.swap(false, Ordering::AcqRel);
         *VOICE_F5_LAST_EVENT.lock() = None;
-        return false;
+        // 漏过 DOWN 进 OS 后绝不能吞 UP（实机 F5 永久按下）
+        let suppress_up = was_sticky && !leaked;
+        voice_f5_trace::event(
+            "correlate",
+            "up",
+            if suppress_up {
+                "keyup_suppress"
+            } else if leaked {
+                "keyup_pass_unstick_leak"
+            } else {
+                "keyup_pass"
+            },
+            &format!("cleared_sticky={was_sticky} leaked_down={leaked} python_pair_safe"),
+            voice_f5_guards_snapshot(),
+            None,
+        );
+        return suppress_up;
     }
     if !down {
         return false;
@@ -361,17 +576,72 @@ pub fn should_suppress_voice_f5(down: bool, up: bool, _tap_ready: bool) -> bool 
         if voice_f5_sticky_valid(now, last) {
             touch_f5_event();
             let _ = voice_native_suppress_active();
+            voice_f5_trace::event(
+                "correlate",
+                "down",
+                "decide_suppress",
+                "reason=sticky_typematic",
+                voice_f5_guards_snapshot(),
+                None,
+            );
             return true;
         }
         VOICE_F5_DOWN_SUPPRESSED.store(false, Ordering::Release);
-        log::warn!(
-            "XIAOMI VOICE F5 sticky auto-released (no F5 event for >{VOICE_F5_STICKY_MAX_IDLE_MS}ms)"
+        voice_f5_trace::event(
+            "correlate",
+            "down",
+            "sticky_idle_release",
+            &format!("idle_ms>{VOICE_F5_STICKY_MAX_IDLE_MS}"),
+            voice_f5_guards_snapshot(),
+            None,
         );
     }
-    let in_guard = voice_period_active() || voice_native_suppress_active();
+    let period = voice_period_active();
+    let armed = voice_native_suppress_active();
+    let correlate = voice_mic_correlate_active();
+    let tail = post_voice_f5_tail_active();
+    let mut in_guard = period || armed || correlate || tail;
+    let mut waited_mic = false;
+    if !in_guard && down && input_session_active() {
+        waited_mic = wait_for_mic_correlate(Duration::from_millis(VOICE_F5_CORRELATE_WAIT_MS));
+        if waited_mic {
+            in_guard = true;
+        }
+    }
     if !in_guard {
+        voice_f5_trace::event(
+            "correlate",
+            "down",
+            "decide_passthrough",
+            &format!(
+                "period={period} armed={armed} corr={correlate} tail={tail} waited_mic={waited_mic}"
+            ),
+            voice_f5_guards_snapshot(),
+            None,
+        );
         return false;
     }
+    let correlate = voice_mic_correlate_active();
+    let reason = if waited_mic && !period && !armed && !tail {
+        "f5_wait_mic"
+    } else if tail && !period && !armed && !correlate {
+        "post_voice_tail"
+    } else if correlate && !period && !armed && !tail {
+        "mic_before_f5"
+    } else if period && correlate {
+        "voice_period+mic_correlate"
+    } else if period {
+        "voice_period"
+    } else if armed && correlate {
+        "voice_armed+mic_correlate"
+    } else if armed {
+        "voice_armed"
+    } else if tail {
+        "post_voice_tail+guard"
+    } else {
+        "mic_correlate"
+    };
+    log_voice_f5_suppress_down(reason);
     VOICE_F5_DOWN_SUPPRESSED.store(true, Ordering::Release);
     touch_f5_event();
     true
@@ -381,9 +651,13 @@ pub fn should_suppress_voice_f5(down: bool, up: bool, _tap_ready: bool) -> bool 
 #[doc(hidden)]
 pub fn voice_f5_reset_for_test() {
     VOICE_F5_DOWN_SUPPRESSED.store(false, Ordering::Release);
+    F5_DOWN_REACHED_OS.store(false, Ordering::Release);
     VOICE_NATIVE_SUPPRESS.store(false, Ordering::Release);
     *VOICE_NATIVE_DEADLINE.lock() = None;
     *VOICE_F5_LAST_EVENT.lock() = None;
+    *LAST_PASSTHROUGH_F5_DOWN.lock() = None;
+    *VOICE_F5_POST_TAIL_UNTIL.lock() = None;
+    *DIRECT_MARKS.lock() = None;
     VOICE_PERIOD_ACTIVE.store(false, Ordering::Release);
     VOICE_INJECT_BACKEND_HELD.store(VOICE_BACKEND_NONE, Ordering::Release);
     INPUT_SESSION_ACTIVE.store(false, Ordering::Release);
@@ -402,6 +676,11 @@ pub fn voice_f5_expire_suppress_deadline_for_test() {
 #[doc(hidden)]
 pub fn voice_f5_set_last_event_age_for_test(age_ms: u64) {
     *VOICE_F5_LAST_EVENT.lock() = Some(Instant::now() - Duration::from_millis(age_ms));
+}
+
+#[doc(hidden)]
+pub fn voice_f5_expire_post_tail_for_test() {
+    *VOICE_F5_POST_TAIL_UNTIL.lock() = Some(Instant::now() - Duration::from_millis(1));
 }
 
 #[doc(hidden)]
@@ -674,7 +953,7 @@ fn handle_voice(app: &AppHandle, pressed: bool) {
     // PR #8 实证：必须把本进程 LL 钩子顶到微信/输入法之前，才能替它们吞掉固件 F5。
     // 只吞对本进程有效；微信若在链头已看到 F5，return 1 无法撤回。
     // 现在 handle_voice 跑在 voice_dispatch 工作线程上，等待 bump 才有意义。
-    match crate::bridges::xiaomi::special_keys::bump_hook_to_front_and_settle(40) {
+    match crate::bridges::xiaomi::special_keys::bump_hook_to_front_and_settle(voice_bump_settle_ms()) {
         crate::bridges::xiaomi::hook_bump::BumpOutcome::Settled => {}
         crate::bridges::xiaomi::hook_bump::BumpOutcome::TimedOut => {
             log::warn!("XIAOMI VOICE bump settle timed out — hook may not be at chain head");
@@ -1061,7 +1340,9 @@ fn voice_sanitize_keyup(vks: &[u16]) -> bool {
     key_chord_send_input_with_extra(vks, true, EXTRA_INFO)
 }
 
-/// AutoHotkey 同款：Win/Alt 抬起后点一下无键帽 vkE8，避免开始菜单/窗口菜单栏吃掉后续上屏字。
+/// AutoHotkey 同款：Win/Alt 抬起后点一下无键帽 vkE8，避免开始菜单/窗口菜单栏。
+/// **语音路径已停用**（微信会收到空键）；保留函数便于菜单弹起时再挂回。
+#[allow(dead_code)]
 #[cfg(target_os = "windows")]
 fn inject_shell_menu_suppress_dummy() {
     use crate::bridges::xiaomi::voice_inject::ALT_MENU_SUPPRESS_DUMMY_VK;
@@ -1090,7 +1371,7 @@ fn inject_voice_chord(vks: &[u16], key_up: bool) -> bool {
     #[cfg(target_os = "windows")]
     {
         use crate::bridges::xiaomi::voice_inject::{
-            should_suppress_shell_menu_after_keyup, voice_inject_backend, VoiceInjectBackend,
+            voice_inject_backend, VoiceInjectBackend,
         };
         let vks = crate::bridges::xiaomi::voice_inject::normalize_voice_chord_vks(vks);
         if !key_up {
@@ -1144,15 +1425,9 @@ fn inject_voice_chord(vks: &[u16], key_up: bool) -> bool {
                 if key_up {
                     crate::bridges::xiaomi::key_log::set_virtual_hid_chord_held(None);
                     VOICE_INJECT_BACKEND_HELD.store(VOICE_BACKEND_NONE, Ordering::Release);
-                    if should_suppress_shell_menu_after_keyup(&vks, true) {
-                        inject_shell_menu_suppress_dummy();
-                    }
-                    let cleared = recover_chord_modifiers(&vks, |stuck| {
-                        if stuck.iter().any(|v| matches!(*v, 0x5B | 0x5C)) {
-                            inject_shell_menu_suppress_dummy();
-                        }
-                        voice_sanitize_keyup(stuck)
-                    });
+                    // 不再发 vkE8：微信/输入法会收到「空键」，污染热键观测。
+                    // （旧逻辑：Win/Alt UP 后 dummy 防开始菜单；若菜单弹起再评估恢复。）
+                    let cleared = recover_chord_modifiers(&vks, voice_sanitize_keyup);
                     if !hid_ok && cleared > 0 {
                         log::warn!(
                             "XIAOMI VOICE release recovered via sanitizer cleared={cleared} vks={vks:?}"
@@ -1186,9 +1461,7 @@ fn inject_voice_chord(vks: &[u16], key_up: bool) -> bool {
                 let ok = key_chord_send_input_with_extra(&vks, key_up, EXTRA_INFO);
                 if key_up {
                     VOICE_INJECT_BACKEND_HELD.store(VOICE_BACKEND_NONE, Ordering::Release);
-                    if should_suppress_shell_menu_after_keyup(&vks, true) {
-                        inject_shell_menu_suppress_dummy();
-                    }
+                    // 同 WinUHid 路径：不发 vkE8，避免微信收到空键
                     let _ = recover_chord_modifiers(&vks, voice_sanitize_keyup);
                 }
                 if ok {

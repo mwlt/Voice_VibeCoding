@@ -1,8 +1,8 @@
 {
-  "version": "1.6.0",
-  "notes": "v1.6.0：\n- 修复：遥控器已连接时真键盘 F5 被误吞（仅语音按住期间才吞 F5）\n- 含 v1.5.9：F5 KEYUP 永远放行防粘键；钩子快进快出 / bump 落地；Tap 拒 UAC 短退避\n- 偶发漏遥控 F5 时可再按一两下（详见 README）",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.0",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.0",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.6.0/Voice%20VibeCoding_1.6.0_x64-setup.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.6.0/Voice.VibeCoding_1.6.0_x64-setup.exe"
+  "version": "1.6.1",
+  "notes": "v1.6.1：\n- 微信输入法务必按「输入法设置」说明配置（F5 + 本软件快捷键）\n- 唤醒语音优化（首包/延迟）\n- F5 策略：仅语音按住相关窗口吞键，不误伤真键盘\n- 「不再提醒此版本」忽略优化\n- 界面优化（示意遥控、输入法引导、按键映射等）\n- 再次点击遥控器按键可取消选定\n- 修复真键盘 Home / 音量± / Menu 被整键误吞\n- 初始化过程任务栏/托盘显示黄黑图标，语音就绪后恢复蓝标",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.1",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.1",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.6.1/Voice%20VibeCoding_1.6.1_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.6.1/Voice.VibeCoding_1.6.1_x64-setup.exe"
 }

@@ -7,7 +7,7 @@ import { useBridgeStore } from "../stores/bridge";
 import { useConfigStore } from "../stores/config";
 import DeviceStatus from "../components/DeviceStatus.vue";
 import KeyMappingStage from "../components/KeyMappingStage.vue";
-import wechatImeHotkeysImg from "../assets/guides/wechat-ime-hotkeysV2.png";
+import wechatImeHotkeysImg from "../assets/guides/wechat-ime-hotkeysV3.png";
 import doubaoImeHotkeysImg from "../assets/guides/doubao.png";
 import { vkDisplayName } from "../utils/vkDisplay";
 import {
@@ -63,6 +63,7 @@ const showWinuhidChoice = ref(false);
 const voiceChoiceMsg = ref("");
 const winuhidChoiceMsg = ref("");
 type WinuhidDownloadPhase = "idle" | "downloading" | "complete" | "error";
+type CableDownloadPhase = "idle" | "downloading" | "complete" | "error";
 const winuhidDownloadPhase = ref<WinuhidDownloadPhase>("idle");
 const winuhidDownloadProgress = ref<{
   downloaded: number;
@@ -71,15 +72,18 @@ const winuhidDownloadProgress = ref<{
 } | null>(null);
 const winuhidDownloadMessage = ref("");
 const winuhidZipDefaultName = ref("WinUHid_Manual.zip");
+const cableDownloadPhase = ref<CableDownloadPhase>("idle");
+const cableDownloadProgress = ref<{
+  downloaded: number;
+  total?: number | null;
+  percent?: number | null;
+} | null>(null);
+const cableDownloadMessage = ref("");
+const cableZipDefaultName = ref("VBCABLE_Driver_Pack45.zip");
 const showVoiceReboot = ref(false);
 const voiceRebootMsg = ref("");
 const showLogModal = ref(false);
 const showSetupTips = ref(false);
-const keyProbeActive = ref(false);
-const keyProbePath = ref("");
-const keyProbeHint = ref("");
-const keyProbeLive = ref<string[]>([]);
-const keyProbeAnalysis = ref("");
 const setupApplyHint = ref("");
 const setupImeTab = ref<ImeTabId>("wechat");
 const imeTabs = listImeTabs();
@@ -115,15 +119,12 @@ const voiceMeter = ref<VoiceMeterSnapshot>({
   atvvOk: false,
 });
 
-/** 「按键映射」标题旁：最近一次 按下/抬起 + 遥控键：实际输出（extra 标红） */
+/** 「按键映射」标题旁：最近一次 按下/抬起 + 配置映射 */
 const lastMappingFlash = ref<{
   seq: number;
   phase: "down" | "up";
   remote: string;
-  /** 配置映射兜底（尚无实际输出事件时） */
   mapped: string | null;
-  /** 真实输出；unexpected=true 为漏键/多出来的原生键 */
-  outputs: { label: string; unexpected: boolean; count: number }[];
 } | null>(null);
 let mappingFlashSeq = 0;
 let mappingFlashClearTimer: ReturnType<typeof setTimeout> | null = null;
@@ -624,14 +625,15 @@ const logs = ref<LogEntry[]>([]);
 const logAreaRef = ref<HTMLElement | null>(null);
 let logSeq = 0;
 let unlistenKey: UnlistenFn | null = null;
-let unlistenKeyOutput: UnlistenFn | null = null;
-let unlistenKeyProbe: UnlistenFn | null = null;
 let unlistenMeter: UnlistenFn | null = null;
 let unlistenAtvvRepair: UnlistenFn | null = null;
 let unlistenAtvvCancel: UnlistenFn | null = null;
 let unlistenWinuhidProgress: UnlistenFn | null = null;
 let unlistenWinuhidComplete: UnlistenFn | null = null;
 let unlistenWinuhidError: UnlistenFn | null = null;
+let unlistenCableProgress: UnlistenFn | null = null;
+let unlistenCableComplete: UnlistenFn | null = null;
+let unlistenCableError: UnlistenFn | null = null;
 
 function formatTime(d = new Date()): string {
   return d.toLocaleTimeString("zh-CN", { hour12: false });
@@ -735,17 +737,8 @@ function formatKeyEventLine(
   phase: "down" | "up",
   remoteLabel: string,
   mappedLabel: string | null,
-  outputs?: { label: string; unexpected: boolean; count: number }[]
 ): string {
   const phaseLabel = phase === "up" ? "抬起" : "按下";
-  if (outputs && outputs.length > 0) {
-    const parts = outputs.map((o) => {
-      const n = o.count > 1 ? `×${o.count}` : "";
-      return o.unexpected ? `[漏]${o.label}${n}` : `${o.label}${n}`;
-    });
-    return `真实输出 ${phaseLabel} ${remoteLabel}：${parts.join(" + ")}`;
-  }
-  // 尚无钩子/注入回报：只记遥控相位；映射名作说明，不装作「已确认发出」
   if (mappedLabel) {
     return `${phaseLabel} ${remoteLabel} → ${mappedLabel}`;
   }
@@ -762,69 +755,16 @@ function showMappingFlash(
     phase,
     remote: remoteLabel,
     mapped: mappedLabel,
-    outputs: [],
   };
   if (mappingFlashClearTimer) clearTimeout(mappingFlashClearTimer);
   mappingFlashClearTimer = setTimeout(() => {
     lastMappingFlash.value = null;
     mappingFlashClearTimer = null;
   }, 4500);
-  // 抬起且无实际输出事件时不写状态日志（避免「抬起 … 待确认」噪音）；
-  // 按下先等注入/漏键汇总，由 appendMappingOutput 或超时兜底。
+  // 状态日志只记配置映射，不再汇总漏键/吞键/真实输出
   if (phase === "down") {
-    scheduleKeyOutputLogFlush();
+    prependLog(formatKeyEventLine(phase, remoteLabel, mappedLabel));
   }
-}
-
-function appendMappingOutput(label: string, unexpected: boolean, phase: "down" | "up") {
-  const cur = lastMappingFlash.value;
-  if (!cur) {
-    lastMappingFlash.value = {
-      seq: ++mappingFlashSeq,
-      phase,
-      remote: "—",
-      mapped: null,
-      outputs: [{ label, unexpected, count: 1 }],
-    };
-  } else {
-    const same = cur.outputs.find((o) => o.label === label && o.unexpected === unexpected);
-    if (same) {
-      same.count += 1;
-      lastMappingFlash.value = {
-        ...cur,
-        phase,
-        seq: ++mappingFlashSeq,
-        outputs: [...cur.outputs],
-      };
-    } else {
-      lastMappingFlash.value = {
-        ...cur,
-        phase,
-        seq: ++mappingFlashSeq,
-        outputs: [...cur.outputs, { label, unexpected, count: 1 }],
-      };
-    }
-  }
-  if (mappingFlashClearTimer) clearTimeout(mappingFlashClearTimer);
-  mappingFlashClearTimer = setTimeout(() => {
-    lastMappingFlash.value = null;
-    mappingFlashClearTimer = null;
-  }, 4500);
-  scheduleKeyOutputLogFlush();
-}
-
-/** 有实际输出时写「真实输出」一行；仅有配置映射时写「按下 键 → 映射」 */
-let keyOutputLogTimer: ReturnType<typeof setTimeout> | null = null;
-function scheduleKeyOutputLogFlush() {
-  if (keyOutputLogTimer) clearTimeout(keyOutputLogTimer);
-  keyOutputLogTimer = setTimeout(() => {
-    keyOutputLogTimer = null;
-    const flash = lastMappingFlash.value;
-    if (!flash) return;
-    // 抬起且仍无 outputs：不刷日志（注入只在按下报一次即可）
-    if (flash.phase === "up" && flash.outputs.length === 0) return;
-    prependLog(formatKeyEventLine(flash.phase, flash.remote, flash.mapped, flash.outputs));
-  }, 180);
 }
 
 async function refreshHost() {
@@ -948,52 +888,6 @@ async function openLogExternally() {
   }
 }
 
-async function toggleKeyProbe() {
-  keyProbeHint.value = "";
-  try {
-    if (keyProbeActive.value) {
-      await invoke("stop_xiaomi_key_probe");
-      keyProbeActive.value = false;
-      const a = await invoke<{
-        path: string;
-        f5Leak: boolean;
-        f5StuckSuspect: boolean;
-        ctrlWithoutWin: boolean;
-        f5PassthroughDown: number;
-        f5SuppressedDown: number;
-        ctrlDownSeen: number;
-        winDownSeen: number;
-      }>("analyze_xiaomi_key_probe");
-      keyProbePath.value = a.path || "";
-      keyProbeAnalysis.value = [
-        a.f5Leak ? "F5泄漏=是" : "F5泄漏=否",
-        a.f5StuckSuspect ? "F5粘键嫌疑=是" : "F5粘键嫌疑=否",
-        a.ctrlWithoutWin ? "仅Ctrl无Win=是" : "仅Ctrl无Win=否",
-        `F5↓pass=${a.f5PassthroughDown} F5↓supp=${a.f5SuppressedDown}`,
-        `Ctrl↓=${a.ctrlDownSeen} Win↓=${a.winDownSeen}`,
-      ].join(" · ");
-      keyProbeHint.value = "探测已停，见分析结果；完整记录在 key-probe.log";
-    } else {
-      const path = await invoke<string>("start_xiaomi_key_probe");
-      keyProbePath.value = path;
-      keyProbeActive.value = true;
-      keyProbeLive.value = [];
-      keyProbeAnalysis.value = "";
-      keyProbeHint.value = "探测中：请按遥控语音键，再点一次结束";
-    }
-  } catch (e) {
-    keyProbeHint.value = `键盘探测失败: ${e}`;
-  }
-}
-
-async function openKeyProbeLog() {
-  try {
-    await invoke("open_xiaomi_key_probe_log");
-  } catch (e) {
-    keyProbeHint.value = `打开失败: ${e}`;
-  }
-}
-
 interface VoiceEnvActionResult {
   ok: boolean;
   ready: boolean;
@@ -1017,12 +911,21 @@ function applyVoiceEnvResult(result: VoiceEnvActionResult) {
 }
 
 async function voiceDetectAndRepair() {
+  if (voiceRepairing.value || winuhidRepairing.value || atvvRepairing.value || restarting.value) {
+    return;
+  }
+  openVoiceRepairChoice();
+}
+
+/** 自动检测与修复（原点击按钮的默认行为） */
+async function runVoiceAutoRepair() {
   voiceRepairing.value = true;
   showVoiceChoice.value = false;
   showVoiceReboot.value = false;
   try {
     const result = await invoke<VoiceEnvActionResult>("check_xiaomi_voice_env");
     if (result.needsChoice) {
+      // 未装驱动：回到选择窗，保留下载 / 内嵌安装等选项
       voiceChoiceMsg.value = result.message;
       showVoiceChoice.value = true;
       return;
@@ -1033,12 +936,24 @@ async function voiceDetectAndRepair() {
     const msg = `虚拟声卡检测失败: ${e}`;
     prependLog(msg);
     host.value = { ...host.value, detail: msg, tone: "error" };
+    voiceChoiceMsg.value = msg;
+    showVoiceChoice.value = true;
   } finally {
     voiceRepairing.value = false;
   }
 }
 
-async function chooseVoiceSource(source: "embedded" | "download_page" | "download_zip") {
+async function chooseVoiceSource(
+  source: "auto" | "embedded" | "embedded_force" | "download_page" | "download_zip",
+) {
+  if (source === "auto") {
+    await runVoiceAutoRepair();
+    return;
+  }
+  if (source === "download_zip") {
+    await startCableZipDownload();
+    return;
+  }
   voiceRepairing.value = true;
   showVoiceChoice.value = false;
   showVoiceReboot.value = false;
@@ -1052,6 +967,8 @@ async function chooseVoiceSource(source: "embedded" | "download_page" | "downloa
     const msg = `语音修复失败: ${e}`;
     prependLog(msg);
     host.value = { ...host.value, detail: msg, tone: "error" };
+    voiceChoiceMsg.value = msg;
+    showVoiceChoice.value = true;
   } finally {
     voiceRepairing.value = false;
   }
@@ -1148,6 +1065,85 @@ function resetWinuhidDownloadState() {
   winuhidDownloadMessage.value = "";
 }
 
+function resetCableDownloadState() {
+  cableDownloadPhase.value = "idle";
+  cableDownloadProgress.value = null;
+  cableDownloadMessage.value = "";
+}
+
+const cableDownloadProgressLabel = computed(() => {
+  const p = cableDownloadProgress.value;
+  if (!p) return "准备下载…";
+  const downloaded = formatDownloadBytes(p.downloaded);
+  if (p.total && p.total > 0) {
+    const pct = p.percent != null ? `（${Math.round(p.percent)}%）` : "";
+    return `${downloaded} / ${formatDownloadBytes(p.total)}${pct}`;
+  }
+  return `已下载 ${downloaded}`;
+});
+
+function cableDownloadProgressWidth(): string {
+  const p = cableDownloadProgress.value;
+  if (p?.percent != null) return `${Math.min(100, Math.max(0, p.percent))}%`;
+  if (cableDownloadPhase.value === "complete") return "100%";
+  return "0%";
+}
+
+async function refreshCableZipName() {
+  try {
+    const status = await invoke<{ downloadZipUrl?: string }>("get_xiaomi_voice_env_status");
+    const url = status.downloadZipUrl || "";
+    const name = url.split("/").pop();
+    if (name) cableZipDefaultName.value = name;
+  } catch {
+    /* ignore */
+  }
+}
+
+async function startCableZipDownload() {
+  if (cableDownloadPhase.value === "downloading" || voiceRepairing.value) return;
+
+  const dest = await save({
+    defaultPath: cableZipDefaultName.value,
+    filters: [{ name: "ZIP 压缩包", extensions: ["zip"] }],
+    title: "保存 VB-CABLE 驱动包",
+  });
+  if (!dest) return;
+
+  cableDownloadPhase.value = "downloading";
+  cableDownloadProgress.value = { downloaded: 0, total: null, percent: null };
+  cableDownloadMessage.value = "";
+
+  try {
+    await invoke("download_xiaomi_vbcable_zip", { destPath: dest });
+  } catch (e) {
+    cableDownloadPhase.value = "error";
+    cableDownloadMessage.value = String(e);
+    prependLog(`VB-CABLE 驱动包下载失败: ${e}`);
+  }
+}
+
+/** 停止并丢弃半成品，恢复初始态（不关弹窗，便于重试或选其它项） */
+async function stopCableZipDownload() {
+  if (cableDownloadPhase.value !== "downloading") return;
+  try {
+    await invoke("cancel_xiaomi_vbcable_zip_download");
+  } catch (e) {
+    console.warn("cancel vbcable download failed:", e);
+  }
+  resetCableDownloadState();
+  prependLog("已停止 VB-CABLE 驱动包下载");
+}
+
+/** 点「虚拟声卡修复」先弹出选项，不直接跑修复（便于测下载等路径） */
+function openVoiceRepairChoice() {
+  showVoiceReboot.value = false;
+  resetCableDownloadState();
+  voiceChoiceMsg.value = "请选择检测 / 安装方式：";
+  showVoiceChoice.value = true;
+  void refreshCableZipName();
+}
+
 async function refreshWinuhidZipName() {
   try {
     const status = await invoke<{ downloadZipUrl?: string }>("get_xiaomi_winuhid_status");
@@ -1180,6 +1176,17 @@ async function startWinuhidZipDownload() {
     winuhidDownloadMessage.value = String(e);
     prependLog(`WinUHid 驱动包下载失败: ${e}`);
   }
+}
+
+async function stopWinuhidZipDownload() {
+  if (winuhidDownloadPhase.value !== "downloading") return;
+  try {
+    await invoke("cancel_xiaomi_winuhid_zip_download");
+  } catch (e) {
+    console.warn("cancel winuhid download failed:", e);
+  }
+  resetWinuhidDownloadState();
+  prependLog("已停止 WinUHid 驱动包下载");
 }
 
 function openWinuhidRepairChoice() {
@@ -1230,47 +1237,9 @@ onMounted(async () => {
       // D1：语音映射关闭时只显示按下/抬起，不写映射段
       const lineMapped = isVoice && !voiceMapOn ? null : resolveMappedActionLabel(id);
       showMappingFlash(label, lineMapped, phase);
-      // 状态日志等真实输出汇总后再写（见 scheduleKeyOutputLogFlush）
     });
   } catch (e) {
     console.warn("listen xiaomi-key failed:", e);
-  }
-
-  try {
-    unlistenKeyOutput = await listen<{
-      label?: string;
-      role?: string;
-      phase?: string;
-    }>("xiaomi-key-output", (event) => {
-      const p = event.payload;
-      const label = p.label || "?";
-      const role = p.role || "mapped";
-      const unexpected = role === "extra";
-      const phase: "down" | "up" = p.phase === "up" ? "up" : "down";
-      // suppressed（已吞 F5）也记入，便于确认吞键生效
-      appendMappingOutput(
-        role === "suppressed" ? `已吞${label}` : label,
-        unexpected,
-        phase,
-      );
-    });
-  } catch (e) {
-    console.warn("listen xiaomi-key-output failed:", e);
-  }
-
-  try {
-    unlistenKeyProbe = await listen<{
-      label?: string;
-      phase?: string;
-      decision?: string;
-      vk?: number;
-    }>("xiaomi-key-probe", (event) => {
-      const p = event.payload;
-      const tag = `${p.label || `0x${(p.vk ?? 0).toString(16)}`}${p.phase === "up" ? "↑" : "↓"}/${p.decision || "?"}`;
-      keyProbeLive.value = [tag, ...keyProbeLive.value].slice(0, 24);
-    });
-  } catch (e) {
-    console.warn("listen xiaomi-key-probe failed:", e);
   }
 
   try {
@@ -1335,12 +1304,12 @@ onMounted(async () => {
     unlistenWinuhidComplete = await listen<{ path: string }>(
       "winuhid-download-complete",
       (event) => {
-        winuhidDownloadPhase.value = "complete";
         const path = event.payload?.path || "";
-        winuhidDownloadMessage.value = path
-          ? `已保存到：${path}。请解压后阅读「安装说明.txt」，双击 Run-Install.cmd 安装。`
-          : "下载完成。请解压后阅读「安装说明.txt」，双击 Run-Install.cmd 安装。";
-        prependLog(winuhidDownloadMessage.value);
+        const msg = path
+          ? `WinUHid 驱动包已保存到：${path}。请解压后阅读「安装说明.txt」，双击 Run-Install.cmd 安装。`
+          : "WinUHid 驱动包下载完成。请解压后阅读「安装说明.txt」安装。";
+        prependLog(msg);
+        resetWinuhidDownloadState();
       },
     );
   } catch (e) {
@@ -1351,29 +1320,82 @@ onMounted(async () => {
     unlistenWinuhidError = await listen<{ message: string }>(
       "winuhid-download-error",
       (event) => {
+        const msg = event.payload?.message || "下载失败";
+        if (msg.includes("已取消")) {
+          resetWinuhidDownloadState();
+          return;
+        }
         winuhidDownloadPhase.value = "error";
-        winuhidDownloadMessage.value = event.payload?.message || "下载失败";
-        prependLog(`WinUHid 驱动包下载失败: ${winuhidDownloadMessage.value}`);
+        winuhidDownloadProgress.value = null;
+        winuhidDownloadMessage.value = msg;
+        prependLog(`WinUHid 驱动包下载失败: ${msg}`);
       },
     );
   } catch (e) {
     console.warn("listen winuhid-download-error failed:", e);
   }
+
+  try {
+    unlistenCableProgress = await listen<{
+      downloaded: number;
+      total?: number | null;
+      percent?: number | null;
+    }>("vbcable-download-progress", (event) => {
+      if (!event.payload) return;
+      cableDownloadPhase.value = "downloading";
+      cableDownloadProgress.value = event.payload;
+    });
+  } catch (e) {
+    console.warn("listen vbcable-download-progress failed:", e);
+  }
+
+  try {
+    unlistenCableComplete = await listen<{ path: string }>(
+      "vbcable-download-complete",
+      (event) => {
+        const path = event.payload?.path || "";
+        const msg = path
+          ? `VB-CABLE 驱动包已保存到：${path}。请解压后按说明安装，完成后点「自动修复」。`
+          : "VB-CABLE 驱动包下载完成。请解压安装后点「自动修复」。";
+        prependLog(msg);
+        resetCableDownloadState();
+      },
+    );
+  } catch (e) {
+    console.warn("listen vbcable-download-complete failed:", e);
+  }
+
+  try {
+    unlistenCableError = await listen<{ message: string }>(
+      "vbcable-download-error",
+      (event) => {
+        const msg = event.payload?.message || "下载失败";
+        if (msg.includes("已取消")) {
+          resetCableDownloadState();
+          return;
+        }
+        cableDownloadPhase.value = "error";
+        cableDownloadProgress.value = null;
+        cableDownloadMessage.value = msg;
+        prependLog(`VB-CABLE 驱动包下载失败: ${msg}`);
+      },
+    );
+  } catch (e) {
+    console.warn("listen vbcable-download-error failed:", e);
+  }
 });
 
 onUnmounted(() => {
   unlistenKey?.();
-  unlistenKeyOutput?.();
-  unlistenKeyProbe?.();
-  if (keyProbeActive.value) {
-    void invoke("stop_xiaomi_key_probe").catch(() => undefined);
-  }
   unlistenMeter?.();
   unlistenAtvvRepair?.();
   unlistenAtvvCancel?.();
   unlistenWinuhidProgress?.();
   unlistenWinuhidComplete?.();
   unlistenWinuhidError?.();
+  unlistenCableProgress?.();
+  unlistenCableComplete?.();
+  unlistenCableError?.();
   if (hostPollTimer) clearInterval(hostPollTimer);
   if (devicePollTimer) clearInterval(devicePollTimer);
   if (voiceTipCloseTimer) clearTimeout(voiceTipCloseTimer);
@@ -1534,14 +1556,14 @@ async function retryLoadConfig() {
                 :disabled="voiceRepairing || restarting"
                 @click="voiceDetectAndRepair"
               >
-                {{ voiceRepairing ? "处理中..." : "虚拟声卡检测与修复" }}
+                {{ voiceRepairing ? "处理中..." : "虚拟声卡修复" }}
               </button>
               <button
                 ref="repairInfoBtn"
                 type="button"
                 class="title-info"
                 :aria-expanded="showRepairTip"
-                aria-label="虚拟声卡检测与修复说明"
+                aria-label="虚拟声卡修复说明"
                 @mouseenter="openRepairTip"
                 @mouseleave="scheduleCloseRepairTip"
                 @focus="openRepairTip"
@@ -1580,7 +1602,7 @@ async function retryLoadConfig() {
                     </ul>
                   </div>
                   <p class="tip-foot">
-                    平时语音正常就不必反复点；若提示必须重启电脑，按提示重启后再试。结果会写在右侧状态日志。
+                    点按钮会先弹出选项：默认选「自动修复」即可；也可用下载包 / 官网自测。若提示必须重启电脑，按提示重启后再试。结果会写在右侧状态日志。
                   </p>
                 </div>
               </Teleport>
@@ -1638,7 +1660,7 @@ async function retryLoadConfig() {
                     </ul>
                   </div>
                   <p class="tip-foot">
-                    会弹出 UAC 管理员确认，请点允许。点按钮后会打开修复选项：自动修复、强制重装、导出到桌面或从 Release 下载。仅当 Windows 返回必须重启时才重启；否则再点一次「自动修复」。这和「虚拟声卡检测与修复」「修复 ATVV 连接」不是一回事。
+                    会弹出 UAC 管理员确认，请点允许。点按钮后会打开修复选项：自动修复、强制重装、导出到桌面或从 Release 下载。仅当 Windows 返回必须重启时才重启；否则再点一次「自动修复」。这和「虚拟声卡修复」「修复 ATVV 连接」不是一回事。
                   </p>
                 </div>
               </Teleport>
@@ -1677,7 +1699,7 @@ async function retryLoadConfig() {
                   @mouseleave="scheduleCloseAtvvTip"
                 >
                   <p class="tip-lead">
-                    修好遥控器到电脑的「语音专用蓝牙通道」（ATVV）。通道正常后，按住语音键才有绿色音频波动，也不会误触发系统 F5 插入日期。
+                    修好遥控器到电脑的「语音专用蓝牙通道」（ATVV）。通道正常后，按住语音键才有绿色音频波动，语音听写才能用。
                   </p>
                   <div class="tip-block tip-on">
                     <div class="tip-badge">会做什么</div>
@@ -1696,7 +1718,7 @@ async function retryLoadConfig() {
                     </ul>
                   </div>
                   <p class="tip-foot">
-                    平时语音和波形都正常就不必点。这和「虚拟声卡检测与修复」不同：那边管电脑声卡，这边管遥控器蓝牙语音通道。
+                    平时语音和波形都正常就不必点。这和「虚拟声卡修复」不同：那边管电脑声卡，这边管遥控器蓝牙语音通道。
                   </p>
                 </div>
               </Teleport>
@@ -1754,51 +1776,32 @@ async function retryLoadConfig() {
                     </ul>
                   </div>
                   <p class="tip-foot">
-                    返回 / 音量专用通道会尽量保持，一般不必为此反复重启。若仍无效，可再试「虚拟声卡检测与修复」，或查看日志。
+                    返回 / 音量专用通道会尽量保持，一般不必为此反复重启。若仍无效，可再试「虚拟声卡修复」，或查看日志。
                   </p>
                 </div>
               </Teleport>
             </div>
-            <button class="btn btn-secondary" type="button" @click="openLogs">
-              日志
-            </button>
-            <button
-              class="btn btn-secondary"
-              type="button"
-              :class="{ 'btn-probe-on': keyProbeActive }"
-              @click="toggleKeyProbe"
-            >
-              {{ keyProbeActive ? "停止键盘探测" : "键盘探测" }}
-            </button>
-            <button
-              class="btn btn-secondary"
-              type="button"
-              @click="openKeyProbeLog"
-              title="打开 key-probe.log"
-            >
-              探测日志
-            </button>
-            <button
-              class="btn btn-secondary"
-              type="button"
-              @click="showSetupTips = true"
-            >
-              输入法设置
-            </button>
+            <div class="host-action-group">
+              <button
+                class="btn btn-secondary"
+                type="button"
+                @click="showSetupTips = true"
+              >
+                输入法设置
+              </button>
+            </div>
           </div>
-          <p v-if="keyProbeHint || keyProbeAnalysis" class="key-probe-hint">
-            <span v-if="keyProbeHint">{{ keyProbeHint }}</span>
-            <span v-if="keyProbeAnalysis"> · {{ keyProbeAnalysis }}</span>
-          </p>
-          <p v-if="keyProbeLive.length" class="key-probe-live">
-            最近：{{ keyProbeLive.slice(0, 12).join(" ") }}
-          </p>
         </section>
       </div>
 
       <aside class="log-aside">
         <section class="card log-card">
-          <p class="card-text">状态日志</p>
+          <div class="log-card-head">
+            <p class="card-text">状态日志</p>
+            <button class="btn btn-tiny btn-secondary" type="button" @click="openLogs">
+              日志
+            </button>
+          </div>
           <div ref="logAreaRef" class="log-area">
             <p v-for="entry in logs" :key="entry.id" class="log-entry">
               <span class="log-time">{{ entry.time }}</span>
@@ -1817,13 +1820,6 @@ async function retryLoadConfig() {
             <h3 id="setup-tips-title">输入法设置</h3>
             <button class="btn btn-secondary" type="button" @click="showSetupTips = false">关闭</button>
           </div>
-          <p class="setup-tips-lead">
-            语音键快捷键要和输入法里设的一样，可先点「快速应用」。
-          </p>
-          <p v-if="setupApplyHint" class="setup-apply-hint setup-apply-hint-global">
-            {{ setupApplyHint }}
-          </p>
-
           <div class="setup-ime-tabs" role="tablist" aria-label="输入法分类">
             <button
               v-for="tab in imeTabs"
@@ -1838,6 +1834,10 @@ async function retryLoadConfig() {
               {{ tab.label }}
             </button>
           </div>
+          <div class="setup-tips-body">
+          <p v-if="setupApplyHint" class="setup-apply-hint setup-apply-hint-global">
+            {{ setupApplyHint }}
+          </p>
 
           <div v-if="setupImeTab === 'faq'" class="setup-ime-panel" role="tabpanel">
             <div class="setup-ime-warn setup-ime-faq-warn" role="note">
@@ -1862,13 +1862,16 @@ async function retryLoadConfig() {
                 <span class="setup-ime-tag">{{ qianwenGuide.tag }}</span>
               </header>
               <ol class="setup-ime-steps">
-                <li v-for="(step, idx) in qianwenGuide.steps" :key="idx">{{ step }}</li>
+                <li v-for="(step, idx) in qianwenGuide.steps" :key="idx">
+                  <span class="setup-ime-step-text">{{ step.text }}</span>
+                  <span v-if="step.aside" class="setup-ime-step-aside">{{ step.aside }}</span>
+                </li>
               </ol>
               <div class="setup-ime-apply setup-ime-apply-row">
                 <button
                   v-for="preset in qianwenPresets"
                   :key="preset.id"
-                  class="btn btn-primary"
+                  class="btn btn-ime-apply"
                   type="button"
                   :disabled="!config"
                   @click="applyImePreset(preset.id)"
@@ -1890,11 +1893,15 @@ async function retryLoadConfig() {
                 <span class="setup-ime-tag">{{ preset.tag }}</span>
               </header>
               <ol class="setup-ime-steps">
-                <li v-for="(step, idx) in preset.steps" :key="idx">{{ step }}</li>
+                <li v-for="(step, idx) in preset.steps" :key="idx">
+                  <span class="setup-ime-step-text">{{ step.text }}</span>
+                  <span v-if="step.aside" class="setup-ime-step-aside">{{ step.aside }}</span>
+                </li>
               </ol>
+              <p v-if="preset.quickTip" class="setup-ime-quick-tip">{{ preset.quickTip }}</p>
               <div class="setup-ime-apply">
                 <button
-                  class="btn btn-primary"
+                  class="btn btn-ime-apply"
                   type="button"
                   :disabled="!config"
                   @click="applyImePreset(preset.id)"
@@ -1903,10 +1910,10 @@ async function retryLoadConfig() {
                 </button>
               </div>
               <figure v-if="isWechatPreset(preset.id)" class="setup-ime-figure">
-                <figcaption>微信 · 「按住说话」快捷键</figcaption>
+                <figcaption>微信 · 「按住说话」须设为「F5 + 本软件快捷键」（例：F5 + 左 Ctrl + 左 Win）</figcaption>
                 <img
                   :src="wechatImeHotkeysImg"
-                  alt="微信输入法按住说话快捷键设置"
+                  alt="微信输入法按住说话：F5 加本软件设置的快捷键"
                   class="setup-ime-img"
                 />
               </figure>
@@ -1919,6 +1926,7 @@ async function retryLoadConfig() {
                 />
               </figure>
             </article>
+          </div>
           </div>
         </div>
       </div>
@@ -1941,17 +1949,79 @@ async function retryLoadConfig() {
           </div>
         </div>
       </div>
-      <div v-if="showVoiceChoice" class="voice-modal-backdrop" @click.self="showVoiceChoice = false">
+      <div
+        v-if="showVoiceChoice"
+        class="voice-modal-backdrop"
+        @click.self="cableDownloadPhase !== 'downloading' && !voiceRepairing && (showVoiceChoice = false)"
+      >
         <div class="voice-modal" role="dialog" aria-modal="true">
-          <h3>未检测到 VB-CABLE</h3>
-          <p>{{ voiceChoiceMsg || "请选择安装方式：" }}</p>
-          <p class="voice-modal-uac-tip">如弹出 Windows 管理员确认（UAC），点同意</p>
-          <p class="voice-modal-reboot-tip">安装完成必须重启系统</p>
+          <h3>虚拟声卡修复</h3>
+          <p>{{ voiceChoiceMsg || "请选择检测 / 安装方式：" }}</p>
+          <p class="voice-modal-uac-tip">安装内嵌驱动时如弹出 Windows 管理员确认（UAC），点同意</p>
+          <p class="voice-modal-reboot-tip">新装驱动完成必须重启系统后才会生效</p>
+          <div class="voice-modal-reboot-followup">
+            <p class="voice-modal-reboot-followup-title">重启后请按下面做一遍：</p>
+            <ol>
+              <li>重新打开本软件</li>
+              <li>再点「虚拟声卡修复」→「自动修复」一次</li>
+              <li>若弹出 UAC，点允许；成功后默认麦克风会设为 CABLE Output</li>
+            </ol>
+            <p>
+              强制重装后同样需要重启，重启后也请再点一次「自动修复」。仅装驱动、不点自动修复，语音通路可能仍未就绪。
+            </p>
+          </div>
+
+          <div
+            v-if="cableDownloadPhase === 'downloading' || cableDownloadPhase === 'error'"
+            class="winuhid-download-progress"
+            role="status"
+            aria-live="polite"
+          >
+            <div class="winuhid-download-head">
+              <span class="winuhid-download-label">
+                {{
+                  cableDownloadPhase === "downloading"
+                    ? "正在下载驱动包…"
+                    : "下载失败"
+                }}
+              </span>
+              <span
+                v-if="cableDownloadPhase === 'downloading'"
+                class="winuhid-download-meta"
+              >
+                {{ cableDownloadProgressLabel }}
+              </span>
+            </div>
+            <div
+              v-if="cableDownloadPhase === 'downloading'"
+              class="winuhid-download-track"
+              :class="{
+                indeterminate: cableDownloadProgress?.percent == null,
+              }"
+            >
+              <div
+                class="winuhid-download-bar"
+                :style="{ width: cableDownloadProgressWidth() }"
+              />
+            </div>
+            <p v-if="cableDownloadMessage" class="winuhid-download-msg">
+              {{ cableDownloadMessage }}
+            </p>
+          </div>
+
           <div class="voice-modal-actions">
             <button
               class="btn btn-primary"
               type="button"
-              :disabled="voiceRepairing"
+              :disabled="voiceRepairing || cableDownloadPhase === 'downloading'"
+              @click="chooseVoiceSource('auto')"
+            >
+              {{ voiceRepairing ? "处理中…" : "自动修复" }}
+            </button>
+            <button
+              class="btn btn-secondary"
+              type="button"
+              :disabled="voiceRepairing || cableDownloadPhase === 'downloading'"
               @click="chooseVoiceSource('embedded')"
             >
               使用内嵌驱动安装
@@ -1959,25 +2029,52 @@ async function retryLoadConfig() {
             <button
               class="btn btn-secondary"
               type="button"
-              :disabled="voiceRepairing"
-              @click="chooseVoiceSource('download_zip')"
+              :disabled="voiceRepairing || cableDownloadPhase === 'downloading'"
+              @click="chooseVoiceSource('embedded_force')"
             >
-              下载最新驱动包手动安装
+              使用内嵌驱动强制重装
             </button>
+            <div class="voice-modal-download-row">
+              <button
+                class="btn btn-secondary"
+                type="button"
+                :disabled="voiceRepairing || cableDownloadPhase === 'downloading'"
+                @click="chooseVoiceSource('download_zip')"
+              >
+                {{
+                  cableDownloadPhase === "downloading"
+                    ? "下载中…"
+                    : "下载最新驱动包手动安装"
+                }}
+              </button>
+              <button
+                v-if="cableDownloadPhase === 'downloading'"
+                class="btn btn-danger"
+                type="button"
+                @click="stopCableZipDownload"
+              >
+                停止下载
+              </button>
+            </div>
             <button
               class="btn btn-secondary"
               type="button"
-              :disabled="voiceRepairing"
+              :disabled="voiceRepairing || cableDownloadPhase === 'downloading'"
               @click="chooseVoiceSource('download_page')"
             >
               打开VB-CABLE官网
             </button>
-            <button class="btn btn-secondary" type="button" @click="showVoiceChoice = false">
+            <button
+              class="btn btn-secondary"
+              type="button"
+              :disabled="cableDownloadPhase === 'downloading'"
+              @click="showVoiceChoice = false"
+            >
               取消
             </button>
           </div>
           <p class="voice-modal-note">
-            内嵌为已校验的 VB-CABLE 4.5；安装时会弹出 Windows 管理员确认。官网下载适合需要更新版本时使用。
+            「自动修复」：已就绪则只校正默认麦克风；未安装则回到本窗让你选安装方式。「内嵌安装」在已检测到 CABLE 时不会重装驱动；异常时用「强制重装」。
           </p>
         </div>
       </div>
@@ -1996,6 +2093,15 @@ async function retryLoadConfig() {
           <h3 id="voice-reboot-title">需要重启 Windows</h3>
           <p>{{ voiceRebootMsg || "驱动已安装，必须重启系统后虚拟声卡才会生效。" }}</p>
           <p class="voice-modal-reboot-tip">安装完成必须重启系统</p>
+          <div class="voice-modal-reboot-followup">
+            <p class="voice-modal-reboot-followup-title">重启后请按下面做一遍：</p>
+            <ol>
+              <li>重新打开本软件</li>
+              <li>再点「虚拟声卡修复」→「自动修复」一次</li>
+              <li>若弹出 UAC，点允许；成功后默认麦克风会设为 CABLE Output</li>
+            </ol>
+            <p>不要只重启、不点「自动修复」，否则端点可能仍未校正。</p>
+          </div>
           <div class="voice-modal-actions">
             <button class="btn btn-primary" type="button" @click="showVoiceReboot = false">
               知道了
@@ -2016,7 +2122,7 @@ async function retryLoadConfig() {
           <p class="voice-modal-reboot-tip">仅在 Windows 明确要求时才必须重启；否则再点一次「自动修复」即可</p>
 
           <div
-            v-if="winuhidDownloadPhase !== 'idle'"
+            v-if="winuhidDownloadPhase === 'downloading' || winuhidDownloadPhase === 'error'"
             class="winuhid-download-progress"
             role="status"
             aria-live="polite"
@@ -2026,9 +2132,7 @@ async function retryLoadConfig() {
                 {{
                   winuhidDownloadPhase === "downloading"
                     ? "正在下载驱动包…"
-                    : winuhidDownloadPhase === "complete"
-                      ? "下载完成"
-                      : "下载失败"
+                    : "下载失败"
                 }}
               </span>
               <span
@@ -2039,11 +2143,10 @@ async function retryLoadConfig() {
               </span>
             </div>
             <div
+              v-if="winuhidDownloadPhase === 'downloading'"
               class="winuhid-download-track"
               :class="{
-                indeterminate:
-                  winuhidDownloadPhase === 'downloading' &&
-                  winuhidDownloadProgress?.percent == null,
+                indeterminate: winuhidDownloadProgress?.percent == null,
               }"
             >
               <div
@@ -2081,18 +2184,28 @@ async function retryLoadConfig() {
             >
               导出到桌面手动安装
             </button>
-            <button
-              class="btn btn-secondary"
-              type="button"
-              :disabled="winuhidRepairing || winuhidDownloadPhase === 'downloading'"
-              @click="chooseWinuhidSource('download_zip')"
-            >
-              {{
-                winuhidDownloadPhase === "downloading"
-                  ? "下载中…"
-                  : "下载驱动包手动安装"
-              }}
-            </button>
+            <div class="voice-modal-download-row">
+              <button
+                class="btn btn-secondary"
+                type="button"
+                :disabled="winuhidRepairing || winuhidDownloadPhase === 'downloading'"
+                @click="chooseWinuhidSource('download_zip')"
+              >
+                {{
+                  winuhidDownloadPhase === "downloading"
+                    ? "下载中…"
+                    : "下载驱动包手动安装"
+                }}
+              </button>
+              <button
+                v-if="winuhidDownloadPhase === 'downloading'"
+                class="btn btn-danger"
+                type="button"
+                @click="stopWinuhidZipDownload"
+              >
+                停止下载
+              </button>
+            </div>
             <button
               class="btn btn-secondary"
               type="button"
@@ -2146,23 +2259,7 @@ async function retryLoadConfig() {
               lastMappingFlash.phase === "up" ? "抬起" : "按下"
             }}</span>
             <span class="mapping-flash-remote">{{ lastMappingFlash.remote }}</span>
-            <template v-if="lastMappingFlash.outputs.length">
-              <span class="mapping-flash-sep" aria-hidden="true">：</span>
-              <template
-                v-for="(out, idx) in lastMappingFlash.outputs"
-                :key="`${out.label}-${out.unexpected}-${idx}`"
-              >
-                <span v-if="idx > 0" class="mapping-flash-sep">+</span>
-                <span
-                  class="mapping-flash-mapped"
-                  :class="{ 'mapping-flash-extra': out.unexpected }"
-                  :title="out.unexpected ? '多出来的原生键（漏键/双触发）' : '本程序注入的映射键'"
-                >
-                  {{ out.label }}<template v-if="out.count > 1">×{{ out.count }}</template>
-                </span>
-              </template>
-            </template>
-            <template v-else-if="lastMappingFlash.mapped">
+            <template v-if="lastMappingFlash.mapped">
               <span class="mapping-flash-sep" aria-hidden="true">：</span>
               <span class="mapping-flash-mapped">{{ lastMappingFlash.mapped }}</span>
             </template>
@@ -2378,6 +2475,12 @@ async function retryLoadConfig() {
   width: 100%;
   max-width: none;
   box-sizing: border-box;
+  /* 抵消 main-content 底部 padding 的一半（20 → 有效 10） */
+  margin-bottom: -10px;
+}
+.mapping-layout.card {
+  /* 相对 .card 的 10px，下边减半 */
+  padding-bottom: 5px;
 }
 .mapping-heading {
   display: flex;
@@ -2429,10 +2532,6 @@ async function retryLoadConfig() {
 .mapping-flash-mapped {
   color: var(--accent, #0f766e);
   font-weight: 600;
-}
-.mapping-flash-extra {
-  color: #dc2626;
-  font-weight: 700;
 }
 @keyframes mapping-flash-in {
   from {
@@ -2613,6 +2712,17 @@ async function retryLoadConfig() {
   overflow: hidden;
   box-sizing: border-box;
 }
+.log-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-bottom: 4px;
+}
+.log-card-head .card-text {
+  margin: 0;
+}
 .log-card h3 {
   margin: 0 0 6px;
   flex-shrink: 0;
@@ -2755,13 +2865,21 @@ async function retryLoadConfig() {
 .host-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  justify-content: space-between;
   align-items: center;
+  gap: 8px;
+  width: 100%;
 }
 .host-action-group {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  flex: 0 1 auto;
+}
+.host-actions .btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 5px;
 }
 .btn {
   padding: 8px 16px;
@@ -2771,6 +2889,14 @@ async function retryLoadConfig() {
   font-weight: 500;
   cursor: pointer;
   transition: all 0.15s ease;
+}
+.btn-tiny {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.3;
+  border-radius: 4px;
+  flex-shrink: 0;
 }
 .btn:disabled {
   opacity: 0.6;
@@ -2784,19 +2910,6 @@ async function retryLoadConfig() {
 .btn-secondary:hover:not(:disabled) {
   background: #e2e8f0;
 }
-.btn-probe-on {
-  background: #fef3c7;
-  border-color: #f59e0b;
-  color: #92400e;
-}
-.key-probe-hint,
-.key-probe-live {
-  margin: 8px 0 0;
-  font-size: 12px;
-  color: var(--muted, #64748b);
-  line-height: 1.4;
-  word-break: break-all;
-}
 .btn-primary {
   background: var(--primary, #2563eb);
   color: #fff;
@@ -2804,6 +2917,26 @@ async function retryLoadConfig() {
 }
 .btn-primary:hover:not(:disabled) {
   filter: brightness(0.95);
+}
+.btn-danger {
+  background: #dc2626;
+  color: #fff;
+  border: 1px solid #b91c1c;
+}
+.btn-danger:hover:not(:disabled) {
+  background: #b91c1c;
+}
+.voice-modal-download-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.voice-modal-download-row .btn {
+  flex: 1 1 auto;
+}
+.voice-modal-download-row .btn-danger {
+  flex: 0 0 auto;
 }
 
 .voice-modal-backdrop {
@@ -2900,12 +3033,41 @@ async function retryLoadConfig() {
   line-height: 1.45;
 }
 .voice-modal-reboot-tip {
-  margin: 0 0 16px !important;
+  margin: 0 0 8px !important;
   font-size: 14px !important;
   font-weight: 700;
   color: #dc2626 !important;
   text-align: center;
   line-height: 1.45;
+}
+.voice-modal-reboot-followup {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  font-size: 12px;
+  color: #7f1d1d;
+  line-height: 1.5;
+  text-align: left;
+}
+.voice-modal-reboot-followup-title {
+  margin: 0 0 6px !important;
+  font-size: 12px !important;
+  font-weight: 700;
+  color: #991b1b !important;
+}
+.voice-modal-reboot-followup ol {
+  margin: 0 0 8px;
+  padding-left: 1.25em;
+}
+.voice-modal-reboot-followup li {
+  margin: 0 0 2px;
+}
+.voice-modal-reboot-followup p {
+  margin: 0 !important;
+  font-size: 12px !important;
+  color: #7f1d1d !important;
 }
 .voice-modal-note {
   margin-top: 14px !important;
@@ -2923,25 +3085,33 @@ async function retryLoadConfig() {
 
 .setup-tips-modal {
   width: min(560px, 100%);
-  max-height: min(86vh, 820px);
+  max-height: min(72vh, 560px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 16px 18px 18px;
+}
+.setup-tips-body {
+  flex: 1;
+  min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  padding: 16px 18px 18px;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  padding-right: 2px;
 }
-.setup-tips-modal::-webkit-scrollbar {
+.setup-tips-body::-webkit-scrollbar {
   width: 8px;
 }
-.setup-tips-modal::-webkit-scrollbar-track {
+.setup-tips-body::-webkit-scrollbar-track {
   background: #f1f5f9;
   border-radius: 4px;
 }
-.setup-tips-modal::-webkit-scrollbar-thumb {
+.setup-tips-body::-webkit-scrollbar-thumb {
   background: #94a3b8;
   border-radius: 4px;
 }
-.setup-tips-modal::-webkit-scrollbar-thumb:hover {
+.setup-tips-body::-webkit-scrollbar-thumb:hover {
   background: #64748b;
 }
 .setup-tips-head {
@@ -2949,13 +3119,10 @@ async function retryLoadConfig() {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 6px;
-  position: sticky;
-  top: -16px;
-  z-index: 1;
-  margin-left: -2px;
-  margin-right: -2px;
-  padding: 2px;
+  margin: 0;
+  padding: 0 0 8px;
+  flex-shrink: 0;
+  z-index: 2;
   background: var(--card-bg, #fff);
 }
 .setup-tips-head h3 {
@@ -2965,21 +3132,14 @@ async function retryLoadConfig() {
   padding: 4px 10px;
   font-size: 12px;
 }
-.setup-tips-lead {
-  margin: 0 0 10px !important;
-  font-size: 12px !important;
-  color: #64748b !important;
-}
 .setup-ime-tabs {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin: 0 0 14px;
-  padding-bottom: 10px;
+  flex-shrink: 0;
+  margin: 0 0 10px;
+  padding: 8px 0 10px;
   border-bottom: 1px solid var(--border);
-  position: sticky;
-  top: 28px;
-  z-index: 1;
   background: var(--card-bg, #fff);
 }
 .setup-ime-tab {
@@ -3094,6 +3254,25 @@ async function retryLoadConfig() {
 .setup-ime-steps li + li {
   margin-top: 4px;
 }
+.setup-ime-step-text {
+  display: block;
+}
+.setup-ime-step-aside {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #64748b;
+  font-weight: 400;
+}
+.setup-ime-quick-tip {
+  margin: 10px 0 16px !important;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: #2563eb !important;
+  font-weight: 600;
+}
 .setup-ime-steps code {
   font-size: 12px;
   padding: 1px 5px;
@@ -3105,12 +3284,28 @@ async function retryLoadConfig() {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: center;
   gap: 10px;
   margin-bottom: 12px;
 }
 .setup-ime-apply .btn {
-  padding: 6px 12px;
+  padding: 6px 14px;
   font-size: 13px;
+  font-weight: 600;
+}
+/* 马卡龙绿：白字仍清晰可读 */
+.btn-ime-apply {
+  background: #4db88a;
+  color: #fff;
+  border: 1px solid #3ea578;
+}
+.btn-ime-apply:hover:not(:disabled) {
+  background: #3ea578;
+  border-color: #35956b;
+}
+.btn-ime-apply:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 .setup-ime-apply-row {
   flex-direction: column;

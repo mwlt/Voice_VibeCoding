@@ -105,7 +105,7 @@ fn no_session_no_arm_does_not_swallow_physical_f5() {
     );
 }
 
-/// 回归：LL 回调里 sleep 等 ATVV 会被 Windows 静默卸钩 → 间歇漏 F5 / 唤醒失败。
+/// 回归：sleep 须在独立 helper 内且 bounded；`should_suppress_voice_f5` 本体不直接 sleep。
 #[test]
 fn should_suppress_voice_f5_must_not_block_wait() {
     let src = include_str!("key_mapping.rs");
@@ -116,11 +116,15 @@ fn should_suppress_voice_f5_must_not_block_wait() {
         .expect("should_suppress_voice_f5 body");
     assert!(
         !fn_body.contains("wait_for_direct_signal"),
-        "must not wait/sleep inside LL hook suppress path"
+        "must not use legacy wait_for_direct_signal name"
     );
     assert!(
         !fn_body.contains("thread::sleep") && !fn_body.contains("std::thread::sleep"),
-        "must not sleep inside should_suppress_voice_f5"
+        "must not sleep inside should_suppress_voice_f5 body"
+    );
+    assert!(
+        fn_body.contains("wait_for_mic_correlate"),
+        "Python-parity bounded wait via helper"
     );
 }
 

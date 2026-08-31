@@ -1,7 +1,7 @@
 //! 语音 F5 简化模型契约（docs/VOICE_F5_SIMPLE_PLAN.md）。
 //!
 //! 路径：gadget 清 0x003E(F5) → 会话 LL 吞 → 注入前 bump → WinUHid 映射。
-//! 禁止：neutralize / SendInput 清 F5 / LL 内 sleep。
+//! 禁止：neutralize / SendInput 清 F5。LL 内允许 bounded mic wait（Python 80ms，仅会话在线）。
 //!
 //! 运行: cargo test --test voice_f5_home_like -- --nocapture
 
@@ -57,7 +57,10 @@ fn armed_still_suppresses_without_session() {
     set_input_session_active(false);
     arm_voice_native_suppress();
     assert!(should_suppress_voice_f5(true, false, false));
-    assert!(!should_suppress_voice_f5(false, true, false));
+    assert!(
+        should_suppress_voice_f5(false, true, false),
+        "paired KEYUP must suppress when sticky (Python parity)"
+    );
     disarm_voice_native_suppress();
 }
 
@@ -68,7 +71,10 @@ fn voice_period_swallows_without_session() {
     set_input_session_active(false);
     begin_voice_period();
     assert!(should_suppress_voice_f5(true, false, false));
-    assert!(!should_suppress_voice_f5(false, true, false));
+    assert!(
+        should_suppress_voice_f5(false, true, false),
+        "paired KEYUP must suppress when sticky (Python parity)"
+    );
     end_voice_period("test");
     // period 结束保留 sticky；须 disarm 才彻底放开物理 F5 DOWN
     disarm_voice_native_suppress();
@@ -89,7 +95,7 @@ fn f5_keyup_passes_if_keydown_never_suppressed() {
 }
 
 #[test]
-fn suppress_path_must_not_sleep_and_keys_off_session() {
+fn suppress_path_bounded_wait_and_keyup_contract() {
     let src = include_str!("../src/bridges/xiaomi/key_mapping.rs");
     let body = src
         .split("pub fn should_suppress_voice_f5")
@@ -99,16 +105,16 @@ fn suppress_path_must_not_sleep_and_keys_off_session() {
     assert!(!body.contains("wait_for_direct_signal"));
     assert!(!body.contains("thread::sleep"));
     assert!(
-        !body.contains("input_session_active"),
-        "must not key off whole input session (blocks physical keyboard F5)"
-    );
-    assert!(
-        body.contains("return false"),
-        "F5 KEYUP path must return false (always pass UP to unstick)"
+        body.contains("wait_for_mic_correlate"),
+        "bounded mic wait delegated to helper (Python parity)"
     );
     assert!(
         body.contains("VOICE_F5_DOWN_SUPPRESSED"),
-        "F5 KEYUP path must clear sticky"
+        "F5 KEYUP path must read/clear sticky"
+    );
+    assert!(
+        !body.contains("always_forward_to_os"),
+        "UP must not always forward; Python pairs suppress when sticky"
     );
 }
 
@@ -193,8 +199,65 @@ fn mic_open_must_not_bump_hook() {
         .expect("0x08 MIC_OPEN arm");
     assert!(!mic.contains("bump_hook"), "MIC_OPEN must NOT bump_hook");
     assert!(
-        mic.contains("begin_voice_period"),
-        "MIC_OPEN must begin_voice_period"
+        !mic.contains("begin_voice_period"),
+        "MIC_OPEN must NOT begin_voice_period (Python mark_voice_signal only)"
+    );
+    assert!(
+        mic.contains("mark_direct_signal"),
+        "MIC_OPEN must mark mic for F5 correlate"
+    );
+}
+
+#[test]
+fn audio_start_0x04_must_not_double_begin_voice_period() {
+    // Python 0x04: mark + voice_shortcut.press only.
+    // period 只由 handle_voice 进入一次；input_session 再 begin → 日志双 period_begin。
+    let session = include_str!("../src/bridges/xiaomi/input_session.rs");
+    let arm = session
+        .split("0x04 =>")
+        .nth(1)
+        .and_then(|s| s.split("0x00 =>").next())
+        .expect("0x04 AUDIO_START arm");
+    assert!(
+        !arm.contains("begin_voice_period"),
+        "0x04 must NOT begin_voice_period (handle_voice owns single begin)"
+    );
+    assert!(
+        arm.contains("mark_direct_signal"),
+        "0x04 must still mark mic/voice for F5 correlate"
+    );
+    assert!(
+        arm.contains("on_voice_remote_press"),
+        "0x04 must still press shortcut via on_voice_remote_press"
+    );
+    let mapping = include_str!("../src/bridges/xiaomi/key_mapping.rs");
+    let handle = mapping
+        .split("fn handle_voice")
+        .nth(1)
+        .and_then(|s| s.split("\nfn ").next())
+        .expect("handle_voice");
+    assert!(
+        handle.contains("begin_voice_period"),
+        "handle_voice remains the single begin_voice_period site"
+    );
+}
+
+#[test]
+fn audio_stop_0x00_must_not_double_end_voice_period() {
+    // release 已由 handle_voice(false) → end_voice_period；opcode 再 end 会刷双 period_end。
+    let session = include_str!("../src/bridges/xiaomi/input_session.rs");
+    let stop = session
+        .split("0x00 =>")
+        .nth(1)
+        .and_then(|s| s.split("0x0A").next())
+        .expect("0x00 AUDIO_STOP arm");
+    assert!(
+        !stop.contains("end_voice_period"),
+        "0x00 must NOT end_voice_period (handle_voice release owns single end)"
+    );
+    assert!(
+        stop.contains("on_voice_remote_release"),
+        "0x00 must still release via on_voice_remote_release"
     );
 }
 

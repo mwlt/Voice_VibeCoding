@@ -302,7 +302,7 @@ fn voice_env_status_inner(force: bool) -> VoiceEnvStatus {
     let zip = find_driver_zip();
     let embedded_available = zip.is_some() && find_configure_script().is_some();
     let message = if ready {
-        "VB-CABLE 已就绪。可点「虚拟声卡检测与修复」将默认麦克风设为 CABLE Output。".into()
+        "VB-CABLE 已就绪。可点「虚拟声卡修复」将默认麦克风设为 CABLE Output。".into()
     } else if embedded_available {
         "未检测到 VB-CABLE。可使用内嵌驱动安装，或打开官网下载最新版。".into()
     } else {
@@ -335,7 +335,7 @@ fn script_result_line(text: &str) -> Option<&str> {
 fn humanize_script_result(raw: &str, ready: bool, needs_reboot: bool) -> String {
     let lower = raw.to_ascii_lowercase();
     if lower.contains("restart required") || raw.contains("需要重启") {
-        return "驱动已安装，必须重启 Windows 后虚拟声卡才会生效。重启后再点一次「虚拟声卡检测与修复」。"
+        return "驱动已安装，必须重启 Windows 后虚拟声卡才会生效。重启后再点一次「虚拟声卡修复」。"
             .into();
     }
     if let Some(rest) = raw.strip_prefix("WARNING:") {
@@ -363,7 +363,7 @@ fn humanize_script_result(raw: &str, ready: bool, needs_reboot: bool) -> String 
             return "语音环境已就绪：VB-CABLE 可用，默认麦克风已设为 CABLE Output。".into();
         }
         if needs_reboot {
-            return "驱动已安装，必须重启 Windows 后虚拟声卡才会生效。重启后再点一次「虚拟声卡检测与修复」。"
+            return "驱动已安装，必须重启 Windows 后虚拟声卡才会生效。重启后再点一次「虚拟声卡修复」。"
                 .into();
         }
         return "脚本已执行，但尚未检测到 CABLE Input/Output。若刚装驱动请重启后再试。"
@@ -377,30 +377,38 @@ fn humanize_script_result(raw: &str, ready: bool, needs_reboot: bool) -> String 
 }
 
 fn run_configure_script(mode: &str, zip: &Path) -> Result<VoiceEnvActionResult, String> {
+    run_configure_script_ex(mode, zip, false)
+}
+
+fn run_configure_script_ex(mode: &str, zip: &Path, force: bool) -> Result<VoiceEnvActionResult, String> {
     let script = find_configure_script().ok_or_else(|| "未找到 configure-xiaomi-audio.ps1".to_string())?;
     let app_path = app_path_for_script();
     log::info!(
-        "XIAOMI VOICE ENV: run script mode={mode} zip={} app={}",
+        "XIAOMI VOICE ENV: run script mode={mode} force={force} zip={} app={}",
         zip.display(),
         app_path.display()
     );
 
     let mut cmd = Command::new("powershell.exe");
-    cmd.args([
-        "-NoProfile",
-        "-WindowStyle",
-        "Hidden",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        &script.display().to_string(),
-        "-Mode",
-        mode,
-        "-AppPath",
-        &app_path.display().to_string(),
-        "-DriverZipPath",
-        &zip.display().to_string(),
-    ]);
+    let mut args = vec![
+        "-NoProfile".into(),
+        "-WindowStyle".into(),
+        "Hidden".into(),
+        "-ExecutionPolicy".into(),
+        "Bypass".into(),
+        "-File".into(),
+        script.display().to_string(),
+        "-Mode".into(),
+        mode.to_string(),
+        "-AppPath".into(),
+        app_path.display().to_string(),
+        "-DriverZipPath".into(),
+        zip.display().to_string(),
+    ];
+    if force {
+        args.push("-Force".into());
+    }
+    cmd.args(&args);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -515,6 +523,12 @@ pub fn install_embedded() -> Result<VoiceEnvActionResult, String> {
     run_configure_script("Repair", &zip)
 }
 
+/// 强制走提权安装（即使已检测到 CABLE），用于驱动异常 / 排障测试
+pub fn install_embedded_force() -> Result<VoiceEnvActionResult, String> {
+    let zip = find_driver_zip().ok_or_else(|| "内嵌 VB-CABLE 驱动包不可用".to_string())?;
+    run_configure_script_ex("Repair", &zip, true)
+}
+
 pub fn open_download_page() -> Result<VoiceEnvActionResult, String> {
     #[cfg(target_os = "windows")]
     {
@@ -532,7 +546,7 @@ pub fn open_download_page() -> Result<VoiceEnvActionResult, String> {
         ready: false,
         needs_choice: false,
         needs_reboot: false,
-        message: "已打开 VB-Audio 官网。安装完成后请再点「虚拟声卡检测与修复」。".into(),
+        message: "已打开 VB-Audio 官网。安装完成后请再点「虚拟声卡修复」。".into(),
         report_path: None,
     })
 }
@@ -554,7 +568,7 @@ pub fn open_download_zip() -> Result<VoiceEnvActionResult, String> {
         ready: false,
         needs_choice: false,
         needs_reboot: false,
-        message: "已开始下载官方驱动包。安装完成后请再点「虚拟声卡检测与修复」。".into(),
+        message: "已开始下载官方驱动包。安装完成后请再点「虚拟声卡修复」。".into(),
         report_path: None,
     })
 }

@@ -1,11 +1,12 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
   [ValidateSet("Install", "InstallElevated", "Finish", "Repair", "Restore", "Audit")]
   [string] $Mode = "Install",
   [Parameter(Mandatory = $true)]
   [string] $AppPath,
   [Parameter(Mandatory = $true)]
-  [string] $DriverZipPath
+  [string] $DriverZipPath,
+  [switch] $Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -184,7 +185,7 @@ try {
       exit 0
     }
     "Install" {
-      if (-not (Test-VBCableReady)) { Invoke-ElevatedInstall }
+      if ($Force -or -not (Test-VBCableReady)) { Invoke-ElevatedInstall }
       if (Wait-VBCable 45) { Set-DefaultCableMicrophone; Remove-Item -LiteralPath $RebootFlag -Force -ErrorAction SilentlyContinue }
       else { Set-Content -LiteralPath $RebootFlag -Value "reboot required" -Encoding ASCII; Set-FinishRunOnce; $result = "Driver installed; Windows restart required" }
     }
@@ -193,7 +194,8 @@ try {
       else { throw "VB-CABLE endpoints are still unavailable after restart" }
     }
     "Repair" {
-      if (-not (Test-VBCableReady)) { Invoke-ElevatedInstall }
+      # 默认：已就绪则只修默认麦，不重装驱动。-Force：始终走提权安装（排障/测试用）
+      if ($Force -or -not (Test-VBCableReady)) { Invoke-ElevatedInstall }
       if (Wait-VBCable 45) { Set-DefaultCableMicrophone } else { Set-FinishRunOnce; $result = "Driver installed; Windows restart required" }
     }
     "Restore" {

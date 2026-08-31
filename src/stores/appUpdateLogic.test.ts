@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  APP_UPDATE_AUTO_OPEN_DELAY_MS,
+  shouldAutoOpenForSession,
   shouldAutoOpenModal,
   shouldOpenModalFromManualCheck,
   shouldShowPassivePrompt,
@@ -65,5 +67,27 @@ describe("shouldAutoOpenModal", () => {
     expect(shouldAutoOpenModal(info({ updateAvailable: true, promptSuppressed: true }))).toBe(
       false,
     );
+  });
+});
+
+describe("shouldAutoOpenForSession", () => {
+  it("allows when not yet dismissed this session", () => {
+    expect(shouldAutoOpenForSession("1.6.0", null)).toBe(true);
+    expect(shouldAutoOpenForSession("1.6.0", "1.5.9")).toBe(true);
+  });
+
+  it("blocks when this version was closed or ignored in-session", () => {
+    expect(shouldAutoOpenForSession("1.6.0", "1.6.0")).toBe(false);
+  });
+
+  it("blocks empty latest", () => {
+    expect(shouldAutoOpenForSession("", null)).toBe(false);
+    expect(shouldAutoOpenForSession(null, null)).toBe(false);
+  });
+});
+
+describe("APP_UPDATE_AUTO_OPEN_DELAY_MS", () => {
+  it("defers long enough for bridge init (at least 8s)", () => {
+    expect(APP_UPDATE_AUTO_OPEN_DELAY_MS).toBeGreaterThanOrEqual(8_000);
   });
 });

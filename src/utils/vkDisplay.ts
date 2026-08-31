@@ -7,7 +7,7 @@ export function vkDisplayName(vk: number): string {
     0x13: "Pause",
     0x14: "CapsLock",
     0x1b: "Esc",
-    0x20: "Space",
+    0x20: "空格 Space",
     0x21: "PageUp",
     0x22: "PageDown",
     0x23: "End",

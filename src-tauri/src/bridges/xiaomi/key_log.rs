@@ -120,6 +120,16 @@ fn was_virtual_hid_recent(vk: u16) -> bool {
 
 /// 已吞掉的固件键（如 F5）——每轮按压只报一次，且勿在 LL 回调里同步 emit
 pub fn emit_suppressed_output(vk: u16) {
+    if vk == 0x74 {
+        crate::bridges::xiaomi::voice_f5_trace::event(
+            "key_output",
+            "down",
+            "suppressed",
+            "ll_hook swallowed F5 (not reaching OS)",
+            crate::bridges::xiaomi::key_mapping::voice_f5_guards_snapshot(),
+            None,
+        );
+    }
     if F5_SUPPRESS_LOGGED.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -164,6 +174,16 @@ pub fn emit_mapped_outputs(vks: &[u16], phase_down: bool) {
     let remote_s = remote.as_deref().unwrap_or("-");
     for &vk in vks {
         let label = crate::bridges::xiaomi::config::vk_code_to_name(vk);
+        if vk == 0x74 {
+            crate::bridges::xiaomi::voice_f5_trace::event(
+                "key_output",
+                phase,
+                "mapped",
+                "unexpected F5 in voice chord inject",
+                crate::bridges::xiaomi::key_mapping::voice_f5_guards_snapshot(),
+                None,
+            );
+        }
         log::info!(
             "XIAOMI KEY OUTPUT role=mapped remote={remote_s} vk=0x{vk:02X} label={label}"
         );
@@ -204,6 +224,16 @@ pub fn report_native_passthrough(vk: u16, phase_down: bool) {
     let remote = LAST_REMOTE_LABEL.lock().clone();
     let remote_s = remote.as_deref().unwrap_or("-");
     let label = crate::bridges::xiaomi::config::vk_code_to_name(vk);
+    if vk == 0x74 {
+        crate::bridges::xiaomi::voice_f5_trace::event(
+            "key_output",
+            "down",
+            "leak_extra",
+            &format!("remote={remote_s} F5 reached OS (not suppressed by hook)"),
+            crate::bridges::xiaomi::key_mapping::voice_f5_guards_snapshot(),
+            None,
+        );
+    }
     log::info!(
         "XIAOMI KEY OUTPUT role=extra remote={remote_s} vk=0x{vk:02X} label={label}"
     );

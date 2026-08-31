@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DeviceConfig } from "../types";
-import { IME_PRESETS, applyImePresetConfig, listImePresets } from "./imePreset";
+import { IME_PRESETS, applyImePresetConfig, imeStepLines, listImePresets } from "./imePreset";
 
 function baseConfig(): DeviceConfig {
   return {
@@ -51,6 +51,20 @@ describe("applyImePresetConfig", () => {
       type: "ComboKey",
       value: [0x5b, 0xa4],
     });
+  });
+
+  it("wechat steps stress F5 plus in-app shortcut", () => {
+    const preset = IME_PRESETS["wechat-hold"];
+    const steps = imeStepLines(preset.steps);
+    expect(steps).toMatch(/F5\s*\+\s*本软件/);
+    expect(steps).toMatch(/左 Ctrl \+ 左 Win/);
+    expect(steps).toMatch(/F5 \+ 左 Ctrl \+ 左 Win/);
+    expect(preset.steps).toHaveLength(3);
+    expect(preset.steps[1]?.aside).toMatch(/举例/);
+    expect(steps).not.toMatch(/两边成对/);
+    expect(steps).not.toMatch(/快捷设置方法/);
+    expect(preset.quickTip).toMatch(/快捷设置方法/);
+    expect(preset.quickTip).toMatch(/按住说话.*右侧的输入框/);
   });
 
   it("lists all presets with stable ids", () => {

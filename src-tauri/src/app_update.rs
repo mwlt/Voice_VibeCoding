@@ -266,7 +266,9 @@ pub fn spawn_startup_check(app: AppHandle) {
     std::thread::Builder::new()
         .name("app-update-check".into())
         .spawn(move || {
-            std::thread::sleep(Duration::from_secs(4));
+            // 推迟网络检测，避免与 BLE/WinUHid/语音路由冷启动抢资源；
+            // 前端还会再延迟自动弹窗（APP_UPDATE_AUTO_OPEN_DELAY_MS）。
+            std::thread::sleep(Duration::from_secs(10));
             let Some(config) = app.try_state::<ConfigManager>() else {
                 return;
             };

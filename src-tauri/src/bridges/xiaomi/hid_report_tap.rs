@@ -410,10 +410,18 @@ fn run_hub(app: AppHandle, gate_slot: Arc<Mutex<Arc<KeyEmitGate>>>, stop: Arc<At
                                         }
                                     }
                                     "cleared_f5" => {
+                                        let raw = msg.raw.as_str();
                                         tap_log(&format!(
-                                            "XIAOMI HID TAP cleared_f5 raw={}",
-                                            msg.raw
+                                            "XIAOMI HID TAP cleared_f5 raw={raw}",
                                         ));
+                                        crate::bridges::xiaomi::voice_f5_trace::event(
+                                            "gadget_tap",
+                                            "down",
+                                            "cleared",
+                                            &format!("raw={raw} stripped 0x003E before OS"),
+                                            crate::bridges::xiaomi::key_mapping::voice_f5_guards_snapshot(),
+                                            None,
+                                        );
                                     }
                                     "gatt_read" => {
                                         if let Some(data) = decode_hex(msg.raw.trim()) {
@@ -516,6 +524,29 @@ fn handle_ioctl(
         .into_iter()
         .filter(|u| forwarded.contains(u))
         .collect();
+
+    // 尽早 mark：LL 钩子仅凭 recent 吞固件 VK（不用 tap_ready，以免误伤实体键盘）
+    for &usage in &next {
+        match XiaomiButton::from_hid_usage(usage) {
+            XiaomiButton::Home => {
+                crate::bridges::xiaomi::key_mapping::mark_direct_signal("home");
+            }
+            XiaomiButton::Menu => {
+                crate::bridges::xiaomi::key_mapping::mark_direct_signal("menu");
+            }
+            XiaomiButton::VolumeUp => {
+                crate::bridges::xiaomi::key_mapping::mark_direct_signal("volume_up");
+            }
+            XiaomiButton::VolumeDown => {
+                crate::bridges::xiaomi::key_mapping::mark_direct_signal("volume_down");
+            }
+            XiaomiButton::Mute => {
+                crate::bridges::xiaomi::key_mapping::mark_direct_signal("volume_mute");
+                crate::bridges::xiaomi::key_mapping::mark_direct_signal("mute");
+            }
+            _ => {}
+        }
+    }
 
     let mut guard = active.lock();
     if next == *guard {

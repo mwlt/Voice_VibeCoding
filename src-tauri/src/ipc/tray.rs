@@ -1,11 +1,80 @@
 //! 系统托盘 — 左键还原窗口，右键菜单
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use tauri::{
     image::Image,
     menu::{Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
     tray::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager,
 };
+
+/// 0 = 初始化中（黄）, 1 = 语音就绪（蓝）, 255 = 未应用
+static ICON_STATE: AtomicU8 = AtomicU8::new(255);
+
+fn load_ready_icon(app: &AppHandle) -> Result<Image<'_>, tauri::Error> {
+    Image::from_bytes(include_bytes!("../../icons/tray-icon.png"))
+        .or_else(|_| Image::from_bytes(include_bytes!("../../icons/32x32.png")))
+        .or_else(|_| {
+            app.default_window_icon()
+                .cloned()
+                .ok_or_else(|| tauri::Error::FailedToReceiveMessage)
+        })
+}
+
+fn load_init_icon(app: &AppHandle) -> Result<Image<'_>, tauri::Error> {
+    Image::from_bytes(include_bytes!("../../icons/tray-icon-init.png"))
+        .or_else(|_| load_ready_icon(app))
+}
+
+fn apply_window_icon(app: &AppHandle, icon: &Image<'_>) {
+    if let Some(win) = app.get_webview_window("main") {
+        if let Err(e) = win.set_icon(icon.clone()) {
+            log::debug!("set window icon failed: {e}");
+        }
+    }
+}
+
+/// 按语音就绪状态切换托盘 + 任务栏图标（黄=初始化中，蓝=可语音输入）
+pub fn sync_runtime_icons(app: &AppHandle, voice_ready: bool) {
+    let next = if voice_ready { 1u8 } else { 0u8 };
+    if ICON_STATE.swap(next, Ordering::SeqCst) == next {
+        return;
+    }
+
+    let (icon, tip) = if voice_ready {
+        (
+            load_ready_icon(app),
+            "Voice VibeCoding · 语音已就绪",
+        )
+    } else {
+        (
+            load_init_icon(app),
+            "Voice VibeCoding · 设备初始化中…",
+        )
+    };
+
+    let Ok(icon) = icon else {
+        log::warn!("runtime icon load failed");
+        return;
+    };
+
+    if let Some(tray) = app.tray_by_id("main") {
+        if let Err(e) = tray.set_icon(Some(icon.clone())) {
+            log::warn!("tray set_icon failed: {e}");
+        }
+        let _ = tray.set_tooltip(Some(tip));
+    }
+    apply_window_icon(app, &icon);
+    log::info!(
+        "runtime icon -> {}",
+        if voice_ready {
+            "ready(blue)"
+        } else {
+            "init(yellow)"
+        }
+    );
+}
 
 fn quit_app(app: &AppHandle) {
     // 先停桥接 / HID Tap / 钩子 / 音频子进程，避免托盘退出后 remote-bridge-hub.exe 残留
@@ -102,6 +171,8 @@ fn on_menu_event(app: &AppHandle, id: &str) {
                 {
                     log::warn!("Tray restart bridge failed: {e}");
                 }
+                // 重启桥接后先显示初始化中
+                crate::ipc::tray::sync_runtime_icons(&app, false);
             });
         }
         "quit" => quit_app(app),
@@ -117,6 +188,7 @@ fn on_menu_event(app: &AppHandle, id: &str) {
                 else {
                     return;
                 };
+                crate::ipc::tray::sync_runtime_icons(&app, false);
                 if let Err(e) =
                     crate::ipc::commands::restart_xiaomi_bridge_inner(&app, &state, &config_manager)
                 {
@@ -137,6 +209,8 @@ fn on_menu_event(app: &AppHandle, id: &str) {
                     crate::bridges::BridgeStatus::Disconnected,
                 );
             }
+            // 断开后回到「初始化中」黄标，避免仍显示已就绪
+            sync_runtime_icons(app, false);
         }
         "t1_connect" => log::info!("Tray: connecting T1"),
         "t1_disconnect" => log::info!("Tray: disconnecting T1"),
@@ -150,20 +224,15 @@ fn on_menu_event(app: &AppHandle, id: &str) {
 pub fn setup_tray(app: &AppHandle) -> Result<TrayIcon, Box<dyn std::error::Error>> {
     let menu = build_tray_menu(app)?;
 
-    // 优先用专用托盘图；失败再退回窗口默认图标
-    let icon = Image::from_bytes(include_bytes!("../../icons/tray-icon.png"))
-        .or_else(|_| Image::from_bytes(include_bytes!("../../icons/32x32.png")))
-        .or_else(|_| {
-            app.default_window_icon()
-                .cloned()
-                .ok_or_else(|| tauri::Error::FailedToReceiveMessage)
-        })?;
+    // 启动先用黄色「初始化中」图标；就绪后再切回蓝标
+    let icon = load_init_icon(app)?;
+    ICON_STATE.store(0, Ordering::SeqCst);
 
     let tray = TrayIconBuilder::with_id("main")
-        .icon(icon)
+        .icon(icon.clone())
         .icon_as_template(false)
         .menu(&menu)
-        .tooltip("Voice VibeCoding")
+        .tooltip("Voice VibeCoding · 设备初始化中…")
         // 左键还原窗口；右键弹出菜单（Windows 默认）
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
@@ -181,6 +250,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<TrayIcon, Box<dyn std::error::Error
         })
         .build(app)?;
 
-    log::info!("System tray icon created");
+    apply_window_icon(app, &icon);
+    log::info!("System tray icon created (init/yellow)");
     Ok(tray)
 }

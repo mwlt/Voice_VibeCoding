@@ -20,7 +20,7 @@ USB HID Keyboard：**F1=`0x003A`，F5=`0x003E`**（VK_F5=`0x74` → usage = `0x7
 | S3 | `handle_voice` | 注入前 `bump_hook`（对齐 PR #8） |
 | S4 | `inject_voice_chord` / `special_keys` | **无** neutralize / SendInput 清 F5 |
 | S5 | `inject_voice_chord` + `handle_voice` | 仅 WinUHid；拒绝映射为 F5 |
-| S6 | `key_probe` | 独立 `key-probe.log`；可分析 leak / stuck / ctrl-without-win |
+| S6 | ~~`key_probe`~~ | ⛔ 已移除；日常用「日志」 |
 
 ## 简化后唯一路径
 
@@ -43,14 +43,14 @@ WinUHid 发映射键     → IME 能认（无 INJECTED）
 | 3 | 注入前 bump（PR#8） | ✅ 代码测 | `voice_press_bumps_hook_like_pr8` |
 | 4 | 移除 neutralize | ✅ | — |
 | 5 | WinUHid-only + 拒 F5 映射 | ✅ | — |
-| 6 | 键盘探测 UI + `key-probe.log` + HITL | ✅ 代码 | 设置页「键盘探测」；`scripts/hitl-key-probe-voice.ps1` |
+| 6 | 键盘探测 UI + `key-probe.log` + HITL | ⛔ 已移除（2026-08-31） | 仅为 F5 调试 HITL；日常诊断用「日志」即可 |
 
 说明：本机 `cargo test --lib` 可能 `0xc0000139`；以 `src-tauri/tests/` 为准。
 
 ## 实机（需用户）
 
 - [ ] **完全退出旧进程**后启动；日志有 HID Tap script changed / host restart（`v1.5.8-voice-f5-usage`）
-- [ ] 「键盘探测」：语音键 3 次 → **F5泄漏=否**、**粘键嫌疑=否**、见映射键
+- [x] ~~「键盘探测」~~（功能已移除）→ 验证改用「日志」/实机行为
 - [ ] 在线键盘测试：无 F5；Ctrl+Win 成对
 - [ ] 微信快捷键框 / 按住说话 / 记事本不插日期
 
@@ -63,4 +63,3 @@ WinUHid 发映射键     → IME 能认（无 INJECTED）
 
 - **后续强化（无 helper）：** `docs/VOICE_F5_LONGTERM_PLAN.md`（sticky / voice_dispatch / bump generation / 嵌套仍吞 F5 / UAC 短退避）
 - `docs/VOICE_HOLD_PR8.md`
-- `scripts/hitl-key-probe-voice.ps1`

@@ -27,7 +27,7 @@ defineExpose({ keyEl, rootRef });
 
 <template>
   <div ref="rootRef" class="remote-schematic" aria-label="小米遥控器示意">
-    <div class="row top-row">
+    <div class="top-row">
       <div class="well well-sm">
         <button
           type="button"
@@ -377,13 +377,14 @@ defineExpose({ keyEl, rootRef });
   --key: #1c1d1f;
   --key-hi: #2a2b2e;
   --ink: #d7dbe0;
-  width: 156px;
+  /* 宽度收窄：圆盘左右边距约为原 20px 的 1/3 → 7px；按键尺寸不变 */
+  width: 130px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 14px;
   user-select: none;
-  padding: 18px 14px 16px;
+  padding: 18px 6px 16px;
   border-radius: 14px;
   border: 1px solid #c5cad1;
   background:
@@ -392,50 +393,50 @@ defineExpose({ keyEl, rootRef });
   box-shadow: none;
 }
 
-.row {
-  display: flex;
-  justify-content: space-between;
+/* 与下半回退 / 音量列同宽同边距，仅水平对齐，不改纵向间距 */
+.top-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 18px;
   width: 100%;
-  padding: 0 2px;
+  padding: 0 4px;
+  justify-items: center;
+  align-items: start;
 }
 
-/* 银壳凹槽：细边清晰，左右对称 */
+/* 按键外圈井壁：默认无银圈、无阴影（避免虚边不对称） */
 .well {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  background: #a7adb5;
-  box-shadow:
-    inset 0 0 0 0.5px rgba(60, 64, 70, 0.32),
-    inset 0 0 1px rgba(0, 0, 0, 0.12),
-    inset 0.5px -0.5px 0.8px rgba(0, 0, 0, 0.1),
-    inset -0.5px 0.5px 0.8px rgba(255, 255, 255, 0.24);
+  background: transparent;
+  box-shadow: none;
 }
 
 .well-sm {
-  width: 38px;
-  height: 38px;
-  padding: 1px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
 }
 
 .well-md {
   width: 40px;
   height: 40px;
-  padding: 1px;
+  padding: 0;
 }
 
 .well-vol {
   width: 40px;
   height: 88px;
-  padding: 1px;
+  padding: 0;
   border-radius: 20px;
 }
 
 .well-dpad {
   width: 116px;
   height: 116px;
-  padding: 1.5px;
+  padding: 0;
   border-radius: 50%;
 }
 
@@ -461,45 +462,39 @@ defineExpose({ keyEl, rootRef });
   height: 21px;
 }
 
-/* 一般圆键：稍稍内凹 */
+/* 一般圆键：扁平实色，无外圈虚边 */
 .key-cap {
   width: 100%;
   height: 100%;
   padding: 0;
   border: none;
   border-radius: 50%;
-  background:
-    radial-gradient(120% 100% at 55% 40%, #2e3034 0%, #222426 55%, #1a1b1d 100%);
+  background: #1c1d1f;
   color: var(--ink);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  box-shadow:
-    inset 0 0 0 1px rgba(0, 0, 0, 0.35),
-    inset 0.8px -0.8px 2px rgba(0, 0, 0, 0.35),
-    inset -0.8px 0.8px 1.5px rgba(255, 255, 255, 0.08);
-  transition: background 0.15s, box-shadow 0.15s, color 0.15s;
+  box-shadow: none;
+  transition: background 0.15s, box-shadow 0.15s, color 0.15s, border-color 0.15s;
 }
 
-/* 电源 / 语音：纯色键面 + 白色亮边（保留）+ 黑圈模拟键帽与外壳之间的缝隙 */
+/* 电源 / 语音：无阴影，只用深灰圆边框 */
 .key-cap-sm {
-  background: #eef0f3;
+  background: #f0f2f5;
   color: #1a1b1d;
-  box-shadow:
-    0 0 0 1px #ffffff,
-    0 0 0 2px #141518,
-    0 1px 2px rgba(0, 0, 0, 0.12);
+  border: 1px solid #5c6370;
+  box-shadow: none;
 }
 
 .key-cap-sm .key-icon {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
 }
 
 .key-cap-sm .key-icon-mic {
-  width: 24px;
-  height: 24px;
+  width: 19px;
+  height: 19px;
 }
 
 /* 选中 / 悬停：扁平蓝 + 淡蓝同色边高亮，无凸起阴影 */
@@ -526,20 +521,18 @@ defineExpose({ keyEl, rootRef });
 .key-cap-sm.hover,
 .key-cap-sm.active {
   color: #eaf2ff;
+  border-color: #93c5fd;
+  box-shadow: none;
 }
 
-/* 方向大环：稍稍内凹 */
+/* 方向大环：扁平实色 */
 .dpad {
   position: relative;
   width: 100%;
   height: 100%;
   border-radius: 50%;
-  background:
-    radial-gradient(circle at 52% 44%, #2c2e32 0%, #1f2124 58%, #161718 100%);
-  box-shadow:
-    inset 0 0 0 1px rgba(0, 0, 0, 0.4),
-    inset 1px -1px 3px rgba(0, 0, 0, 0.38),
-    inset -1px 1px 2.5px rgba(255, 255, 255, 0.07);
+  background: #1c1d1f;
+  box-shadow: none;
   overflow: hidden;
 }
 
@@ -563,11 +556,11 @@ defineExpose({ keyEl, rootRef });
   height: 3px;
   border-radius: 50%;
   background: currentColor;
-  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.25);
+  box-shadow: none;
   opacity: 0.85;
 }
 
-/* 确定键：平整，仅细分割线；层级低于方向键，避免盖住选中蓝 */
+/* 确定键：与方向环同色分割，仅等宽细线 */
 .key-ok {
   position: absolute;
   left: 50%;
@@ -581,9 +574,7 @@ defineExpose({ keyEl, rootRef });
   padding: 0;
   cursor: pointer;
   background: #242628;
-  box-shadow:
-    0 0 0 1.5px rgba(0, 0, 0, 0.55),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  box-shadow: 0 0 0 1px #0f1011;
   transition: background 0.15s, box-shadow 0.15s, color 0.15s;
 }
 
@@ -659,7 +650,7 @@ defineExpose({ keyEl, rootRef });
   gap: 8px;
 }
 
-/* 音量条：整体稍内凹 */
+/* 音量条：扁平实色，无虚边 */
 .vol-rocker {
   width: 100%;
   height: 100%;
@@ -667,12 +658,8 @@ defineExpose({ keyEl, rootRef });
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  background:
-    radial-gradient(120% 80% at 55% 40%, #2a2c30 0%, #1c1d1f 55%, #151617 100%);
-  box-shadow:
-    inset 0 0 0 1px rgba(0, 0, 0, 0.4),
-    inset 0.8px -0.8px 2.5px rgba(0, 0, 0, 0.35),
-    inset -0.8px 0.8px 1.5px rgba(255, 255, 255, 0.07);
+  background: #1c1d1f;
+  box-shadow: none;
 }
 
 .vol-half {
@@ -688,10 +675,10 @@ defineExpose({ keyEl, rootRef });
 }
 
 .vol-half + .vol-half {
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
-/* 音量 ±：圆形选区，默认也稍内凹 */
+/* 音量 ±：圆形选区，默认无阴影 */
 .vol-hit {
   width: 34px;
   height: 34px;
@@ -700,10 +687,7 @@ defineExpose({ keyEl, rootRef });
   align-items: center;
   justify-content: center;
   color: inherit;
-  box-shadow:
-    inset 0 0 0 1px rgba(0, 0, 0, 0.2),
-    inset 0.6px -0.6px 1.5px rgba(0, 0, 0, 0.25),
-    inset -0.6px 0.6px 1px rgba(255, 255, 255, 0.06);
+  box-shadow: none;
   transition: background 0.15s, box-shadow 0.15s, color 0.15s;
 }
 

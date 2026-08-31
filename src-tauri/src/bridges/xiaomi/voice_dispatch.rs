@@ -49,7 +49,20 @@ pub fn clear_sink() {
 }
 
 /// LL 钩子回调专用：瞬时返回。`false` = 同相位已在队列/处理中被合并。
+///
+/// ATVV 已订阅时不再派发 firmware voice sink（对齐 Python：F5 只吞不触发 handle_voice）。
 pub fn submit_firmware_voice_key(down: bool) -> bool {
+    if crate::bridges::xiaomi::connect::atvv_subscribed() {
+        crate::bridges::xiaomi::voice_f5_trace::event(
+            "dispatch",
+            if down { "down" } else { "up" },
+            "skipped_atvv",
+            "ATVV subscribed — F5 swallow only, no firmware voice sink",
+            crate::bridges::xiaomi::key_mapping::voice_f5_guards_snapshot(),
+            None,
+        );
+        return false;
+    }
     let task = if down {
         VoiceTask::Down
     } else {
@@ -57,6 +70,14 @@ pub fn submit_firmware_voice_key(down: bool) -> bool {
     };
     let bit = task.bit();
     if PENDING.fetch_or(bit, Ordering::AcqRel) & bit != 0 {
+        crate::bridges::xiaomi::voice_f5_trace::event(
+            "dispatch",
+            task.name(),
+            "merged",
+            "same phase already pending",
+            crate::bridges::xiaomi::key_mapping::voice_f5_guards_snapshot(),
+            None,
+        );
         return false;
     }
     let Some(tx) = sender() else {
@@ -68,6 +89,14 @@ pub fn submit_firmware_voice_key(down: bool) -> bool {
         return false;
     }
     QUEUED.fetch_add(1, Ordering::AcqRel);
+    crate::bridges::xiaomi::voice_f5_trace::event(
+        "dispatch",
+        task.name(),
+        "queued",
+        &format!("merged=false pending={}", PENDING.load(Ordering::Acquire)),
+        crate::bridges::xiaomi::key_mapping::voice_f5_guards_snapshot(),
+        None,
+    );
     true
 }
 
@@ -128,6 +157,14 @@ fn dispatch(task: VoiceTask) {
         }
         order.push(task.name());
     }
+    crate::bridges::xiaomi::voice_f5_trace::event(
+        "dispatch",
+        task.name(),
+        "run_sink",
+        "worker calling firmware voice sink",
+        crate::bridges::xiaomi::key_mapping::voice_f5_guards_snapshot(),
+        None,
+    );
     let sink = SINK.lock().clone();
     if let Some(sink) = sink {
         sink(task.as_down());

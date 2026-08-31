@@ -310,7 +310,21 @@ function updateLine() {
 }
 
 async function selectButton(id: string) {
+  if (selectedId.value === id) {
+    if (capturing.value) {
+      await cancelCapture();
+    }
+    selectedId.value = null;
+    captureError.value = null;
+    await nextTick();
+    updateLine();
+    return;
+  }
+  if (capturing.value) {
+    await cancelCapture();
+  }
   selectedId.value = id;
+  captureError.value = null;
   await nextTick();
   updateLine();
 }
@@ -903,23 +917,21 @@ onUnmounted(() => {
   justify-content: center;
   min-height: 38px;
   padding: 6px 8px;
-  border: 1px solid #b8c5d6;
+  border: 1px solid #c5d0de;
   border-radius: 9px;
-  background: #eef2f7;
+  background: #f3f6fa;
   cursor: pointer;
   transition:
     background 0.14s ease,
     border-color 0.14s ease,
     box-shadow 0.14s ease,
     transform 0.1s ease;
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.65) inset,
-    0 1px 2px rgba(15, 23, 42, 0.05);
+  box-shadow: none;
 }
 
 .voice-quick-btn:hover {
-  background: #e8eef6;
-  border-color: #9fb0c8;
+  background: #dbeafe;
+  border-color: #93c5fd;
 }
 
 .voice-quick-btn:focus {
@@ -927,16 +939,16 @@ onUnmounted(() => {
 }
 
 .voice-quick-btn:focus-visible {
-  outline: 2px solid #2563eb;
+  outline: 2px solid #60a5fa;
   outline-offset: 2px;
 }
 
 .voice-quick-btn:active,
 .voice-quick-btn.pressed {
   transform: translateY(1px);
-  background: #dfe7f2;
-  border-color: #8fa3be;
-  box-shadow: inset 0 2px 4px rgba(15, 23, 42, 0.08);
+  background: #bfdbfe;
+  border-color: #60a5fa;
+  box-shadow: none;
 }
 
 .voice-quick-chord {
@@ -963,26 +975,33 @@ onUnmounted(() => {
   min-height: 22px;
   padding: 2px 7px;
   border-radius: 6px;
-  border: 1px solid #dbe3ee;
-  background: #fff;
+  border: 1px solid #d5dee9;
+  background: #f8fafc;
   color: #334155;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 10.5px;
   font-weight: 600;
   line-height: 1.2;
   white-space: nowrap;
-  box-shadow:
-    0 1px 0 #edf2f7,
-    0 2px 3px rgba(15, 23, 42, 0.06);
+  box-shadow: none;
   transition:
     transform 0.1s ease,
-    box-shadow 0.1s ease;
+    box-shadow 0.1s ease,
+    background 0.14s ease,
+    border-color 0.14s ease;
+}
+
+.voice-quick-btn:hover .key-cap-chip {
+  background: #eff6ff;
+  border-color: #93c5fd;
 }
 
 .voice-quick-btn:active .key-cap-chip,
 .voice-quick-btn.pressed .key-cap-chip {
   transform: translateY(1px);
-  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.1);
+  background: #dbeafe;
+  border-color: #60a5fa;
+  box-shadow: none;
 }
 
 .map-card-actions {

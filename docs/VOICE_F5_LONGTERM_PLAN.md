@@ -16,7 +16,7 @@
 
 | # | 缝 | 断言什么 |
 |---|-----|----------|
-| S1 | `should_suppress_voice_f5` / sticky 生命周期 | 吞 **DOWN**/typematic（仅语音周期/armed，**不含**整段 input session）；**KEYUP 永远放行**并清 sticky；`end_voice_period` 不清 sticky；会话结束 `disarm`；空闲解粘 |
+| S1 | `should_suppress_voice_f5` / sticky 生命周期 | 吞 **DOWN**/typematic（语音周期/armed/**mic·voice 关联窗**，**不含**整段 input session）；**配对 KEYUP**：sticky 时吞 UP（Python parity），无 sticky 的孤儿 UP 放行并清 sticky；`end_voice_period` 不清 sticky；会话结束 `disarm`；空闲解粘 |
 | S2 | `special_keys` hook_proc + `voice_dispatch` | 回调内无 sleep/IO/`on_firmware_voice_key(` 同步重活；投递非阻塞 |
 | S3 | `bump_hook_to_front_and_settle` / `hook_bump` | generation 落地；钩子线程自死锁检测；重叠先挂后卸 |
 | S4 | `HOOK_PROC_DEPTH` 嵌套分支 | 注入键可放行；**F5 仍抑制**（含 probe/arm_output）；其余转发 |
@@ -35,12 +35,13 @@
 | 4 | 嵌套仍吞 F5 | ✅ 完成 | `tests/hook_nesting_guard.rs` + `voice_f5_home_like` | **5 + 19 passed / 0 failed** |
 | 5 | 短 UAC 退避 + 注入结果可观测 | ✅ 完成 | `tests/hid_tap_health.rs` + `tests/hid_inject_result.rs` | **5 + 6 passed / 0 failed**；`ShellExecuteEx`+`ERROR_CANCELLED`→`Ok(false)`；base=8s、max=60s；**无 helper** |
 | 6 | （可选）按次 F5 追踪 verdict | ⏭ 暂缓 | `tests/voice_guard_trace.rs` | **未实施**（未虚标） |
+| 7 | 非阻塞 mic 关联吞 F5 | ✅ 完成 | `tests/voice_f5_correlate.rs` + 回归 | **5 + 13 + 19 = 37 passed / 0 failed**（2026-08-31）；见 `docs/VOICE_F5_CORRELATE_PLAN.md` |
 
 ## 落地模块（与仓库一致）
 
 | 模块 | 作用 |
 |------|------|
-| `key_mapping.rs` | sticky / `end_voice_period` / `disarm` / 会话结束清 sticky |
+| `key_mapping.rs` | sticky / `end_voice_period` / `disarm` / 会话结束清 sticky / **mic 关联窗 + 迟到 sticky** |
 | `voice_dispatch.rs` + `voice_worker.rs` | LL 回调只投递；工作线程跑 `on_firmware_voice_key` |
 | `hook_bump.rs` | bump generation 等待落地 |
 | `special_keys.rs` | 嵌套仍吞 F5；WM_BUMP `mark_handled`；重叠先挂后卸 |
@@ -72,6 +73,16 @@
 - 2026-08-31 实机回归（真键盘 F5）：
   - **Bug：** `in_guard` 含 `input_session_active` → 遥控器已连接时真键盘 F5 全部被吞
   - **修：** 仅语音周期 / armed 时吞 DOWN；会话在线不再挡物理 F5（遥控器 F5 靠 gadget `0x003E` + 语音窗口）
+- 2026-08-31 非阻塞关联吞（Step 7）：
+  - mic/voice 标记关联窗 120ms；F5 先漏后 mic 迟到则补 sticky 堵 typematic
+  - **不做** LL 内 sleep 等待（异于 Python）；测试见 `VOICE_F5_CORRELATE_PLAN.md`（37 passed）
+- 2026-08-31 Python 对齐（见 `docs/VOICE_F5_PYTHON_PARITY_PLAN.md`）：
+  - **修正**历史「KEYUP 永远放行」：改为 sticky 时配对吞 UP（Python `_should_suppress_voice_f5`）；孤儿 UP 仍放行
+  - `0x04`/`0x00` 去掉双 begin/end period；单一入口 `handle_voice`
+  - 回归 **67 passed / 0 failed**（voice_f5_* + hook_*）
+- 2026-08-31 防 F5 粘键（日志 14:18 `leak_extra` + `keyup_suppress`）：
+  - 有过 passthrough DOWN 的周期，UP 强制放行（`F5_DOWN_REACHED_OS`）
+  - **43 passed / 0 failed**（suppress+correlate+home_like）
 
 ## 相关
 

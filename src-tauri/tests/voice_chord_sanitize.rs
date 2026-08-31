@@ -34,22 +34,21 @@ fn modifiers_still_down_filters_by_callback() {
 }
 
 #[test]
-fn win_in_voice_chord_is_always_recovered_even_if_async_state_reads_up() {
+fn win_in_voice_chord_not_force_recovered_when_async_reads_up() {
     use remote_bridge_hub_lib::bridges::xiaomi::voice_chord_sanitizer::modifiers_to_recover;
-    // HID 全零后 GetAsyncKeyState 常已读成抬起，但 Explorer 仍咬着 Win → 必须无条件补 KEYUP
-    assert_eq!(
-        modifiers_to_recover(&[0xA2, 0x5B], |_| false),
-        vec![0x5B],
-        "Ctrl+Win: force LWin KEYUP even when async state says up"
-    );
-    assert_eq!(
-        modifiers_to_recover(&[0x5B, 0xA4], |_| false),
-        vec![0x5B],
-        "Win+Alt: force LWin KEYUP even when async state says up"
+    // 实验：取消 Win 无条件补 KEYUP；仅 async 仍报按下时才补
+    assert!(
+        modifiers_to_recover(&[0xA2, 0x5B], |_| false).is_empty(),
+        "Ctrl+Win: no force LWin KEYUP when async says up"
     );
     assert!(
-        modifiers_to_recover(&[0xA5], |_| false).is_empty(),
-        "Right Alt alone: no Win to force"
+        modifiers_to_recover(&[0x5B, 0xA4], |_| false).is_empty(),
+        "Win+Alt: no force LWin KEYUP when async says up"
+    );
+    assert_eq!(
+        modifiers_to_recover(&[0xA2, 0x5B], |vk| vk == 0x5B),
+        vec![0x5B],
+        "still recover Win when async reports down"
     );
     assert_eq!(
         modifiers_to_recover(&[0xA5], |vk| vk == 0xA5),

@@ -2,12 +2,12 @@
 # Usage:
 #   $env:GITEE_TOKEN = 'your_gitee_personal_access_token'
 #   $env:GITHUB_TOKEN = 'your_github_pat_with_repo_scope'
-#   .\scripts\pack-winuhid-release.ps1 -Version 1.6.0
-#   .\scripts\publish-release.ps1 -Version 1.6.0 -Tag v1.6.0
+#   .\scripts\pack-winuhid-release.ps1 -Version 1.6.1
+#   .\scripts\publish-release.ps1 -Version 1.6.1 -Tag v1.6.1
 
 param(
-    [string]$Version = "1.6.0",
-    [string]$Tag = "v1.6.0"
+    [string]$Version = "1.6.1",
+    [string]$Tag = "v1.6.1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,9 +27,16 @@ Copy-Item $msi $ghMsi -Force
 $body = @"
 ## v$Version
 
-- 修复：遥控器已连接时真键盘 F5 被误吞（仅语音按住期间才吞 F5）
-- 含 v1.5.9：F5 KEYUP 永远放行防粘键；钩子快进快出 / bump 落地；Tap 拒 UAC 短退避
-- 偶发漏遥控 F5 时可再按一两下（详见 README）
+1. **微信输入法**：务必按应用内「输入法设置」说明配置（推荐 **F5 + 本软件快捷键**）
+2. **唤醒语音优化**：首包 / 唤醒路径延迟改进
+3. **F5 键策略修改**：仅语音按住相关窗口吞 F5，不误伤真键盘
+4. **忽略此版本优化**：「不再提醒此版本」仅抑制自动提醒，检查更新仍可用
+5. **界面优化**：遥控器示意、输入法引导、按键映射与主机操作区等
+6. **再次点击遥控器按键取消选定**：键位映射页可取消选中 / 取消录入
+7. **真键盘 Home / 音量± / Menu 被挡修正**：LL 仅 recent 吞固件残留，不再因 Tap 就绪整键吞掉
+8. **初始化黄黑图标**：未就绪时任务栏/托盘黄黑图标；语音就绪后恢复蓝标
+
+详见 README。
 "@
 
 function Ensure-GiteeRelease {
