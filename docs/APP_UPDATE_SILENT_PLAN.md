@@ -56,7 +56,8 @@
 
 ## 注意
 
-- **已发布的 v1.6.1 不含静默编排**；因此 `update/latest.json` 的 setup 链改为 `SilentUpgrade.exe` 引导器：旧版无 `/S` 启动时，引导器自行结束进程 → `/S /UPDATE` 卸旧 → 下载正式 NSIS → `/S /R` 装新。
-- 正式交互式安装包仍保留在 Release 页（`*_x64-setup.exe`），供手动安装。  
+- `update/latest.json` 仍指向正式 `*_x64-setup.exe`（**不用** `SilentUpgrade.exe`）。  
+- **v1.6.1 及更早**：应用内更新会打开普通安装向导，接受手动点几步；或到 Release 页手动装。  
+- **v1.6.2 及以后**：客户端内已有静默编排（下载 setup → `/S /UPDATE` 卸旧 → `/S /R` 装新）。  
 - 桌面图标依赖 NSIS Silent 分支，无需额外勾选。  
 - 勿对卸载去掉 `/UPDATE`，否则可能清掉 AppData。

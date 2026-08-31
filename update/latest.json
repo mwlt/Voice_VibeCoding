@@ -1,8 +1,8 @@
 {
-  "version": "1.6.2",
-  "notes": "v1.6.2：\n- 更新升级安装逻辑，一键静默装完（保留配置），一般只需确认一次 UAC\n- 更换图标与托盘三态：黄=初始化中，红=异常，绿=正常运行",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.2",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.2",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.6.2/Voice%20VibeCoding_1.6.2_SilentUpgrade.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.6.2/Voice.VibeCoding_1.6.2_SilentUpgrade.exe"
+  "version": "1.6.3",
+  "notes": "v1.6.3：\n- 启动后按顺序自动修复未就绪项：虚拟声卡 → 虚拟键盘 → 等语音路由 → 等桥接落定 → ATVV\n- 图标更换为更易识别：托盘蓝=正常、黄=初始化中、红=异常",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.3",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.3",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.6.3/Voice%20VibeCoding_1.6.3_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.6.3/Voice.VibeCoding_1.6.3_x64-setup.exe"
 }

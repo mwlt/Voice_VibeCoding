@@ -7,6 +7,7 @@ pub mod app_update;
 pub mod webview_guard;
 pub mod webview_recovery;
 pub mod file_download;
+pub mod startup_env;
 
 use tauri::{Manager, RunEvent};
 
@@ -88,14 +89,6 @@ pub fn run() {
             bridges::xiaomi::voice_meter::bind_app(app.handle().clone());
             bridges::xiaomi::conflict_guard::bind_app(app.handle().clone());
 
-            // 部署内嵌 WinUHid.dll 并尝试打开虚拟键盘（不弹 UAC；缺驱动时提示修复）
-            std::thread::Builder::new()
-                .name("winuhid-ensure".into())
-                .spawn(|| {
-                    bridges::xiaomi::winuhid_env::ensure_runtime_quiet();
-                })
-                .ok();
-
             if let Some(window) = app.get_webview_window("main") {
                 // 关闭窗口：minimize_to_tray=true → minimize+skip_taskbar（禁止 hide）
                 webview_recovery::attach_main_window_close_handler(app.handle(), &window);
@@ -151,6 +144,10 @@ pub fn run() {
                 bridges::xiaomi::voice_pcm::warmup_async();
                 bridges::xiaomi::conflict_guard::check_audio_router_after_spawn(app.handle());
             }
+
+            // 启动环境串行自动修复：声卡 → 键盘 → 等路由 → 等桥接 → ATVV
+            // （取代原先并行的 winuhid-ensure，避免与声卡提权/桥接重启冲突）
+            startup_env::spawn_startup_env_pipeline(app.handle().clone());
 
             // 启动后自动连接 + 断线重连（对齐 Python worker 循环）
             let auto_app = app.handle().clone();

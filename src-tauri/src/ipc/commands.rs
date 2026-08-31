@@ -872,7 +872,7 @@ pub async fn repair_xiaomi_atvv(
     })
 }
 
-fn run_atvv_repair_pipeline(
+pub(crate) fn run_atvv_repair_pipeline(
     app: &AppHandle,
     state: &BridgeState,
     config_manager: &ConfigManager,
