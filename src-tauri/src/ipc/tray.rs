@@ -49,18 +49,22 @@ fn load_tray_icon(kind: TrayIconKind) -> Result<Image<'static>, tauri::Error> {
 }
 
 fn load_window_icon(_app: &AppHandle) -> Result<Image<'static>, tauri::Error> {
-    // 左上角 / 任务栏：固定用软件主图标（与桌面快捷方式一致）
-    Image::from_bytes(include_bytes!("../../icons/icon.png"))
+    // 左上角 / 任务栏：固定用软件主图标（docs/icon-3/主.png → icon.ico / icon.png）
+    Image::from_bytes(include_bytes!("../../icons/icon.ico"))
+        .or_else(|_| Image::from_bytes(include_bytes!("../../icons/icon.png")))
         .or_else(|_| Image::from_bytes(include_bytes!("../../icons/32x32.png")))
 }
 
 fn apply_window_icon(app: &AppHandle) {
     let Ok(icon) = load_window_icon(app) else {
+        log::warn!("window icon load failed");
         return;
     };
     if let Some(win) = app.get_webview_window("main") {
         if let Err(e) = win.set_icon(icon) {
-            log::debug!("set window icon failed: {e}");
+            log::warn!("set window icon failed: {e}");
+        } else {
+            log::info!("window/taskbar icon applied (main)");
         }
     }
 }
