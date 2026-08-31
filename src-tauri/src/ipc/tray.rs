@@ -48,15 +48,10 @@ fn load_tray_icon(kind: TrayIconKind) -> Result<Image<'static>, tauri::Error> {
     }
 }
 
-fn load_window_icon(app: &AppHandle) -> Result<Image<'_>, tauri::Error> {
+fn load_window_icon(_app: &AppHandle) -> Result<Image<'static>, tauri::Error> {
     // 左上角 / 任务栏：固定用软件主图标（与桌面快捷方式一致）
     Image::from_bytes(include_bytes!("../../icons/icon.png"))
         .or_else(|_| Image::from_bytes(include_bytes!("../../icons/32x32.png")))
-        .or_else(|_| {
-            app.default_window_icon()
-                .cloned()
-                .ok_or_else(|| tauri::Error::FailedToReceiveMessage)
-        })
 }
 
 fn apply_window_icon(app: &AppHandle) {
