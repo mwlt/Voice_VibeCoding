@@ -1,17 +1,20 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { storeToRefs } from "pinia";
 import { useBridgeStore } from "../stores/bridge";
 import { useAppUpdateStore } from "../stores/appUpdate";
+import { useGlobalSettingsStore } from "../stores/globalSettings";
 import type { BridgeStatus } from "../types";
 
 const route = useRoute();
 const router = useRouter();
 const bridge = useBridgeStore();
 const appUpdate = useAppUpdateStore();
+const globalSettings = useGlobalSettingsStore();
+const { hideDevMenus } = storeToRefs(globalSettings);
 const { updateInfo, shouldShowPassivePrompt } = storeToRefs(appUpdate);
 
 const showQuitConfirm = ref(false);
@@ -24,15 +27,24 @@ function statusClass(status: BridgeStatus): string {
   return "disconnected";
 }
 
-const deviceItems = [
+const allDeviceItems = [
   { path: "/xiaomi", label: "小米2 pro", type: "xiaomi" as const },
-  { path: "/t1", label: "T1 [开发中]", type: "t1" as const },
-  { path: "/v60", label: "V60 [开发中]", type: "hanvon" as const },
+  { path: "/t1", label: "T1 [开发中]", type: "t1" as const, dev: true },
+  { path: "/v60", label: "V60 [开发中]", type: "hanvon" as const, dev: true },
 ];
+
+const deviceItems = computed(() =>
+  hideDevMenus.value
+    ? allDeviceItems.filter((item) => !item.dev)
+    : allDeviceItems
+);
 
 const appVersion = ref("…");
 
 onMounted(async () => {
+  if (!globalSettings.loaded) {
+    await globalSettings.load();
+  }
   try {
     appVersion.value = `v${await getVersion()}`;
   } catch {

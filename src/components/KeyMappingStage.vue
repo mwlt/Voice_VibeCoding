@@ -11,6 +11,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { DeviceConfig, KeyAction } from "../types";
 import RemoteHotspot from "./RemoteHotspot.vue";
+import RemoteKeyIcon from "./RemoteKeyIcon.vue";
 import { MEDIA_PICK_KEYS, vkDisplayName } from "../utils/vkDisplay";
 import {
   applyImePresetConfig,
@@ -576,7 +577,10 @@ onUnmounted(() => {
           @click="selectButton(btn.id)"
         >
           <div class="map-card-main">
-            <span class="map-name">{{ btn.label }}</span>
+            <span class="map-name">
+              <RemoteKeyIcon :key-id="btn.id" />
+              {{ btn.label }}
+            </span>
             <span
               :class="['map-bind', { unbound: btn.action.type === 'None' }]"
             >
@@ -659,7 +663,10 @@ onUnmounted(() => {
           @click="selectButton(btn.id)"
         >
           <div class="map-card-main">
-            <span class="map-name">{{ btn.label }}</span>
+            <span class="map-name">
+              <RemoteKeyIcon :key-id="btn.id" />
+              {{ btn.label }}
+            </span>
             <span
               :class="[
                 'map-bind',
@@ -838,10 +845,14 @@ onUnmounted(() => {
 }
 
 .map-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 400;
   color: #0f172a;
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .map-bind {

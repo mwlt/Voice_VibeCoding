@@ -12,6 +12,7 @@ pub mod key_mapping;
 pub mod special_keys;
 pub mod tv_gate;
 pub mod voice_pcm;
+pub mod voice_gain;
 pub mod voice_meter;
 pub mod voice_chord_state;
 pub mod voice_chord_sanitizer;

@@ -3,6 +3,7 @@ import XiaomiSettings from "../views/XiaomiSettings.vue";
 import T1Settings from "../views/T1Settings.vue";
 import V60Settings from "../views/V60Settings.vue";
 import GlobalSettings from "../views/GlobalSettings.vue";
+import { useGlobalSettingsStore } from "../stores/globalSettings";
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -32,6 +33,18 @@ const router = createRouter({
       component: GlobalSettings,
     },
   ],
+});
+
+router.beforeEach(async (to) => {
+  if (to.path !== "/t1" && to.path !== "/v60") return true;
+  const store = useGlobalSettingsStore();
+  if (!store.loaded) {
+    await store.load();
+  }
+  if (store.hideDevMenus) {
+    return { path: "/xiaomi", replace: true };
+  }
+  return true;
 });
 
 export default router;

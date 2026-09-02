@@ -1,11 +1,5 @@
 # Voice VibeCoding
 
-> **偶尔 / 有可能：微信输入法不认某些输入框（尤其 Electron 类软件）**
->
-> Cursor、VS Code、部分聊天客户端等用的是网页输入框。光标已经在闪，微信有时仍不把它当成「可以听写的输入框」，按语音键就唤不醒「按住说话」。这不是本软件没把快捷键发出去。
->
-> **建议：先在该输入框里打一两个字，再按遥控语音键，一般就可以正常调用。** 或先点一下记事本 / 浏览器地址栏，再切回来。记事本里能稳定唤醒、只有这类软件里偶发失败，属于输入法挂接问题，不是映射故障。
-
 本项目：   rust语言 windows版（基于python版本重构） 作者 ：mwlt
 
 *gitee:* 
@@ -16,23 +10,17 @@ github:
 
 [https://github.com/mwlt/Voice_VibeCoding](https://github.com/mwlt/Voice_VibeCoding)
 
-
-
 python windows版，作者：[xxb26553663-star](https://github.com/xxb26553663-star)
 
-  
 [https://github.com/xxb26553663-star/remote-bridge-hub](https://github.com/xxb26553663-star/remote-bridge-hub)
 
 apple macos版 ，作者 [nijez](https://github.com/nijez)
 
-
 [https://github.com/nijez/open-voice-bridge](https://github.com/nijez/open-voice-bridge)
 
+**v1.6.7** · Windows 桌面应用
 
-
-**v1.6.6** · Windows 桌面应用
-
-把小米遥控器 2 Pro（及预留的 T1 / 汉王 V60）接到电脑：按键可映射成键盘快捷键，语音可送到输入法听写。
+把小米遥控器 2 Pro（及预留的 T1 / 汉王 V60有兴趣的自己继续开发）接到电脑：按键可映射成键盘快捷键，语音可送到输入法听写。
 
 本仓库是 **Rust + Tauri 2 + Vue 3** 实现，不是 Python 版 Remote Bridge Hub。二者功能相近，但运行时、安装包与配置目录均独立。
 
@@ -42,88 +30,83 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 ## 它能做什么
 
-
-
 ### 小米遥控器 2 Pro（主力）
 
 相对 Python 版（Xiaomi Remote Bridge）在体验与可靠性上的改进与增量如下。基础能力（蓝牙连接、按键映射、ATVV 语音、HID Tap、VB-CABLE 等）两端对齐，此处不重复罗列。
 
 
-| 能力 / 改进点 | 说明 | 相对 Python |
-| --- | --- | --- |
-| 遥控器示意 | 按小米遥控器 2 Pro 实物重绘：丝印图标、银壳凹槽、键面凹凸层次与扁平选中态 | 增强 |
-| 音量键防双格 | 遥控器音量走注入 + 近期信号吞固件残留；**不**用 Tap 就绪整键吞，避免误伤真键盘音量± | 优化 |
-| 真键盘 Home/音量/Menu | LL 钩子仅在遥控器近期信号窗口吞固件 VK；Tap 侧尽早 mark，修复软件运行时真键盘被挡 | 修复 |
-| 启动环境自动修复 | 启动后串行：虚拟声卡 → 虚拟键盘 → 等语音路由 → 等桥接落定 → 条件性自动修 ATVV（一次） | 新增 |
-| 托盘三态图标 | 更易识别：蓝=正常运行、黄=初始化中、红=异常；窗口/任务栏用主图标 | 增强 |
-| 映射再点取消选定 | 键位映射页再次点击已选遥控器按键可取消选定（含取消录入） | 优化 |
-| 微信输入法设置 | 「输入法设置」强调：微信务必按引导设为 **F5 + 本软件快捷键**；步骤/示例图更新 | 增强 |
-| 唤醒语音优化 | 首包与唤醒路径延迟优化（按下先快捷键 DOWN、PCM/PING 等） | 优化 |
-| F5 键策略 | 仅语音按住相关窗口吞 F5；会话/Tap 就绪不误伤真键盘 F5 | 修复 |
-| 忽略此版本 | 「不再提醒此版本」仅抑制自动提醒，设置页「检查更新」仍可用 | 优化 |
-| WebView 白屏/黑屏恢复 | 心跳守卫 + reload；reload 失败自动 recreate WebView；关窗/启动进托盘用 minimize+skip_taskbar（禁止 hide）；托盘「刷新界面」「重启软件」 | 增强 |
-| 启动黑框消除 | 子进程（icacls / netstat / powershell）加 CREATE_NO_WINDOW；HID Tap HostPid 日志降为 debug | 优化 |
-| 最小化到托盘 | 点 X /「启动后最小化到托盘」统一进托盘（不占任务栏）；禁止 hide，避免 WebView2 被系统回收致白屏 | 修复 |
-| 一键修复 ATVV | 「修复 ATVV 连接」：有占用先清进程，再停 HID Tap、软重启并等待语音通道恢复；文案区分有无占用 | 新增 |
-| ATVV 状态红字提示 | 桥接已运行但语音通道未订阅时，在「音频信号」旁显示「ATVV 未连接」 | 新增 |
-| ATVV 失败系统通知 | 语音通道未就绪时按语音键，右下角通知引导去点「修复 ATVV 连接」（限流，避免刷屏） | 新增 |
-| 按键录入扩展 | 对齐常见 108 键显示名；录入会话旁听 Consumer 媒体键（音量±/静音）；常驻「设置为：」按钮兜底计算器等；默认语音触发为「按住」 | 增强 |
-| ATVV / HID Tap 时序 | 订阅语音通道前暂停 HID Tap，降低 AccessDenied；订阅成功后再启 Tap | 优化 |
-| 语音路由占用策略 | 默认 `hold_device`：启动握 CABLE 设备，仅说话时 play；空闲不常驻写静音（见下文「VB-CABLE 占用方式」） | 优化 |
-| 虚拟声卡状态探测 | 优先读系统 MMDevices 注册表判断 CABLE 是否就绪；已就绪后停探，避免设置页轮询经 WASAPI 枚举导致 `audiodg` 句柄异常上涨 | 优化 |
-| 虚拟声卡修复体验 | 「虚拟声卡修复」可选自动/内嵌/强制重装；隐藏 PowerShell 黑框与系统 OK 弹窗；结果进状态日志；仅需重启 Windows 时弹醒目提示 | 优化 |
-| HID 注入闪窗 | 提权注入 WUDFHost 时隐藏控制台闪窗（UAC 仍保留） | 优化 |
-| 音频信号波形 | 设置页实时显示 BLE 解码电平 / 波形，便于判断语音是否真正进机 | 增强 |
-| 虚拟声卡检测与安装 | 应用内检测 VB-CABLE，支持内嵌驱动或官网安装指引，结果写回主机状态 | 增强 |
-| 语音键按住说话（微信等） | WinUHid 注入本软件映射的快捷键；微信侧设为「F5 + 本软件快捷键」（见输入法设置）；松手统一释放 | 修复 |
-| 语音键含 Win 不粘滞 | Ctrl+Win / Win+Alt 松开走菜单键同款分步 HID 释放，并无条件补 Win KEYUP，避免 Win 粘住 | 修复 |
-| 修复虚拟键盘重启策略 | 仅 Windows 返回 3010 才提示必须重启；否则再点「自动修复」；重启后若仍未就绪自动补一次 | 优化 |
-| 微信/Electron 输入框 | README 置顶说明：偶发不认网页输入框，先打一两个字再按语音键 | 增强 |
-| 输入法设置引导 | 「输入法设置」分 Tab：微信 / 豆包 / 千问 / 常见问题；一键预设、设置参考图、口语化步骤 | 增强 |
-| 语音键快速设置 | 键位映射页一键设置常用语音组合（微信、千问 Win+Alt 等） | 新增 |
-| 修复虚拟键盘 | 「修复虚拟键盘」修复 WinUHid 虚拟键盘；支持导出/应用内下载驱动包（进度条、自选保存路径）；Release 附带 WinUHid_Manual 手动安装包 | 增强 |
-| 配置加载容错 | 按键映射区依赖配置加载；损坏 xiaomi.json 自动备份并恢复默认；失败时显示错误与重试 | 修复 |
-| 主机状态栏布局 | 四列同排显示虚拟声卡/键盘/路由/桥接；虚拟声卡电平条可收缩，状态文字不挤出边框 | 优化 |
-| 应用内静默升级 | 下载后隐藏 PowerShell 卸旧装新（保留配置）+ 升级进度窗；除 UAC 外无黑框/弹框；装完自动打开 | 修复 |
-| 语音键注入稳态 | Hold 用 VoiceChordState；**优先 WinUHid**，不可用时互斥降级 SendInput（日志/通知）；UP sanitizer 清键 | 优化 |
-| 语音首包延迟 | 按下先快捷键 DOWN 再 VB-CABLE CLEAR；PCM 按下同步 ensure；PING 重试 15ms | 优化 |
-| 单实例 | 再次启动只激活已有窗口，降低双开抢端口 | 增强 |
-| 应用内日志 | 界面直接查看 / 复制 / 打开日志，不必只翻 `%APPDATA%` 文件 | 增强 |
-| 统一桌面壳 | Rust + Tauri 2 + Vue 单安装包、托盘与设置页一体，免 Python 运行时 | 增强 |
-| 项目与致谢 | 设置页标明本版与 Python / macOS 相关仓库来源 | 新增 |
+| 能力 / 改进点          | 说明                                                                                                 | 相对 Python |
+| ----------------- | -------------------------------------------------------------------------------------------------- | --------- |
+| 遥控器示意             | 按小米遥控器 2 Pro 实物重绘：丝印图标、银壳凹槽、键面凹凸层次与扁平选中态                                                           | 增强        |
+| 音量键防双格            | 遥控器音量走注入 + 近期信号吞固件残留；**不**用 Tap 就绪整键吞，避免误伤真键盘音量±                                                   | 优化        |
+| 真键盘 Home/音量/Menu  | LL 钩子仅在遥控器近期信号窗口吞固件 VK；Tap 侧尽早 mark，修复软件运行时真键盘被挡                                                   | 修复        |
+| 启动环境自动修复          | 启动后串行：虚拟声卡 → 虚拟键盘 → 等语音路由 → 等桥接落定 → 条件性自动修 ATVV（一次）                                                | 新增        |
+| 托盘三态图标            | 更易识别：蓝=正常运行、黄=初始化中、红=异常；窗口/任务栏用主图标                                                                 | 增强        |
+| 映射再点取消选定          | 键位映射页再次点击已选遥控器按键可取消选定（含取消录入）                                                                       | 优化        |
+| 微信输入法设置           | 「输入法设置」强调：微信务必按引导设为 **F5 + 本软件快捷键**；步骤/示例图更新                                                       | 增强        |
+| 唤醒语音优化            | 首包与唤醒路径延迟优化（按下先快捷键 DOWN、PCM/PING 等）                                                                | 优化        |
+| F5 键策略            | 仅语音按住相关窗口吞 F5；会话/Tap 就绪不误伤真键盘 F5                                                                   | 修复        |
+| 忽略此版本             | 「不再提醒此版本」仅抑制自动提醒，设置页「检查更新」仍可用                                                                      | 优化        |
+| WebView 白屏/黑屏恢复   | 心跳守卫 + reload；reload 失败自动 recreate WebView；关窗/启动进托盘用 minimize+skip_taskbar（禁止 hide）；托盘「刷新界面」「重启软件」 | 增强        |
+| 启动黑框消除            | 子进程（icacls / netstat / powershell）加 CREATE_NO_WINDOW；HID Tap HostPid 日志降为 debug                    | 优化        |
+| 全局设置实时保存          | 开关改即保存并 Toast 提示；新增「隐藏开发中项目菜单」；隐藏语言项                                                         | 新增        |
+| 增益热更新             | 小米页调节增益约 0.3s 自动落盘并立即作用于 PCM，无需重启桥接                                                              | 新增        |
+| 小米页 UI 增强         | 电量图标、音频波形、虚拟声卡 dBFS 标尺、映射键图标；设备行布局与字重优化                                                     | 增强        |
+| 开机进托盘修复           | 自启仅 Run 单入口；`--minimized` 仅单实例去重；「启动后最小化到托盘」统一控制冷启动/自启/再点图标；WebView 恢复尊重托盘态              | 修复        |
+| 一键修复 ATVV         | 「修复 ATVV 连接」：有占用先清进程，再停 HID Tap、软重启并等待语音通道恢复；文案区分有无占用                                              | 新增        |
+| ATVV 状态红字提示       | 桥接已运行但语音通道未订阅时，在「音频信号」旁显示「ATVV 未连接」                                                                | 新增        |
+| ATVV 失败系统通知       | 语音通道未就绪时按语音键，右下角通知引导去点「修复 ATVV 连接」（限流，避免刷屏）                                                        | 新增        |
+| 按键录入扩展            | 对齐常见 108 键显示名；录入会话旁听 Consumer 媒体键（音量±/静音）；常驻「设置为：」按钮兜底计算器等；默认语音触发为「按住」                             | 增强        |
+| ATVV / HID Tap 时序 | 订阅语音通道前暂停 HID Tap，降低 AccessDenied；订阅成功后再启 Tap                                                      | 优化        |
+| 语音路由占用策略          | 默认 `hold_device`：启动握 CABLE 设备，仅说话时 play；空闲不常驻写静音（见下文「VB-CABLE 占用方式」）                               | 优化        |
+| 虚拟声卡状态探测          | 优先读系统 MMDevices 注册表判断 CABLE 是否就绪；已就绪后停探，避免设置页轮询经 WASAPI 枚举导致 `audiodg` 句柄异常上涨                      | 优化        |
+| 虚拟声卡修复体验          | 「虚拟声卡修复」可选自动/内嵌/强制重装；隐藏 PowerShell 黑框与系统 OK 弹窗；结果进状态日志；仅需重启 Windows 时弹醒目提示                         | 优化        |
+| HID 注入闪窗          | 提权注入 WUDFHost 时隐藏控制台闪窗（UAC 仍保留）                                                                    | 优化        |
+| 音频信号波形            | 设置页实时显示 BLE 解码电平 / 波形，便于判断语音是否真正进机                                                                 | 增强        |
+| 虚拟声卡检测与安装         | 应用内检测 VB-CABLE，支持内嵌驱动或官网安装指引，结果写回主机状态                                                              | 增强        |
+| 语音键按住说话（微信等）      | WinUHid 注入本软件映射的快捷键；微信侧设为「F5 + 本软件快捷键」（见输入法设置）；松手统一释放                                              | 修复        |
+| 语音键含 Win 不粘滞      | Ctrl+Win / Win+Alt 松开走菜单键同款分步 HID 释放，并无条件补 Win KEYUP，避免 Win 粘住                                     | 修复        |
+| 修复虚拟键盘重启策略        | 仅 Windows 返回 3010 才提示必须重启；否则再点「自动修复」；重启后若仍未就绪自动补一次                                                 | 优化        |
+| 微信/Electron 输入框   | README 置顶说明：偶发不认网页输入框，先打一两个字再按语音键                                                                  | 增强        |
+| 输入法设置引导           | 「输入法设置」分 Tab：微信 / 豆包 / 千问 / 常见问题；一键预设、设置参考图、口语化步骤                                                  | 增强        |
+| 语音键快速设置           | 键位映射页一键设置常用语音组合（微信、千问 Win+Alt 等）                                                                   | 新增        |
+| 修复虚拟键盘            | 「修复虚拟键盘」修复 WinUHid 虚拟键盘；支持导出/应用内下载驱动包（进度条、自选保存路径）；Release 附带 WinUHid_Manual 手动安装包                  | 增强        |
+| 配置加载容错            | 按键映射区依赖配置加载；损坏 xiaomi.json 自动备份并恢复默认；失败时显示错误与重试                                                    | 修复        |
+| 主机状态栏布局           | 四列同排显示虚拟声卡/键盘/路由/桥接；虚拟声卡电平条可收缩，状态文字不挤出边框                                                           | 优化        |
+| 应用内静默升级           | 下载后隐藏 PowerShell 卸旧装新（保留配置）+ 升级进度窗；除 UAC 外无黑框/弹框；装完自动打开                                            | 修复        |
+| 语音键注入稳态           | Hold 用 VoiceChordState；**优先 WinUHid**，不可用时互斥降级 SendInput（日志/通知）；UP sanitizer 清键                    | 优化        |
+| 语音首包延迟            | 按下先快捷键 DOWN 再 VB-CABLE CLEAR；PCM 按下同步 ensure；PING 重试 15ms                                          | 优化        |
+| 单实例               | 「启动后最小化到托盘」关→再点图标弹出窗口；开→保持托盘；重复 `--minimized` 自启静默忽略                                                           | 增强        |
+| 应用内日志             | 界面直接查看 / 复制 / 打开日志，不必只翻 `%APPDATA%` 文件                                                             | 增强        |
+| 统一桌面壳             | Rust + Tauri 2 + Vue 单安装包、托盘与设置页一体，免 Python 运行时                                                    | 增强        |
+| 项目与致谢             | 设置页标明本版与 Python / macOS 相关仓库来源                                                                     | 新增        |
 
 
 ### 其它
 
 - **T1 / V60**：界面与配置页已预留，我没有对应设备无法测试，需要使用的请自行二次开发
-- **托盘**：可最小化到托盘；支持开机自启
+- **托盘**：可最小化到托盘；开机自启与是否进托盘独立（由「启动后最小化到托盘」控制；Run 项 `--minimized` 仅单实例去重）
 
-![界面图](./image/1.png "系统界面预览")
-
-![界面图2](./image/2.png "系统界面预览 2")
+界面图界面图2
 
 ---
 
-
-
 ## 下载安装包
 
-正式安装包在两边的 Release 页（当前 **v1.6.6**）：
+正式安装包在两边的 Release 页（当前 **v1.6.7**）：
 
-- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.6)（国内优先）
-- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.6)
+- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.7)（国内优先）
+- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.7)
 
 常用文件：
 
-- `Voice VibeCoding_1.6.6_x64-setup.exe`（NSIS）
-- `Voice VibeCoding_1.6.6_x64_zh-CN.msi`
-- `WinUHid_Manual_1.6.6.zip`（WinUHid 虚拟键盘手动安装包，也可在应用内「修复虚拟键盘 → 下载驱动包」下载）
+- `Voice VibeCoding_1.6.7_x64-setup.exe`（NSIS）
+- `Voice VibeCoding_1.6.7_x64_zh-CN.msi`
+- `WinUHid_Manual_1.6.7.zip`（WinUHid 虚拟键盘手动安装包，也可在应用内「修复虚拟键盘 → 下载驱动包」下载）
 
 安装时若提示无法覆盖 `remote-bridge-hub.exe`，请先退出本软件（含托盘）再重试。
 
 ---
-
-
 
 ## 架构（怎么串起来的）
 
@@ -160,19 +143,19 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 ---
 
-
-
 ## VB-CABLE 占用方式（语音路由生命周期）
 
 语音路由子进程把 PCM 写到 **CABLE Input**。占用虚拟声卡的时机不同，会影响首按延迟，以及个别机器上系统音频隔离进程 `audiodg.exe` 是否异常涨句柄。本机对照测试了三种策略（空闲涨速均≈0 后按体验选型）：
 
-| 方式 | 环境变量值 | 行为（人话） | 空闲占用 | 首按 |
-| --- | --- | --- | --- | --- |
-| ① 一直播放 | `always_play` | 启动就建流并一直 play（没说话时灌静音） | 最高 | 最快 |
-| ② 握设备（**默认**） | `hold_device` | 启动先握住 CABLE 设备；**说话才 play**；说完停播但设备仍握着 | 中 | 接近① |
-| ③ 全推迟 | `deferred` | 空闲只听 UDP；按下说话才开设备+流；说完全部释放 | 最低 | 略冷启动 |
 
-**为何默认用 ② `hold_device`：**
+| 方式            | 环境变量值         | 行为（人话）                                 | 空闲占用 | 首按   |
+| ------------- | ------------- | -------------------------------------- | ---- | ---- |
+| ① 一直播放        | `always_play` | 启动就建流并一直 play（没说话时灌静音）                 | 最高   | 最快   |
+| ② 握设备（**默认**） | `hold_device` | 启动先握住 CABLE 设备；**说话才 play**；说完停播但设备仍握着 | 中    | 接近①  |
+| ③ 全推迟         | `deferred`    | 空闲只听 UDP；按下说话才开设备+流；说完全部释放             | 最低   | 略冷启动 |
+
+
+**为何默认用 ②** `hold_device`**：**
 
 - 三档在「设置页不再狂扫声卡」之后，空闲句柄涨速都能压住；差别主要在体验与占用。
 - 比 ①：空闲不常驻「播放静音」，少占活跃音频通路。
@@ -190,8 +173,6 @@ $env:REMOTE_BRIDGE_AUDIO_LIFECYCLE = "hold_device"   # always_play | hold_device
 **虚拟声卡「已安装」状态灯：** 优先读注册表 MMDevices（与安装脚本一致）；已就绪后停止自动重探；未就绪约每 60s 可再试一次；点「虚拟声卡检测与修复」强制重探。勿与波形闪烁混淆——闪烁表示正在送语音，不是探测间隔。
 
 ---
-
-
 
 ## 环境要求
 
@@ -213,8 +194,6 @@ $env:REMOTE_BRIDGE_AUDIO_LIFECYCLE = "hold_device"   # always_play | hold_device
 
 ---
 
-
-
 ## 从源码运行（开发）
 
 ```powershell
@@ -230,8 +209,6 @@ npm run dev
 
 ---
 
-
-
 ## 编译安装包
 
 ```powershell
@@ -241,19 +218,16 @@ npm run tauri:build
 常见产物：
 
 
-| 类型       | 路径                                                                            |
-| -------- | ----------------------------------------------------------------------------- |
-| 可执行文件    | `src-tauri/target/release/remote-bridge-hub.exe`                              |
-| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.6.6_x64_zh-CN.msi`  |
-| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.6.6_x64-setup.exe` |
+| 类型       | 路径                                                                          |
+| -------- | --------------------------------------------------------------------------- |
+| 可执行文件    | `src-tauri/target/release/remote-bridge-hub.exe`                            |
+| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.6.7_x64_zh-CN.msi`  |
+| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.6.7_x64-setup.exe` |
 
 
 发新版时请同步更新仓库根目录 `update/latest.json`（提高 `version`，填写 Gitee/GitHub 页面与安装包直链）。应用会优先读 Gitee raw，失败再读 GitHub raw。有新版本时在顶栏显示「新版本」与「查看更新内容」；弹窗内可选「不再提醒此版本」（仅抑制自动提醒，不影响设置页「检查更新」）。详见 [docs/UPDATE_IGNORE_PLAN.md](docs/UPDATE_IGNORE_PLAN.md)。
 
-
 ---
-
-
 
 ## 仓库结构
 
@@ -269,9 +243,8 @@ npm run tauri:build
 ├── package.json
 └── README.md
 ```
+
 ---
-
-
 
 ## 配置与端口
 
@@ -289,19 +262,19 @@ npm run tauri:build
 
 **微信（重要）：** 本软件里先设好快捷键（推荐 **左 Ctrl + 左 Win**）；微信「按住说话」须设为 **F5 + 本软件里的那组快捷键**。例如软件设为左 Ctrl + 左 Win 时，微信应设为 **F5 + 左 Ctrl + 左 Win**。其它输入法一般与本软件快捷键保持一致即可。
 
-| 预设 | 本软件快捷键 | 输入法侧 |
-| --- | --- | --- |
-| 微信 · 按住说话 | 左 Ctrl + 左 Win（可改） | **F5 + 本软件快捷键**（例：F5 + 左 Ctrl + 左 Win） |
-| 豆包 · 长按 | 右 Alt | 豆包「长按模式」与本软件一致 |
-| 千问 · 右 Alt | 右 Alt | 千问按住语音与本软件一致 |
-| 千问 · Win+Alt | 左 Win + 左 Alt | 千问按住语音（需 WinUHid） |
-| 千问 · Ctrl+Win | 左 Ctrl + 左 Win | 千问按住语音（需 WinUHid） |
+
+| 预设            | 本软件快捷键             | 输入法侧                                   |
+| ------------- | ------------------ | -------------------------------------- |
+| 微信 · 按住说话     | 左 Ctrl + 左 Win（可改） | **F5 + 本软件快捷键**（例：F5 + 左 Ctrl + 左 Win） |
+| 豆包 · 长按       | 右 Alt              | 豆包「长按模式」与本软件一致                         |
+| 千问 · 右 Alt    | 右 Alt              | 千问按住语音与本软件一致                           |
+| 千问 · Win+Alt  | 左 Win + 左 Alt      | 千问按住语音（需 WinUHid）                      |
+| 千问 · Ctrl+Win | 左 Ctrl + 左 Win     | 千问按住语音（需 WinUHid）                      |
+
 
 键位映射页「语音键快速设置」可一键应用上表常用组合。详见应用内「常见问题」Tab、`docs/IME_PROFILE_PLAN.md` 与 `docs/VOICE_HOLD_PR8.md`。
 
 ---
-
-
 
 ## 第三方组件
 
@@ -314,8 +287,6 @@ npm run tauri:build
 
 ---
 
-
-
 ## 与 Python 版的关系
 
 同属「遥控器桥接」思路；本仓库为 **Voice VibeCoding / remote-bridge-hub 的 Rust·Tauri 重写**。
@@ -325,16 +296,12 @@ npm run tauri:build
 
 ---
 
-
-
 ## 参与贡献
 
 欢迎提 Issue / PR：修 bug、补设备、改进文案与无障碍。  
 大改前请先说明动机与影响范围。
 
 ---
-
-
 
 ## 许可证
 

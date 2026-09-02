@@ -134,6 +134,10 @@ impl DeviceConfig {
     }
 }
 
+fn default_hide_dev_menus() -> bool {
+    true
+}
+
 /// 全局设置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalSettings {
@@ -146,6 +150,9 @@ pub struct GlobalSettings {
     /// 启动后最小化到托盘（不显示主窗口）
     #[serde(default)]
     pub start_minimized_to_tray: bool,
+    /// 隐藏开发中项目菜单（T1 / V60）
+    #[serde(default = "default_hide_dev_menus")]
+    pub hide_dev_menus: bool,
     /// 用户忽略的更新版本（直到更高版本再提示）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ignored_update_version: Option<String>,
@@ -158,8 +165,21 @@ impl Default for GlobalSettings {
             language: "zh-CN".to_string(),
             minimize_to_tray: true,
             start_minimized_to_tray: false,
+            hide_dev_menus: true,
             ignored_update_version: None,
         }
+    }
+}
+
+impl GlobalSettings {
+    /// 从 settings.json 文本解析「启动后最小化到托盘」；失败时用默认值 false。
+    pub fn parse_start_minimized_to_tray_json(content: &str) -> bool {
+        serde_json::from_str::<Self>(content)
+            .map(|s| s.start_minimized_to_tray)
+            .unwrap_or_else(|e| {
+                log::warn!("parse settings.json for start_minimized_to_tray: {e}");
+                false
+            })
     }
 }
 
@@ -223,6 +243,8 @@ impl ConfigManager {
             Ok(mut config) => {
                 if device == "xiaomi" {
                     Self::merge_xiaomi_defaults(&mut config);
+                    config.gain_db =
+                        crate::bridges::xiaomi::voice_gain::normalize_gain_db(config.gain_db);
                 }
                 Ok(config)
             }
@@ -279,6 +301,8 @@ impl ConfigManager {
         let mut config = config.clone();
         if device == "xiaomi" {
             crate::bridges::xiaomi::key_mapping::sync_voice_from_mic_binding(&mut config);
+            config.gain_db =
+                crate::bridges::xiaomi::voice_gain::normalize_gain_db(config.gain_db);
         }
         let path = self.device_config_path(device);
         let tmp_path = path.with_extension("json.tmp");
@@ -295,7 +319,14 @@ impl ConfigManager {
                 .map_err(|e| format!("同步临时文件失败: {}", e))?;
         }
 
-        fs::rename(&tmp_path, &path).map_err(|e| format!("替换配置文件失败: {}", e))?;
+        fs::rename(&tmp_path, &path).map_err(|e| {
+            let _ = fs::remove_file(&tmp_path);
+            format!("替换配置文件失败: {}", e)
+        })?;
+
+        if device == "xiaomi" {
+            crate::bridges::xiaomi::voice_gain::set_gain_db(config.gain_db);
+        }
 
         self.device_cache
             .lock()
@@ -331,6 +362,36 @@ impl ConfigManager {
             .map_err(|e| format!("替换设置文件失败: {}", e))?;
 
         Ok(())
+    }
+
+    /// 读「启动后最小化到托盘」；ConfigManager 尚未 inject 时从 settings.json 回退。
+    pub fn read_start_minimized_to_tray(app: &AppHandle) -> bool {
+        if let Some(mgr) = app.try_state::<Self>() {
+            if let Ok(s) = mgr.get_global_settings() {
+                return s.start_minimized_to_tray;
+            }
+        }
+        match get_config_dir(app) {
+            Ok(dir) => Self::read_start_minimized_to_tray_from_dir(&dir),
+            Err(e) => {
+                log::warn!("read start_minimized_to_tray: config dir unavailable: {e}");
+                GlobalSettings::default().start_minimized_to_tray
+            }
+        }
+    }
+
+    fn read_start_minimized_to_tray_from_dir(config_dir: &std::path::Path) -> bool {
+        let path = config_dir.join("settings.json");
+        if !path.exists() {
+            return GlobalSettings::default().start_minimized_to_tray;
+        }
+        match fs::read_to_string(&path) {
+            Ok(content) => GlobalSettings::parse_start_minimized_to_tray_json(&content),
+            Err(e) => {
+                log::warn!("read settings.json for start_minimized_to_tray: {e}");
+                GlobalSettings::default().start_minimized_to_tray
+            }
+        }
     }
 
     // ---- 默认配置 ----
@@ -604,6 +665,19 @@ mod tests {
         assert!(!settings.autostart);
         assert_eq!(settings.language, "zh-CN");
         assert!(settings.minimize_to_tray);
+        assert!(!settings.start_minimized_to_tray);
+        assert!(settings.hide_dev_menus);
+    }
+
+    #[test]
+    fn parse_start_minimized_to_tray_from_json() {
+        assert!(!GlobalSettings::parse_start_minimized_to_tray_json(
+            r#"{"autostart":false,"language":"zh-CN","minimize_to_tray":true,"start_minimized_to_tray":false}"#
+        ));
+        assert!(GlobalSettings::parse_start_minimized_to_tray_json(
+            r#"{"autostart":false,"language":"zh-CN","minimize_to_tray":true,"start_minimized_to_tray":true}"#
+        ));
+        assert!(!GlobalSettings::parse_start_minimized_to_tray_json("{invalid"));
     }
 
     #[test]

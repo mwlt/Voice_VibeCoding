@@ -22,9 +22,8 @@ fn cleanup_on_exit(app: &tauri::AppHandle) {
     bridges::xiaomi::special_keys::stop_special_key_hook();
 }
 
-/// 自启参数解析：`--minimized`（注册表 Run 键与 Startup 快捷方式均带此参数）。
-/// 语义：自启时 minimize + skip_taskbar 进托盘（禁止 hide，避免 WebView2 白屏），
-/// 用户点托盘即可恢复。
+/// 自启参数解析：`--minimized`（Run 注册表自启项携带）。
+/// 仅用于单实例去重（重复自启进程静默忽略）；是否进托盘由 `start_minimized_to_tray` 决定。
 ///
 /// ```
 /// use remote_bridge_hub_lib::should_start_minimized;
@@ -38,6 +37,16 @@ pub fn should_start_minimized(args: &[String]) -> bool {
     args.iter().any(|a| a.trim() == "--minimized")
 }
 
+/// 单实例二次启动：重复的自启进程（`--minimized`）应忽略，避免 restore 打掉托盘。
+pub fn should_ignore_second_instance(args: &[String]) -> bool {
+    should_start_minimized(args)
+}
+
+fn on_second_instance_launch(app: &tauri::AppHandle) {
+    let start_minimized = config::manager::ConfigManager::read_start_minimized_to_tray(app);
+    webview_recovery::apply_second_instance_policy(app, start_minimized);
+}
+
 /// 自启时 bridge 自动重连额外错峰（秒），避开开机 IO 高峰
 const REMOTE_BRIDGE_START_DELAY_SECS: u64 = 4;
 
@@ -47,8 +56,14 @@ pub fn run() {
     let mut builder = tauri::Builder::default();
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            webview_recovery::restore_main_window(app);
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if should_ignore_second_instance(&args) {
+                log::info!(
+                    "single-instance: duplicate --minimized launch ignored (keep tray)"
+                );
+                return;
+            }
+            on_second_instance_launch(app);
         }));
     }
 
@@ -62,6 +77,18 @@ pub fn run() {
             let log_path = logging::init(&config_manager.logs_dir());
             std::env::set_var("REMOTE_BRIDGE_LOG_PATH", &log_path);
             app.manage(config_manager);
+
+            if let Some(mgr) = app.try_state::<config::manager::ConfigManager>() {
+                if let Ok(cfg) = mgr.get_device_config("xiaomi") {
+                    bridges::xiaomi::voice_gain::set_gain_db(cfg.gain_db);
+                }
+            }
+
+            let settings_autostart = app
+                .try_state::<config::manager::ConfigManager>()
+                .and_then(|m| m.get_global_settings().ok())
+                .map(|s| s.autostart);
+            bridges::xiaomi::autostart::reconcile_autostart_entries(settings_autostart);
 
             log::info!("Voice VibeCoding starting...");
             #[cfg(debug_assertions)]
@@ -93,41 +120,12 @@ pub fn run() {
                 // 关闭窗口：minimize_to_tray=true → minimize+skip_taskbar（禁止 hide）
                 webview_recovery::attach_main_window_close_handler(app.handle(), &window);
 
-                // 启动后最小化到托盘（用户设置）或 --minimized（自启）：统一走 minimize，不用 hide
-                let start_to_tray = app
-                    .try_state::<config::manager::ConfigManager>()
-                    .and_then(|m| m.get_global_settings().ok())
-                    .map(|s| s.start_minimized_to_tray)
-                    .unwrap_or(false)
-                    || should_start_minimized(&std::env::args().collect::<Vec<_>>());
-                webview_recovery::set_boot_to_tray(start_to_tray);
-
-                if start_to_tray {
-                    // 窗口保持 visible:false；前端就绪后 reveal_main_on_frontend_ready 会 minimize 到托盘
-                    // 兜底：若前端未及时调用，延迟后仍进入托盘（不用 hide）
-                    log::info!("START: boot_to_tray=true (start_minimized_to_tray or --minimized)");
-                    let win = window.clone();
-                    std::thread::Builder::new()
-                        .name("start-to-tray".into())
-                        .spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(800));
-                            webview_recovery::minimize_main_to_tray(&win);
-                        })?;
-                } else {
-                    // 正常启动：visible:false 防闪；前端就绪优先 show，此处作兜底
-                    let win = window.clone();
-                    std::thread::Builder::new()
-                        .name("show-main-window".into())
-                        .spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(400));
-                            if webview_recovery::boot_to_tray() {
-                                return;
-                            }
-                            webview_recovery::reveal_webview(&win);
-                            let _ = win.set_skip_taskbar(false);
-                            let _ = win.show();
-                        })?;
-                }
+                // 启动后最小化到托盘：仅由全局设置决定（--minimized 仅用于单实例去重）
+                let start_to_tray =
+                    config::manager::ConfigManager::read_start_minimized_to_tray(app.handle());
+                webview_recovery::apply_startup_window_policy(app.handle(), start_to_tray, &window);
+            } else {
+                log::error!("START: main window not found; startup tray policy skipped");
             }
 
             // 独立 audio_router 子进程（对齐 Python --role audio）
@@ -269,7 +267,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::should_start_minimized;
+    use super::{should_ignore_second_instance, should_start_minimized};
 
     #[test]
     fn minimized_flag_detected() {
@@ -289,5 +287,23 @@ mod tests {
     #[test]
     fn whitespace_tolerated() {
         assert!(should_start_minimized(&["app.exe".into(), " --minimized ".into()]));
+    }
+
+    #[test]
+    fn second_instance_minimized_is_ignored() {
+        assert!(should_ignore_second_instance(&[
+            "app.exe".into(),
+            "--minimized".into()
+        ]));
+        assert!(!should_ignore_second_instance(&["app.exe".into()]));
+    }
+
+    #[test]
+    fn second_instance_policy_follows_setting() {
+        use config::manager::GlobalSettings;
+        assert!(!GlobalSettings::default().start_minimized_to_tray);
+        assert!(GlobalSettings::parse_start_minimized_to_tray_json(
+            r#"{"autostart":false,"language":"zh-CN","minimize_to_tray":true,"start_minimized_to_tray":true}"#
+        ));
     }
 }

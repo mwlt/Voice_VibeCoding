@@ -115,6 +115,7 @@ fn windows_run_input_session(
         .try_state::<ConfigManager>()
         .and_then(|m| m.get_device_config("xiaomi").ok());
     let gain_db = cfg.as_ref().map(|c| c.gain_db).unwrap_or(10.0);
+    crate::bridges::xiaomi::voice_gain::set_gain_db(gain_db);
     let tv_delay = cfg
         .as_ref()
         .map(|c| c.tv_action_ready_delay)
@@ -247,7 +248,6 @@ fn windows_run_input_session(
                 &atvv_interface_id,
                 &gate,
                 &mut tokens,
-                gain_db,
             ) {
                 Ok(true) => {
                     atvv_ok = true;
@@ -275,7 +275,7 @@ fn windows_run_input_session(
         // 2) 回退：设备枚举到的 ATVV 服务（地址路径）
         if !atvv_ok {
             if let Some(atvv) = atvv_service.as_ref() {
-                match subscribe_atvv_service(&app, atvv, &gate, &mut tokens, gain_db) {
+                match subscribe_atvv_service(&app, atvv, &gate, &mut tokens) {
                     Ok(true) => {
                         atvv_ok = true;
                         emit_message(&app, "ATVV 语音键/音频已订阅");
@@ -399,7 +399,7 @@ fn windows_run_input_session(
         if !atvv_ok && since_atvv_retry.elapsed() >= Duration::from_secs(3) {
             since_atvv_retry = Instant::now();
             if let Some(atvv) = atvv_service.as_ref() {
-                match subscribe_atvv_service(&app, atvv, &gate, &mut tokens, gain_db) {
+                match subscribe_atvv_service(&app, atvv, &gate, &mut tokens) {
                     Ok(true) => {
                         atvv_ok = true;
                         mark_atvv_subscribed(true);
@@ -906,7 +906,6 @@ fn subscribe_atvv_from_interface(
         windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic,
         windows::Foundation::EventRegistrationToken,
     )>,
-    gain_db: f32,
 ) -> Result<bool, String> {
     use windows::core::HSTRING;
     use windows::Devices::Bluetooth::GenericAttributeProfile::{
@@ -929,7 +928,7 @@ fn subscribe_atvv_from_interface(
                 .and_then(|op| op.get())
         });
 
-    subscribe_atvv_service(app, &service, gate, tokens, gain_db)
+    subscribe_atvv_service(app, &service, gate, tokens)
 }
 
 /// ATVV 语音会话共享状态
@@ -940,7 +939,6 @@ struct AtvvVoiceState {
     frame_size: usize,
     pending_sync: Option<(i32, i32)>,
     last_mic_off: Option<Instant>,
-    gain_db: f32,
     frames: u64,
     /// 遥控语音键当前是否按下
     remote_pressed: bool,
@@ -1058,7 +1056,6 @@ fn subscribe_atvv_service(
         windows::Devices::Bluetooth::GenericAttributeProfile::GattCharacteristic,
         windows::Foundation::EventRegistrationToken,
     )>,
-    gain_db: f32,
 ) -> Result<bool, String> {
     use windows::core::GUID;
     use windows::Devices::Bluetooth::GenericAttributeProfile::{
@@ -1138,7 +1135,6 @@ fn subscribe_atvv_service(
         frame_size: 120,
         pending_sync: None,
         last_mic_off: None,
-        gain_db,
         frames: 0,
         remote_pressed: false,
     }));
@@ -1283,7 +1279,7 @@ fn handle_atvv_audio(state: &Arc<Mutex<AtvvVoiceState>>, payload: &[u8]) {
             st.decoder.reset_with(pred, idx);
         }
         let samples = st.decoder.decode_bytes(&frame);
-        let samples = postprocess(&samples, st.gain_db);
+        let samples = postprocess(&samples, crate::bridges::xiaomi::voice_gain::gain_db());
         voice_pcm::push_16k(&samples);
         st.frames += 1;
         if st.frames == 1 || st.frames == 10 || st.frames % 200 == 0 {

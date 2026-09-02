@@ -5,8 +5,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { useBridgeStore } from "../stores/bridge";
 import { useConfigStore } from "../stores/config";
+import type { DeviceConfig } from "../types";
 import DeviceStatus from "../components/DeviceStatus.vue";
+import BatteryLevelIcon from "../components/BatteryLevelIcon.vue";
+import CableVolRuler from "../components/CableVolRuler.vue";
 import KeyMappingStage from "../components/KeyMappingStage.vue";
+import { cableZoneForLevel } from "../utils/cableVolMeter";
 import wechatImeHotkeysImg from "../assets/guides/wechat-ime-hotkeysV3.png";
 import doubaoImeHotkeysImg from "../assets/guides/doubao.png";
 import { vkDisplayName } from "../utils/vkDisplay";
@@ -140,9 +144,62 @@ const bleSignalLabel = computed(() => {
   }
 });
 
-const cableActivityLabel = computed(() =>
-  voiceMeter.value.cableActive ? "输送中" : "待命"
-);
+function waveBinHeight(v: number, receiving: boolean): number {
+  const clamped = Math.min(1, Math.max(0, v));
+  let h = Math.pow(clamped, 0.25) * 100;
+  if (receiving && h < 20) h = 20;
+  return Math.max(8, h);
+}
+
+const waveAreaPath = computed(() => {
+  const wf = voiceMeter.value.waveform;
+  const receiving = voiceMeter.value.bleState === "receiving";
+  if (!wf.length) return "M0,100 L100,100 Z";
+  const top = wf
+    .map((v, i) => {
+      const x = wf.length === 1 ? 0 : (i / (wf.length - 1)) * 100;
+      const y = 100 - waveBinHeight(v, receiving);
+      return `${i === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`;
+    })
+    .join(" ");
+  return `${top} L100,100 L0,100 Z`;
+});
+
+const waveLinePoints = computed(() => {
+  const wf = voiceMeter.value.waveform;
+  const receiving = voiceMeter.value.bleState === "receiving";
+  if (!wf.length) return "0,100 100,100";
+  return wf
+    .map((v, i) => {
+      const x = wf.length === 1 ? 0 : (i / (wf.length - 1)) * 100;
+      const y = 100 - waveBinHeight(v, receiving);
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    })
+    .join(" ");
+});
+
+const cableReady = computed(() => host.value.cable_ready);
+
+const cableVolZone = computed(() => {
+  if (!cableReady.value) return "idle";
+  if (!voiceMeter.value.cableActive) return "idle";
+  return cableZoneForLevel(voiceMeter.value.cableLevel);
+});
+
+const cableVolHint = computed(() => {
+  if (!cableReady.value) return "\u00a0";
+  if (!voiceMeter.value.cableActive) return "待命";
+  switch (cableVolZone.value) {
+    case "low":
+      return "偏低";
+    case "high":
+      return "偏高";
+    case "ok":
+      return "正常";
+    default:
+      return "送声";
+  }
+});
 
 function applyVoiceMeter(p: Record<string, unknown>) {
   const bleState = (p.bleState ?? p.ble_state ?? "idle") as BleMeterState;
@@ -543,6 +600,53 @@ const voiceShortcutEnabled = computed({
 const GAIN_MIN = -12;
 const GAIN_MAX = 30;
 const GAIN_STEP = 1;
+/** 连点 ± 时合并为一次保存，避免并发写配置竞态 */
+const GAIN_SAVE_DEBOUNCE_MS = 300;
+
+let gainSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let gainSaveSeq = 0;
+let voiceSettingsSaveSeq = 0;
+/** 串行化 xiaomi 配置写盘，避免增益/语音设置并发覆盖 */
+let configSaveQueue: Promise<void> = Promise.resolve();
+
+function cancelGainPersistSchedule() {
+  if (gainSaveTimer) {
+    clearTimeout(gainSaveTimer);
+    gainSaveTimer = null;
+  }
+}
+
+function runSerializedConfigSave(task: () => Promise<void>): Promise<void> {
+  const run = configSaveQueue.then(task);
+  configSaveQueue = run.catch(() => {});
+  return run;
+}
+
+/** 非增益类 xiaomi 配置保存：取消待写入的增益 debounce，并入串行队列 */
+async function saveXiaomiConfig(cfg: DeviceConfig): Promise<boolean> {
+  cancelGainPersistSchedule();
+  let ok = false;
+  await runSerializedConfigSave(async () => {
+    ok = await configStore.saveConfig(type, cfg);
+  });
+  return ok;
+}
+
+const gainToastVisible = ref(false);
+const gainToastMessage = ref("");
+const gainToastError = ref(false);
+let gainToastTimer: ReturnType<typeof setTimeout> | null = null;
+
+function showGainToast(message: string, isError = false) {
+  gainToastMessage.value = message;
+  gainToastError.value = isError;
+  gainToastVisible.value = true;
+  if (gainToastTimer) clearTimeout(gainToastTimer);
+  gainToastTimer = setTimeout(() => {
+    gainToastVisible.value = false;
+    gainToastTimer = null;
+  }, 2000);
+}
 
 const gainDb = computed({
   get: () => config.value?.gain_db ?? 10,
@@ -551,7 +655,7 @@ const gainDb = computed({
     const n = typeof v === "number" ? v : Number(v);
     if (Number.isNaN(n)) return;
     config.value.gain_db = Math.min(GAIN_MAX, Math.max(GAIN_MIN, n));
-    void persistVoiceSettings();
+    scheduleGainPersist();
   },
 });
 
@@ -567,12 +671,59 @@ function clampGainOnBlur() {
   } else {
     config.value.gain_db = Math.min(GAIN_MAX, Math.max(GAIN_MIN, n));
   }
-  void persistVoiceSettings();
+  flushGainPersist();
+}
+
+function scheduleGainPersist() {
+  if (gainSaveTimer) clearTimeout(gainSaveTimer);
+  gainSaveTimer = setTimeout(() => {
+    gainSaveTimer = null;
+    void persistGainSettings();
+  }, GAIN_SAVE_DEBOUNCE_MS);
+}
+
+function flushGainPersist() {
+  if (gainSaveTimer) {
+    clearTimeout(gainSaveTimer);
+    gainSaveTimer = null;
+  }
+  void persistGainSettings();
+}
+
+async function persistGainSettings() {
+  if (!config.value || configLoadState.value !== "ready") return;
+  await runSerializedConfigSave(async () => {
+    const seq = ++gainSaveSeq;
+    const ok = await configStore.saveConfig(type, { ...config.value! });
+    if (seq !== gainSaveSeq) return;
+    if (ok) {
+      showGainToast("增益新数值已生效。");
+      return;
+    }
+    showGainToast("增益值更新失败，请调整数值重试。", true);
+    await configStore.loadConfig(type);
+    if (seq !== gainSaveSeq) return;
+    if (configStore.loadStates[type] !== "ready") {
+      showGainToast("增益值更新失败，请刷新页面后重试。", true);
+    }
+  });
 }
 
 async function persistVoiceSettings() {
   if (!config.value) return;
-  await configStore.saveConfig(type, { ...config.value });
+  cancelGainPersistSchedule();
+  await runSerializedConfigSave(async () => {
+    const seq = ++voiceSettingsSaveSeq;
+    const ok = await configStore.saveConfig(type, { ...config.value! });
+    if (seq !== voiceSettingsSaveSeq) return;
+    if (ok) return;
+    prependLog("语音设置保存失败，请重试");
+    await configStore.loadConfig(type);
+    if (seq !== voiceSettingsSaveSeq) return;
+    if (configStore.loadStates[type] !== "ready") {
+      prependLog("配置重新加载失败，请刷新页面");
+    }
+  });
 }
 
 /** 输入法一键预设（微信 / 豆包 / 千问等） */
@@ -598,12 +749,22 @@ async function applyImePreset(presetId: ImePresetId) {
   config.value.voice_shortcut_enabled = true;
   config.value.trigger_mode = next.trigger_mode;
   config.value.voice_release_behavior = next.voice_release_behavior;
-  await configStore.saveConfig(type, next);
+  const ok = await saveXiaomiConfig(next);
+  if (!ok) {
+    prependLog("预设应用失败，请重试");
+    await configStore.loadConfig(type);
+    return;
+  }
   setupApplyHint.value = definition.applyHint;
   prependLog(definition.logMessage);
   window.setTimeout(() => {
     if (setupApplyHint.value.startsWith("已应用")) setupApplyHint.value = "";
   }, 4000);
+}
+
+async function onKeyMappingSave(cfg: DeviceConfig) {
+  const ok = await saveXiaomiConfig(cfg);
+  if (!ok) prependLog("按键映射保存失败，请重试");
 }
 
 let hostPollTimer: ReturnType<typeof setInterval> | null = null;
@@ -1405,6 +1566,10 @@ onUnmounted(() => {
   if (winuhidTipCloseTimer) clearTimeout(winuhidTipCloseTimer);
   if (atvvTipCloseTimer) clearTimeout(atvvTipCloseTimer);
   if (restartTipCloseTimer) clearTimeout(restartTipCloseTimer);
+  if (gainSaveTimer) {
+    flushGainPersist();
+  }
+  if (gainToastTimer) clearTimeout(gainToastTimer);
   if (mappingFlashClearTimer) clearTimeout(mappingFlashClearTimer);
   if (tipViewportRaf != null) {
     cancelAnimationFrame(tipViewportRaf);
@@ -1464,24 +1629,28 @@ async function retryLoadConfig() {
     <div class="overview-row">
       <div class="overview-left">
         <div class="device-info-row">
-          <div class="info-item" style="min-width: 140px !important;">
-            <span class="info-label">设备名称</span>
-            <span class="info-value">{{ device.device_name || "—" }}</span>
+          <div class="device-info-col">
+            <div class="info-line">
+              <span class="info-label">设备名称</span>
+              <span class="info-value">{{ device.device_name || "—" }}</span>
+            </div>
+            <div class="info-line">
+              <span class="info-label">蓝牙地址</span>
+              <span class="info-value">{{ device.device_address || "—" }}</span>
+            </div>
           </div>
-          <div class="info-item">
-            <span class="info-label">蓝牙地址</span>
-            <span class="info-value">{{ device.device_address || "—" }}</span>
-          </div>
-          <div class="info-item" >
-            <span class="info-label">电量</span>
-            <span class="info-value">
-              {{ device.battery_level != null ? device.battery_level + "%" : "—" }}
-            </span>
-          </div>
-          <div class="info-item">
-  
-            <span class="info-label">连接方式</span>
-            <span class="info-value">蓝牙 BLE</span>
+          <div class="device-info-col">
+            <div class="info-line">
+              <span class="info-label">剩余电量</span>
+              <span class="info-value info-value-battery">
+                <BatteryLevelIcon :level="device.battery_level" />
+                {{ device.battery_level != null ? device.battery_level + "%" : "—" }}
+              </span>
+            </div>
+            <div class="info-line">
+              <span class="info-label">连接方式</span>
+              <span class="info-value">蓝牙 BLE</span>
+            </div>
           </div>
           <div
             class="info-item info-item-audio"
@@ -1503,13 +1672,42 @@ async function retryLoadConfig() {
               >{{ bleSignalLabel }}</span>
             </div>
             <div class="ble-wave" aria-hidden="true">
-              <span
-                v-for="(v, i) in voiceMeter.waveform"
-                :key="i"
-                class="ble-wave-bar"
-                :style="{ height: `${Math.max(8, Math.round(Math.pow(Math.min(1, Math.max(0, v)), 0.25) * 100))}%` }"
-              />
+              <svg class="ble-wave-svg" viewBox="0 0 100 100" preserveAspectRatio="none">
+                <path class="ble-wave-fill" :d="waveAreaPath" />
+                <polyline class="ble-wave-line" :points="waveLinePoints" />
+              </svg>
             </div>
+          </div>
+          <div
+            class="info-item info-item-cable-vol"
+            :class="[
+              `cable-zone-${cableVolZone}`,
+              { 'is-active': cableReady && voiceMeter.cableActive },
+            ]"
+            title="经增益处理后送往虚拟声卡的实时电平（dBFS，0 为数字满幅）"
+          >
+            <div class="audio-label-row cable-vol-label-row">
+              <span v-if="cableReady" class="info-label">虚拟声卡音量</span>
+              <span v-else class="cable-vol-fail">虚拟声卡未就绪</span>
+              <span
+                class="cable-vol-state"
+                :class="{
+                  'is-low': cableReady && cableVolZone === 'low',
+                  'is-high': cableReady && cableVolZone === 'high',
+                  'is-ok': cableReady && cableVolZone === 'ok',
+                  'is-idle': !cableReady || !voiceMeter.cableActive,
+                  'is-sending':
+                    cableReady &&
+                    voiceMeter.cableActive &&
+                    cableVolZone === 'idle',
+                }"
+              >{{ cableVolHint }}</span>
+            </div>
+            <CableVolRuler
+              :level="voiceMeter.cableLevel"
+              :disabled="!cableReady"
+              :active="cableReady && voiceMeter.cableActive"
+            />
           </div>
         </div>
 
@@ -1519,7 +1717,6 @@ async function retryLoadConfig() {
               v-for="item in host.items"
               :key="item.id"
               class="host-status-item"
-              :class="{ 'host-status-cable': item.id === 'cable' }"
               role="listitem"
             >
               <span
@@ -1528,20 +1725,6 @@ async function retryLoadConfig() {
                 aria-hidden="true"
               />
               <span class="host-item-label">{{ item.label }}</span>
-              <div
-                v-if="item.id === 'cable'"
-                class="cable-meter"
-                :class="{ active: voiceMeter.cableActive }"
-                :title="cableActivityLabel"
-                aria-hidden="true"
-              >
-                <span class="cable-meter-track">
-                  <span
-                    class="cable-meter-fill"
-                    :style="{ width: `${Math.round(voiceMeter.cableLevel * 100)}%` }"
-                  />
-                </span>
-              </div>
               <span class="host-item-state" :class="itemToneClass(item.tone)">
                 {{ item.state_label }}
               </span>
@@ -1770,7 +1953,7 @@ async function retryLoadConfig() {
                   <div class="tip-block tip-off">
                     <div class="tip-badge">什么时候点</div>
                     <ul>
-                      <li>改了增益、映射等设置后不生效</li>
+                      <li>虚拟声卡、ATVV 或蓝牙连接异常</li>
                       <li>状态显示异常、按键失灵、连上又掉线</li>
                       <li>长时间不用后突然不响应，想快速恢复</li>
                     </ul>
@@ -2387,7 +2570,7 @@ async function retryLoadConfig() {
                 type="button"
                 class="stepper-btn"
                 aria-label="减小增益"
-                :disabled="gainDb <= GAIN_MIN"
+                :disabled="gainDb <= GAIN_MIN || configStore.saving || configSectionLoading"
                 @click="stepGain(-GAIN_STEP)"
               >
                 −
@@ -2399,13 +2582,14 @@ async function retryLoadConfig() {
                 :min="GAIN_MIN"
                 :max="GAIN_MAX"
                 :step="GAIN_STEP"
+                :disabled="configStore.saving || configSectionLoading"
                 @blur="clampGainOnBlur"
               />
               <button
                 type="button"
                 class="stepper-btn"
                 aria-label="增大增益"
-                :disabled="gainDb >= GAIN_MAX"
+                :disabled="gainDb >= GAIN_MAX || configStore.saving || configSectionLoading"
                 @click="stepGain(GAIN_STEP)"
               >
                 +
@@ -2450,7 +2634,7 @@ async function retryLoadConfig() {
                 <div class="tip-block tip-off">
                   <div class="tip-badge">注意</div>
                   <ul>
-                    <li>改完后请重新连接遥控器，或点「重启桥接」后生效</li>
+                    <li>保存后立即生效（约 0.3 秒内自动保存），无需重启桥接</li>
                     <li>一次加减 2～4 dB 即可，别一次拉满</li>
                   </ul>
                 </div>
@@ -2463,11 +2647,22 @@ async function retryLoadConfig() {
         </div>
         <KeyMappingStage
           :config="config"
-          @save="(cfg) => configStore.saveConfig(type, cfg)"
+          @save="onKeyMappingSave"
         />
       </section>
     </div>
   </div>
+
+  <Teleport to="body">
+    <div
+      v-if="gainToastVisible"
+      class="gain-toast"
+      :class="{ 'gain-toast--error': gainToastError }"
+      role="status"
+    >
+      {{ gainToastMessage }}
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -2568,7 +2763,7 @@ async function retryLoadConfig() {
 .voice-toolbar-label {
   font-size: 13px;
   line-height: 1.3;
-  font-weight: 500;
+  font-weight: 400;
   color: var(--text);
   white-space: nowrap;
 }
@@ -2663,22 +2858,50 @@ async function retryLoadConfig() {
 }
 
 .device-info-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr 0.75fr 0.85fr minmax(140px, 1.55fr);
-  gap: 10px 16px;
+  display: flex;
+  gap: 16px;
   margin-bottom: 0;
   padding: 12px 14px;
   background: var(--card-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  align-items: start;
+  align-items: stretch;
+}
+.device-info-col {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 0;
+}
+.info-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.info-line .info-label {
+  flex-shrink: 0;
+}
+.info-line .info-value {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text, #1e293b);
+}
+.info-value-battery {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 @media (max-width: 720px) {
   .device-info-row {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    flex-direction: column;
   }
-  .info-item-audio {
-    grid-column: 1 / -1;
+  .info-item-audio,
+  .info-item-cable-vol {
+    width: 100%;
   }
 }
 
@@ -2799,7 +3022,7 @@ async function retryLoadConfig() {
 }
 .host-item-label {
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 400;
   color: var(--text);
   white-space: nowrap;
   flex-shrink: 0;
@@ -2822,39 +3045,11 @@ async function retryLoadConfig() {
 .host-item-state.error {
   color: #b91c1c;
 }
-.host-status-cable {
-  flex-wrap: nowrap;
-}
 @media (min-width: 841px) and (max-width: 980px) {
   /* 侧栏日志并排时内容区偏窄，改为 2×2 避免块内文字挤出 */
   .host-status-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-}
-.cable-meter {
-  flex: 0 1 25%;
-  max-width: 25%;
-  min-width: 12px;
-  display: flex;
-  align-items: center;
-}
-.cable-meter-track {
-  flex: 1;
-  height: 6px;
-  border-radius: 3px;
-  background: #e2e8f0;
-  overflow: hidden;
-}
-.cable-meter-fill {
-  display: block;
-  height: 100%;
-  width: 0;
-  border-radius: 3px;
-  background: #94a3b8;
-  transition: width 70ms linear;
-}
-.cable-meter.active .cable-meter-fill {
-  background: #16a34a;
 }
 .host-detail {
   margin: 0 0 14px;
@@ -2879,6 +3074,7 @@ async function retryLoadConfig() {
 .host-actions .btn {
   padding: 4px 10px;
   font-size: 12px;
+  font-weight: 400;
   border-radius: 5px;
 }
 .btn {
@@ -3378,9 +3574,77 @@ async function retryLoadConfig() {
   min-width: 0;
 }
 
-.info-item-audio {
-  gap: 3px;
+.info-item-audio .audio-label-row {
+  min-height: 18px;
+  align-items: baseline;
 }
+
+.info-item-audio .ble-wave,
+.info-item-cable-vol .cable-vol-ruler {
+  flex-shrink: 0;
+  height: 28px;
+}
+
+.info-item-audio,
+.info-item-cable-vol {
+  gap: 3px;
+  flex: 1.1 1 0;
+  min-width: 120px;
+}
+
+.cable-vol-label-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 3em;
+  align-items: center;
+  column-gap: 8px;
+  height: 18px;
+  line-height: 18px;
+}
+
+.cable-vol-label-row .info-label,
+.cable-vol-label-row .cable-vol-fail {
+  line-height: 18px;
+}
+
+.cable-vol-fail {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--danger, #ef4444);
+  white-space: nowrap;
+}
+
+.cable-vol-label-row .cable-vol-state {
+  justify-self: end;
+  width: 3em;
+  min-width: 3em;
+  text-align: right;
+  white-space: nowrap;
+  font-weight: 400;
+  font-size: 12px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cable-vol-label-row .cable-vol-state.is-idle {
+  color: var(--text-secondary);
+}
+
+.cable-vol-label-row .cable-vol-state.is-sending {
+  color: #15803d;
+}
+
+.info-item-cable-vol .cable-vol-state.is-ok {
+  color: #15803d;
+}
+
+.info-item-cable-vol .cable-vol-state.is-low {
+  color: #ca8a04;
+}
+
+.info-item-cable-vol .cable-vol-state.is-high {
+  color: #dc2626;
+}
+
 .audio-label-row {
   display: flex;
   align-items: baseline;
@@ -3411,39 +3675,41 @@ async function retryLoadConfig() {
   color: #15803d;
 }
 .ble-wave {
-  display: flex;
-  align-items: flex-end;
-  gap: 2px;
   height: 28px;
-  padding: 3px 4px;
+  padding: 0;
   border-radius: 4px;
   background: #f1f5f9;
   border: 1px solid var(--border);
+  color: #94a3b8;
+  overflow: hidden;
+}
+.ble-wave-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.ble-wave-fill {
+  fill: currentColor;
+  opacity: 0.22;
+  transition: d 60ms linear;
+}
+.ble-wave-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  transition: points 60ms linear;
 }
 .info-item-audio.is-receiving .ble-wave {
   background: #ecfdf5;
   border-color: #bbf7d0;
+  color: #16a34a;
 }
 .info-item-audio.is-session .ble-wave {
   background: #fffbeb;
   border-color: #fde68a;
-}
-.ble-wave-bar {
-  flex: 1 1 0;
-  min-width: 2px;
-  max-width: 6px;
-  height: 8%;
-  border-radius: 1px;
-  background: #94a3b8;
-  transition: height 60ms linear;
-}
-.info-item-audio.is-receiving .ble-wave-bar {
-  background: #16a34a;
-  /* 有输入时柱子的最小占用高度：远距离小信号也保持可见波动 */
-  min-height: 20%;
-}
-.info-item-audio.is-session .ble-wave-bar {
-  background: #d97706;
+  color: #d97706;
 }
 
 .info-label {
@@ -3452,8 +3718,9 @@ async function retryLoadConfig() {
 }
 
 .info-value {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text, #1e293b);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3632,5 +3899,37 @@ async function retryLoadConfig() {
   color: #94a3b8;
   font-size: 11px;
   line-height: 1.5;
+}
+
+.gain-toast {
+  position: fixed;
+  left: 50%;
+  top: 60px;
+  transform: translateX(-50%);
+  z-index: 4000;
+  padding: 10px 18px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.92);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.25);
+  pointer-events: none;
+  animation: gain-toast-in 0.2s ease-out;
+}
+
+.gain-toast--error {
+  background: rgba(127, 29, 29, 0.94);
+}
+
+@keyframes gain-toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
 }
 </style>

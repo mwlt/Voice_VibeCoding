@@ -1,7 +1,8 @@
 # WebView2 白屏/黑屏恢复方案
 
-> 最后更新：2026-08-27  
-> 关联代码：`webview_guard.rs`、`webview_recovery.rs`、`lib.rs`、`ipc/tray.rs`
+> 最后更新：2026-09-02  
+> 关联代码：`webview_guard.rs`、`webview_recovery.rs`、`lib.rs`、`ipc/tray.rs`、`bridges/xiaomi/autostart.rs`  
+> 开机自启与托盘语义详见 [AUTOSTART_TRAY.md](./AUTOSTART_TRAY.md)
 
 ---
 
@@ -47,7 +48,7 @@ Rust 主进程与音频子进程存活，WebView2 **渲染进程已死亡**进�
 
 | 级别 | 手段 | 触发条件 |
 |------|------|----------|
-| L0 预防 | 关闭 / 启动进托盘 → `minimize()` + `set_skip_taskbar(true)`，**禁止 `hide()`** | 用户点关闭且「最小化到托盘」开启；或「启动后最小化到托盘」/`--minimized` |
+| L0 预防 | 关闭 / 启动进托盘 → `minimize()` + `set_skip_taskbar(true)`，**禁止 `hide()`** | 用户点关闭且「最小化到托盘」开启；或「启动后最小化到托盘」开启（见 [AUTOSTART_TRAY.md](./AUTOSTART_TRAY.md)） |
 | L1 轻量 | `window.reload()` | 心跳超时 / 启动宽限期无 pong |
 | L2 重建 | destroy + `WebviewWindowBuilder` 重建 | reload 连续失败 ≥2 次 |
 | L3 重启 | `app.restart()` 整进程 relaunch | 托盘「重启软件」；L2 仍失败时用户手动 |
@@ -65,7 +66,7 @@ Rust 主进程与音频子进程存活，WebView2 **渲染进程已死亡**进�
 | `RECREATE_COOLDOWN` | 60s | recreate 冷却 |
 | `FIRST_PONG_GRACE` | 45s | 启动后窗口可见但 JS 未就绪的宽限期 |
 
-前端：`App.vue` 每 5s 调用 `webview_ping`；`onMounted` 后 `getCurrentWindow().show()`（配合 `visible:false` 防白屏闪烁）。
+前端：`App.vue` 每 5s 调用 `webview_ping`；`onMounted` 后调用 `reveal_main_on_frontend_ready`（托盘启动时由后端 minimize，禁止 hide）。
 
 ---
 
@@ -82,7 +83,7 @@ Rust 主进程与音频子进程存活，WebView2 **渲染进程已死亡**进�
 - [ ] 模拟黑屏：守卫日志出现 recreate 且界面恢复
 - [ ] 托盘「刷新界面」：reload 失败时能 recreate 恢复
 - [ ] 托盘「重启软件」：进程重启且功能正常
-- [ ] 开机自启：无白屏，页面就绪后窗口出现
+- [ ] 开机自启 +「启动后最小化到托盘」：无窗口、无任务栏，仅托盘；Run 单入口无 Startup 双启
 - [ ] 黑屏时后端（语音/按键）仍可用，恢复后 UI 与后端状态一致
 
 ---
@@ -93,7 +94,8 @@ Rust 主进程与音频子进程存活，WebView2 **渲染进程已死亡**进�
 |------|------|
 | `src-tauri/src/webview_guard.rs` | 心跳状态机、Grace、Reload/Recreate 判定 |
 | `src-tauri/src/webview_recovery.rs` | reload / recreate / restart 执行 |
-| `src-tauri/src/lib.rs` | 守卫线程、关闭 minimize、自启错峰 |
+| `src-tauri/src/lib.rs` | 守卫线程、关闭 minimize、自启错峰、单实例 |
+| `src-tauri/src/bridges/xiaomi/autostart.rs` | Run 自启、Startup 遗留清理 |
 | `src-tauri/src/ipc/tray.rs` | 托盘刷新 + 重启软件 |
 | `src/App.vue` | 心跳 + 就绪后 show |
 | `src-tauri/tauri.conf.json` | 主窗口 `visible: false` |

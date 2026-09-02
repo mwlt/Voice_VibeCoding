@@ -324,7 +324,7 @@ pub async fn set_autostart(
 ) -> Result<(), String> {
     crate::bridges::xiaomi::autostart::set_autostart_enabled(enable)?;
     let mut settings = config_manager.get_global_settings()?;
-    settings.autostart = enable;
+    settings.autostart = crate::bridges::xiaomi::autostart::is_autostart_enabled();
     config_manager.save_global_settings(&settings)
 }
 

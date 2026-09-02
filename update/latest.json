@@ -1,8 +1,8 @@
 {
-  "version": "1.6.6",
-  "notes": "v1.6.6：\n- 修复任务栏仍显示最早旧图标：ICO 改为 32x32 打头；运行时用 128 PNG 强制 set_icon\n- 请取消任务栏固定后重开，或注销一次以清 Windows 图标缓存",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.6",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.6",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.6.6/Voice%20VibeCoding_1.6.6_x64-setup.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.6.6/Voice.VibeCoding_1.6.6_x64-setup.exe"
+  "version": "1.6.7",
+  "notes": "v1.6.7：\n- 全局设置实时保存、hide_dev_menus；小米页 UI 与增益热更新\n- 开机自启/进托盘修复；WebView 恢复尊重托盘态",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.7",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.7",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.6.7/Voice%20VibeCoding_1.6.7_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.6.7/Voice.VibeCoding_1.6.7_x64-setup.exe"
 }

@@ -3,12 +3,13 @@ import { onMounted, onUnmounted, ref } from "vue";
 import { RouterView, useRouter } from "vue-router";
 import { listen, emit, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import SideNav from "./components/SideNav.vue";
 import AppUpdateModal from "./components/AppUpdateModal.vue";
 import { useAppUpdateStore } from "./stores/appUpdate";
+import { useGlobalSettingsStore } from "./stores/globalSettings";
 
 const appUpdate = useAppUpdateStore();
+const globalSettings = useGlobalSettingsStore();
 
 interface ConflictProcess {
   pid: number;
@@ -131,14 +132,13 @@ onMounted(async () => {
   try {
     await invoke("reveal_main_on_frontend_ready");
   } catch (e) {
+    // 不盲目 show()：开启「启动后最小化到托盘」时 fallback show 会误弹窗；用户可点托盘打开
     console.warn("reveal main window failed:", e);
-    try {
-      await getCurrentWindow().show();
-    } catch (e2) {
-      console.warn("show main window failed:", e2);
-    }
   }
   await appUpdate.init();
+  if (!globalSettings.loaded) {
+    await globalSettings.load();
+  }
   unlistenNav = await listen<string>("navigate", (ev) => {
     if (ev.payload) router.push(ev.payload);
   });

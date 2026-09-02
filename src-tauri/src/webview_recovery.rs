@@ -6,8 +6,10 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder}
 
 const MAIN_LABEL: &str = "main";
 
-/// 启动时是否进入托盘（设置「启动后最小化到托盘」或 `--minimized`）
+/// 启动时是否进入托盘（仅「启动后最小化到托盘」全局设置）
 static BOOT_TO_TRAY: AtomicBool = AtomicBool::new(false);
+/// 当前会话用户是否处于托盘态（含关窗进托盘）；用于 WebView 恢复时保持托盘
+static SESSION_IN_TRAY: AtomicBool = AtomicBool::new(false);
 
 pub fn set_boot_to_tray(v: bool) {
     BOOT_TO_TRAY.store(v, Ordering::SeqCst);
@@ -15,6 +17,20 @@ pub fn set_boot_to_tray(v: bool) {
 
 pub fn boot_to_tray() -> bool {
     BOOT_TO_TRAY.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub fn set_session_in_tray(v: bool) {
+    SESSION_IN_TRAY.store(v, Ordering::SeqCst);
+}
+
+pub fn session_in_tray() -> bool {
+    SESSION_IN_TRAY.load(Ordering::SeqCst)
+}
+
+/// 是否应在 WebView reload/recreate 后回到托盘（启动策略或用户已进托盘）
+fn prefer_stay_in_tray() -> bool {
+    boot_to_tray() || session_in_tray()
 }
 
 /// 恢复 WebView2 渲染可见性（Windows hide/visible:false 后必须先 SetIsVisible）
@@ -35,11 +51,102 @@ pub fn minimize_main_to_tray(window: &WebviewWindow) {
     let _ = window.show();
     let _ = window.minimize();
     let _ = window.set_skip_taskbar(true);
+    SESSION_IN_TRAY.store(true, Ordering::SeqCst);
     log::info!("WINDOW: minimized to tray (skip_taskbar, no hide)");
 }
 
-/// 还原主窗口到前台（托盘左键 / 二次启动 / 菜单「打开状态」）
+/// 若主窗口已存在则立即进托盘，返回是否成功。
+pub fn try_minimize_main_to_tray(app: &AppHandle) -> bool {
+    if let Some(win) = app.get_webview_window(MAIN_LABEL) {
+        minimize_main_to_tray(&win);
+        true
+    } else {
+        false
+    }
+}
+
+const SECOND_INSTANCE_TRAY_RETRY_MS: u64 = 200;
+const SECOND_INSTANCE_TRAY_RETRY_MAX: u32 = 15;
+
+/// 单实例二次启动：按「启动后最小化到托盘」保持托盘或弹出窗口。
+pub fn apply_second_instance_policy(app: &AppHandle, start_minimized: bool) {
+    if start_minimized {
+        if try_minimize_main_to_tray(app) {
+            log::info!("single-instance: start_minimized_to_tray=true, keep in tray");
+        } else {
+            log::warn!("single-instance: start_minimized_to_tray=true but main window not ready, retrying");
+            schedule_minimize_main_when_ready(app.clone());
+        }
+    } else {
+        restore_main_window(app);
+        log::info!("single-instance: start_minimized_to_tray=false, restore window");
+    }
+}
+
+/// 窗口尚未创建时，短轮询直至 minimize（二次启动早于 setup 完成）。
+fn schedule_minimize_main_when_ready(app: AppHandle) {
+    std::thread::Builder::new()
+        .name("second-instance-tray".into())
+        .spawn(move || {
+            for _ in 0..SECOND_INSTANCE_TRAY_RETRY_MAX {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    SECOND_INSTANCE_TRAY_RETRY_MS,
+                ));
+                if !crate::config::manager::ConfigManager::read_start_minimized_to_tray(&app) {
+                    log::info!("single-instance tray retry: setting now false, abort");
+                    return;
+                }
+                if try_minimize_main_to_tray(&app) {
+                    log::info!("single-instance: deferred minimize to tray succeeded");
+                    return;
+                }
+            }
+            log::warn!("single-instance: timed out waiting for main window to minimize to tray");
+        })
+        .ok();
+}
+
+const STARTUP_TRAY_FALLBACK_MS: u64 = 800;
+const STARTUP_SHOW_FALLBACK_MS: u64 = 400;
+
+/// 冷启动时应用「启动后最小化到托盘」策略（设置 boot 标志 + 兜底线程）。
+pub fn apply_startup_window_policy(_app: &AppHandle, start_to_tray: bool, window: &WebviewWindow) {
+    set_boot_to_tray(start_to_tray);
+    log::info!("START: start_minimized_to_tray={start_to_tray}");
+
+    if start_to_tray {
+        let win = window.clone();
+        std::thread::Builder::new()
+            .name("start-to-tray".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(STARTUP_TRAY_FALLBACK_MS));
+                if boot_to_tray() {
+                    minimize_main_to_tray(&win);
+                }
+            })
+            .ok();
+    } else {
+        let win = window.clone();
+        std::thread::Builder::new()
+            .name("show-main-window".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(STARTUP_SHOW_FALLBACK_MS));
+                if boot_to_tray() {
+                    return;
+                }
+                reveal_webview(&win);
+                let _ = win.set_skip_taskbar(false);
+                let _ = win.show();
+            })
+            .ok();
+    }
+}
+
+/// 还原主窗口到前台（托盘左键 / 菜单「打开状态」）
 pub fn restore_main_window(app: &AppHandle) {
+    // 用户主动打开窗口后，不再因 WebView 恢复/兜底线程重新缩回托盘
+    set_boot_to_tray(false);
+    SESSION_IN_TRAY.store(false, Ordering::SeqCst);
     if let Some(window) = app.get_webview_window(MAIN_LABEL) {
         let _ = window.set_skip_taskbar(false);
         reveal_webview(&window);
@@ -51,14 +158,16 @@ pub fn restore_main_window(app: &AppHandle) {
 
 /// 前端就绪后显示窗口；若启动策略为托盘则直接 minimize_to_tray。
 pub fn reveal_main_on_frontend_ready(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
-        if boot_to_tray() {
-            minimize_main_to_tray(&window);
-        } else {
-            let _ = window.set_skip_taskbar(false);
-            reveal_webview(&window);
-            let _ = window.show();
-        }
+    let Some(window) = app.get_webview_window(MAIN_LABEL) else {
+        log::warn!("reveal_main_on_frontend_ready: main window not found");
+        return;
+    };
+    if boot_to_tray() {
+        minimize_main_to_tray(&window);
+    } else {
+        let _ = window.set_skip_taskbar(false);
+        reveal_webview(&window);
+        let _ = window.show();
     }
 }
 
@@ -90,8 +199,17 @@ pub fn try_reload_main(app: &AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window(MAIN_LABEL)
         .ok_or_else(|| "main window not found".to_string())?;
-    restore_main_window(app);
-    window.reload().map_err(|e| format!("WebView2 error: {e}"))
+    let stay_in_tray = prefer_stay_in_tray();
+    if stay_in_tray {
+        reveal_webview(&window);
+    } else {
+        restore_main_window(app);
+    }
+    window.reload().map_err(|e| format!("WebView2 error: {e}"))?;
+    if stay_in_tray {
+        minimize_main_to_tray(&window);
+    }
+    Ok(())
 }
 
 fn build_main_window(app: &AppHandle) -> Result<WebviewWindow, String> {
@@ -119,8 +237,12 @@ pub fn recreate_main_window(app: &AppHandle) -> Result<(), String> {
 
     let window = build_main_window(app)?;
     attach_main_window_close_handler(app, &window);
-    reveal_webview(&window);
-    let _ = window.show();
+    if prefer_stay_in_tray() {
+        minimize_main_to_tray(&window);
+    } else {
+        reveal_webview(&window);
+        let _ = window.show();
+    }
     webview_guard::on_recreated();
     log::info!("WEBVIEW RECOVERY: main window recreated");
     Ok(())
@@ -190,5 +312,32 @@ mod tests {
     #[test]
     fn main_label_constant() {
         assert_eq!(super::MAIN_LABEL, "main");
+    }
+
+    #[test]
+    fn boot_to_tray_flag() {
+        super::set_boot_to_tray(true);
+        assert!(super::boot_to_tray());
+        super::set_boot_to_tray(false);
+        assert!(!super::boot_to_tray());
+    }
+
+    #[test]
+    fn session_in_tray_survives_boot_clear() {
+        super::set_boot_to_tray(false);
+        super::set_session_in_tray(true);
+        assert!(super::session_in_tray());
+        super::set_session_in_tray(false);
+        assert!(!super::session_in_tray());
+    }
+
+    #[test]
+    fn prefer_stay_in_tray_combines_boot_and_session() {
+        super::set_boot_to_tray(true);
+        super::set_session_in_tray(false);
+        assert!(super::boot_to_tray());
+        super::set_boot_to_tray(false);
+        super::set_session_in_tray(true);
+        assert!(super::session_in_tray());
     }
 }

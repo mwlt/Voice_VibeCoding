@@ -1,48 +1,51 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { storeToRefs } from "pinia";
+import { useRoute, useRouter } from "vue-router";
 import { open as openUrl } from "@tauri-apps/plugin-shell";
-import type { GlobalSettings } from "../types";
 import { useAppUpdateStore } from "../stores/appUpdate";
+import { useGlobalSettingsStore } from "../stores/globalSettings";
 import sanodiaLogo from "../assets/mwlt_sanodia_logo.png";
 
 const appUpdate = useAppUpdateStore();
+const globalSettings = useGlobalSettingsStore();
+const { settings } = storeToRefs(globalSettings);
+const route = useRoute();
+const router = useRouter();
 
-const settings = ref<GlobalSettings>({
-  autostart: false,
-  language: "zh-CN",
-  minimize_to_tray: true,
-  start_minimized_to_tray: false,
-});
-
-const saved = ref(true);
-const saving = ref(false);
 const updateChecking = ref(false);
 const updateHint = ref("");
+const toastVisible = ref(false);
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
 onMounted(async () => {
-  try {
-    const s = await invoke<GlobalSettings>("get_global_settings");
-    settings.value = s;
-  } catch (e) {
-    console.error("Failed to load settings:", e);
+  if (!globalSettings.loaded) {
+    await globalSettings.load();
   }
 });
 
-async function saveSettings() {
-  saving.value = true;
-  try {
-    await invoke("save_global_settings", { settings: settings.value });
-    saved.value = true;
-  } catch (e) {
-    console.error("Failed to save settings:", e);
-  } finally {
-    saving.value = false;
-  }
+function showSavedToast() {
+  toastVisible.value = true;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toastVisible.value = false;
+    toastTimer = null;
+  }, 2000);
 }
 
-function onSettingChange() {
-  saved.value = false;
+async function onSettingChange() {
+  const ok = await globalSettings.save();
+  if (ok) {
+    showSavedToast();
+    if (
+      settings.value.hide_dev_menus &&
+      (route.path === "/t1" || route.path === "/v60")
+    ) {
+      router.push("/xiaomi");
+    }
+  } else {
+    updateHint.value = "设置保存失败，请重试";
+  }
 }
 
 async function openExternal(url: string) {
@@ -95,13 +98,6 @@ async function checkUpdate() {
         </button>
         <span v-if="updateHint" class="header-update-hint">{{ updateHint }}</span>
       </div>
-      <button
-        class="btn btn-primary"
-        :disabled="saved || saving"
-        @click="saveSettings"
-      >
-        {{ saving ? "保存中..." : saved ? "已保存" : "保存设置" }}
-      </button>
     </header>
 
     <div class="page-body">
@@ -111,7 +107,9 @@ async function checkUpdate() {
         <div class="setting-row">
           <div class="setting-info">
             <span class="setting-label">开机自启</span>
-            <span class="setting-desc">Windows 启动时自动运行 Voice VibeCoding</span>
+            <span class="setting-desc"
+              >Windows 登录时自动运行（与下方「启动后最小化到托盘」独立；是否进托盘由该选项决定）</span
+            >
           </div>
           <label class="toggle">
             <input
@@ -127,7 +125,7 @@ async function checkUpdate() {
           <div class="setting-info">
             <span class="setting-label">启动后最小化到托盘</span>
             <span class="setting-desc"
-              >启动后直接进托盘（不占任务栏），点托盘图标打开</span
+              >关：手动打开/开机自启/再点图标 → 显示窗口。开：上述情况均进托盘（无窗口、无任务栏）；点托盘图标可打开。仅对下次启动生效，不改变当前窗口状态</span
             >
           </div>
           <label class="toggle">
@@ -159,18 +157,19 @@ async function checkUpdate() {
 
         <div class="setting-row">
           <div class="setting-info">
-            <span class="setting-label">界面语言</span>
-            <span class="setting-desc">选择应用程序的显示语言</span>
+            <span class="setting-label">隐藏开发中项目菜单</span>
+            <span class="setting-desc"
+              >开启后隐藏顶部 T1、V60 菜单；关闭则显示</span
+            >
           </div>
-          <select
-            v-model="settings.language"
-            class="form-select"
-            @change="onSettingChange"
-          >
-            <option value="zh-CN">简体中文</option>
-            <option value="zh-TW">繁體中文</option>
-            <option value="en">English</option>
-          </select>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              v-model="settings.hide_dev_menus"
+              @change="onSettingChange"
+            />
+            <span class="toggle-slider"></span>
+          </label>
         </div>
       </section>
 
@@ -261,6 +260,12 @@ async function checkUpdate() {
         </div>
       </section>
     </div>
+
+    <Teleport to="body">
+      <div v-if="toastVisible" class="settings-toast" role="status">
+        设置已保存
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -315,25 +320,29 @@ async function checkUpdate() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 16px;
   padding: 12px 0;
   border-bottom: 1px solid var(--border);
 }
-.setting-row:last-child { border-bottom: none; }
-
+.setting-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
 .setting-info {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
+  min-width: 0;
 }
-.setting-label { font-size: 14px; font-weight: 500; }
-.setting-desc { font-size: 12px; color: var(--text-secondary); }
-
-.form-select {
-  padding: 6px 12px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  font-size: 13px;
-  background: var(--card-bg);
+.setting-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+}
+.setting-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
 }
 
 .toggle {
@@ -343,183 +352,162 @@ async function checkUpdate() {
   height: 24px;
   flex-shrink: 0;
 }
-.toggle input { display: none; }
+.toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
 .toggle-slider {
   position: absolute;
-  inset: 0;
-  background: #cbd5e1;
-  border-radius: 12px;
   cursor: pointer;
-  transition: background 0.2s ease;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #cbd5e1;
+  transition: 0.2s;
+  border-radius: 24px;
 }
-.toggle-slider::before {
-  content: "";
+.toggle-slider:before {
   position: absolute;
-  width: 18px;
+  content: "";
   height: 18px;
+  width: 18px;
   left: 3px;
-  top: 3px;
-  background: white;
+  bottom: 3px;
+  background-color: white;
+  transition: 0.2s;
   border-radius: 50%;
-  transition: transform 0.2s ease;
 }
 .toggle input:checked + .toggle-slider {
-  background: var(--primary);
+  background-color: var(--primary, #3b82f6);
 }
-.toggle input:checked + .toggle-slider::before {
+.toggle input:checked + .toggle-slider:before {
   transform: translateX(20px);
 }
 
 .btn {
-  padding: 8px 16px;
-  border: none;
+  height: 32px;
+  padding: 0 14px;
   border-radius: 6px;
+  border: 1px solid transparent;
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.15s ease;
+  white-space: nowrap;
 }
 .btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
 .btn-primary {
-  background: var(--primary);
+  background: var(--primary, #3b82f6);
   color: #fff;
 }
-.btn-primary:hover:not(:disabled) {
-  background: var(--primary-dark);
+.btn-secondary {
+  background: #fff;
+  border-color: var(--border, #e2e8f0);
+  color: var(--text, #1e293b);
+}
+.btn-secondary:hover:not(:disabled) {
+  background: #f8fafc;
 }
 
+.credit-card h3 {
+  margin-bottom: 12px;
+}
 .credit-layout {
   display: flex;
-  align-items: flex-start;
   gap: 20px;
+  align-items: flex-start;
 }
-
 .credit-logo-wrap {
   flex-shrink: 0;
-  width: 120px;
-  padding: 10px;
-  border-radius: 10px;
-  background: #fff;
-  border: 1px solid var(--border);
 }
-
 .credit-logo {
-  display: block;
-  width: 100%;
+  width: 72px;
   height: auto;
-  object-fit: contain;
+  display: block;
 }
-
 .credit-columns {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
 }
-
-/* 一行两列：本软件 | Python（第一行）、macOS | Rust Windows 版（第二行） */
 .credit-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  grid-template-columns: 1fr 1fr;
   gap: 20px;
 }
-
-/* 行间横线分隔（空间不足时新增版本放下一行的视觉分隔） */
 .credit-row-divider {
+  padding-top: 16px;
   border-top: 1px solid var(--border);
-  padding-top: 14px;
 }
-
-.credit-col {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-  padding-left: 16px;
-  border-left: 1px solid var(--border);
-}
-
-.credit-col:first-child {
-  padding-left: 0;
-  border-left: none;
-}
-
 .credit-lead {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1.45;
-  color: var(--text);
-}
-
-.credit-author {
   margin: 0 0 4px;
   font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+.credit-author {
+  margin: 0 0 8px;
+  font-size: 12px;
   color: var(--text-secondary);
 }
-
 .credit-block {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  margin-bottom: 6px;
 }
-
 .credit-k {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
-  color: var(--text);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
-
 .credit-link {
-  align-self: flex-start;
-  max-width: 100%;
   padding: 0;
   border: none;
-  background: transparent;
-  color: var(--primary);
+  background: none;
+  color: var(--primary, #3b82f6);
   font-size: 12px;
-  line-height: 1.45;
   text-align: left;
-  word-break: break-all;
   cursor: pointer;
+  word-break: break-all;
 }
-
 .credit-link:hover {
   text-decoration: underline;
 }
 
-@media (max-width: 900px) {
-  .credit-row {
-    grid-template-columns: 1fr;
-    gap: 0;
-  }
-  /* 移动端单列：行间仍保留横线分隔，行内各项用上边框区分 */
-  .credit-row-divider {
-    margin-top: 14px;
-  }
-  .credit-col {
-    padding-left: 0;
-    border-left: none;
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
-  }
-  .credit-col:first-child {
-    padding-top: 0;
-    border-top: none;
-  }
+.settings-toast {
+  position: fixed;
+  left: 50%;
+  top: 60px;
+  transform: translateX(-50%);
+  z-index: 4000;
+  padding: 10px 18px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.92);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.25);
+  pointer-events: none;
+  animation: settings-toast-in 0.2s ease-out;
 }
 
-@media (max-width: 720px) {
-  .credit-layout {
-    flex-direction: column;
-    align-items: stretch;
+@keyframes settings-toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-8px);
   }
-  .credit-logo-wrap {
-    width: 100px;
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
   }
 }
 </style>

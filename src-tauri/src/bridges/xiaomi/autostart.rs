@@ -1,4 +1,7 @@
-//! 开机自启：写入当前用户 Startup 快捷方式 + Run 注册表（对齐安装器/源码文档意图）
+//! 开机自启：仅写入当前用户 Run 注册表（`exe --minimized`）。
+//!
+//! `--minimized` 仅用于单实例去重（重复自启静默忽略）；是否进托盘由
+//! `start_minimized_to_tray` 全局设置决定。
 
 use std::path::PathBuf;
 
@@ -14,16 +17,23 @@ fn startup_dir() -> Result<PathBuf, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn shortcut_path() -> Result<PathBuf, String> {
+fn legacy_shortcut_path() -> Result<PathBuf, String> {
     Ok(startup_dir()?.join("RemoteBridgeHub.lnk"))
 }
 
-/// 启用/禁用开机自启（`--minimized`）
+#[cfg(target_os = "windows")]
+fn legacy_shortcut_exists() -> bool {
+    legacy_shortcut_path()
+        .map(|p| p.is_file())
+        .unwrap_or(false)
+}
+
+/// 启用/禁用开机自启（Run 键 + `--minimized`；始终清理旧版 Startup 快捷方式）
 pub fn set_autostart_enabled(enable: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         set_run_key(enable)?;
-        set_startup_shortcut(enable)?;
+        remove_legacy_startup_shortcut();
         Ok(())
     }
     #[cfg(not(target_os = "windows"))]
@@ -36,11 +46,66 @@ pub fn set_autostart_enabled(enable: bool) -> Result<(), String> {
 pub fn is_autostart_enabled() -> bool {
     #[cfg(target_os = "windows")]
     {
-        run_key_exists() || shortcut_path().map(|p| p.is_file()).unwrap_or(false)
+        run_key_exists() || legacy_shortcut_exists()
     }
     #[cfg(not(target_os = "windows"))]
     {
         false
+    }
+}
+
+/// 应用启动时去重：Run 与 Startup 并存时删快捷方式；仅快捷方式时迁移到 Run。
+/// `settings_autostart`: 来自 settings.json；为 `Some(false)` 时清除遗留注册表/lnk（避免 UI 已关但仍自启）。
+pub fn reconcile_autostart_entries(settings_autostart: Option<bool>) {
+    #[cfg(target_os = "windows")]
+    {
+        if settings_autostart == Some(false) {
+            if run_key_exists() {
+                match set_run_key(false) {
+                    Ok(()) => log::info!("autostart: removed Run key (settings.autostart=false)"),
+                    Err(e) => log::warn!("autostart: remove Run key failed: {e}"),
+                }
+            }
+            remove_legacy_startup_shortcut();
+            return;
+        }
+
+        let run = run_key_exists();
+        let lnk = legacy_shortcut_exists();
+        if run && lnk {
+            remove_legacy_startup_shortcut();
+            log::info!("autostart: removed duplicate Startup shortcut (Run key active)");
+        } else if !run && lnk {
+            match set_run_key(true) {
+                Ok(()) => {
+                    remove_legacy_startup_shortcut();
+                    log::info!("autostart: migrated legacy Startup shortcut to Run key");
+                }
+                Err(e) => log::warn!("autostart: migrate Startup shortcut failed: {e}"),
+            }
+        }
+        if run_key_exists() {
+            match set_run_key(true) {
+                Ok(()) => log::debug!("autostart: Run key path refreshed to current exe"),
+                Err(e) => log::warn!("autostart: refresh Run key path failed: {e}"),
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = settings_autostart;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn remove_legacy_startup_shortcut() {
+    if let Ok(link) = legacy_shortcut_path() {
+        if link.is_file() {
+            match std::fs::remove_file(&link) {
+                Ok(()) => log::info!("autostart: removed legacy Startup shortcut {:?}", link),
+                Err(e) => log::warn!("autostart: failed to remove legacy shortcut {:?}: {e}", link),
+            }
+        }
     }
 }
 
@@ -77,13 +142,15 @@ fn set_run_key(enable: bool) -> Result<(), String> {
             );
             RegSetValueExW(key, name, 0, REG_SZ, Some(bytes))
         } else {
-            // 删除；不存在也算成功
-            let _ = RegDeleteValueW(key, name);
-            ERROR_SUCCESS
+            RegDeleteValueW(key, name)
         };
         let _ = RegCloseKey(key);
-        if result != ERROR_SUCCESS && enable {
-            return Err(format!("RegSetValueExW failed {result:?}"));
+        if enable {
+            if result != ERROR_SUCCESS {
+                return Err(format!("RegSetValueExW failed {result:?}"));
+            }
+        } else if result.is_err() && run_key_exists() {
+            return Err(format!("RegDeleteValueW failed: {:?}", result));
         }
     }
     Ok(())
@@ -123,47 +190,11 @@ fn run_key_exists() -> bool {
     }
 }
 
-#[cfg(target_os = "windows")]
-fn set_startup_shortcut(enable: bool) -> Result<(), String> {
-    let link = shortcut_path()?;
-    if !enable {
-        let _ = std::fs::remove_file(&link);
-        return Ok(());
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn reconcile_is_noop_off_windows() {
+        super::reconcile_autostart_entries(None);
+        super::reconcile_autostart_entries(Some(false));
     }
-    let dir = startup_dir()?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    // 用 PowerShell 创建 .lnk（无需额外 COM 绑定）
-    let ps = format!(
-        "$ws = New-Object -ComObject WScript.Shell; \
-         $s = $ws.CreateShortcut('{}'); \
-         $s.TargetPath = '{}'; \
-         $s.Arguments = '--minimized'; \
-         $s.WorkingDirectory = '{}'; \
-         $s.Save()",
-        link.display().to_string().replace('\'', "''"),
-        exe.display().to_string().replace('\'', "''"),
-        exe.parent()
-            .unwrap_or(std::path::Path::new("."))
-            .display()
-            .to_string()
-            .replace('\'', "''"),
-    );
-    let out = {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        // ponytail: 隐藏控制台，避免创建自启快捷方式时闪黑框
-        std::process::Command::new("powershell")
-            .creation_flags(CREATE_NO_WINDOW)
-            .args(["-NoProfile", "-Command", &ps])
-            .output()
-    }
-    .map_err(|e| format!("powershell: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "create shortcut failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
-    }
-    Ok(())
 }

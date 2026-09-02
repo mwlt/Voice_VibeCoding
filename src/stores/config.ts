@@ -44,13 +44,26 @@ export const useConfigStore = defineStore("config", () => {
     }
   }
 
-  async function saveConfig(type: BridgeType, config: DeviceConfig) {
+  async function saveConfig(type: BridgeType, config: DeviceConfig): Promise<boolean> {
     saving.value = true;
+    const sentGainDb = type === "xiaomi" ? config.gain_db : undefined;
     try {
       await invoke("save_config", { bridgeType: type, config });
-      configs.value[type] = config;
+      const fresh = await invoke<DeviceConfig>("get_config", { bridgeType: type });
+      // 保存过程中用户继续调节增益时，避免 get_config 回写覆盖未落盘的 UI 值
+      if (type === "xiaomi" && sentGainDb !== undefined) {
+        const liveGain = configs.value.xiaomi?.gain_db;
+        if (liveGain !== undefined && liveGain !== sentGainDb) {
+          fresh.gain_db = liveGain;
+        }
+      }
+      configs.value[type] = fresh;
+      loadStates.value[type] = "ready";
+      loadErrors.value[type] = null;
+      return true;
     } catch (e) {
       console.error(`Failed to save ${type} config:`, e);
+      return false;
     } finally {
       saving.value = false;
     }
