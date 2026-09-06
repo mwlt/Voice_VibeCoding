@@ -2,15 +2,16 @@
 
 > 设备：Google T1 Remote（`VID_1915&PID_1025`）  
 > 代码：`src-tauri/src/bridges/t1/`  
-> 更新日期：2026-09-05
+> 更新日期：2026-09-07
 
 ---
 
 ## 总原则
 
 1. **实体键盘优先**：不得因 T1 闸门导致空格 / 退格 / 方向 / 字母等常用键失效。  
-2. **重映射必须吞原生**：遥控方向等若映射到其它和弦，必须在按住期间吞掉原生 VK，否则会与 WinUHid 合并成错误和弦并粘键。  
-3. **抬起必须清理**：按键抬起时解除吞键，并 `WinUHid release_all`，防止右 Alt 等粘住。
+2. **重映射才吞原生**：方向/OK 映射到**其它**键时，按住期间吞原生再注入；**同键映射**（OK→Enter、左→左）必须透传、禁止再注入（LL 往往先于 Raw，否则双发或注入无效）。  
+3. **抬起必须清理**：按键抬起时解除吞键，并 `WinUHid release_all`，防止右 Alt 等粘住。  
+4. **音量未绑定须透传**：不得常驻吞 `VK_VOLUME_*`，否则系统音量失效。
 
 ---
 
@@ -22,10 +23,74 @@
 |----|------|
 | **现象** | 映射为右 Alt+空格，系统收到右 Alt+右方向，且常一直按下 |
 | **根因** | ① 为保实体键盘，曾禁止吞方向键原生 VK；T1 右方向仍经 LL 送达。② WinUHid 注入右 Alt+空格时，与遥控未抬起的「右」在系统层合并 → 表现为 Alt+右。③ 非语音键忽略 Raw Input 抬起，未清吞键 / 未 `release_all`，修饰键易粘住。 |
-| **修复** | `T1_HELD_NATIVE`：按钮**有绑定**时（含同键映射）按住期间吞原生，只走注入，避免双发；未绑定透传原生。注入前补一次原生 keyup 中和 LL 先漏；`inject_mapped_keys` / 抬起 / `stop` 均 `release_all`。LL 闸门补映射仅限 Apps/Browser_*，勿对方向 hold 补注入（否则实体同键变映射）。 |
-| **代码** | `native_suppress.rs`（hold_suppress）、`runtime.rs` / `ble_keys.rs`（keydown/keyup）、`special_keys.rs` |
+| **修复** | `T1_HELD_NATIVE`：仅**非同键**绑定时按住吞原生并注入；同键透传。注入与 hold 重叠或媒体 VK 时走 SendInput+EXTRA_INFO。LL 闸门补映射仅限 Apps/Browser_*（及按需音量），勿对方向 hold 补注入。 |
+| **代码** | `native_suppress.rs`（hold_suppress）、`runtime.rs` / `ble_keys.rs`、`special_keys.rs` |
 
-**同类风险（已一并覆盖）**：左/上/下/OK 等 `kbd:VK_*` 只要有绑定就按住吞键；未绑定不吞。
+---
+
+### B14. 同键映射双发 / 方向键「只有上有效」（2026-09-07）
+
+| 项 | 说明 |
+|----|------|
+| **现象** | OK→Enter 回车两行；方向键绑成自身后仅上键有效（上键配置为空时靠原生透传） |
+| **根因** | 同键也走 hold+注入：LL 先放行原生，Raw 再注入 → Enter 双发；方向键 hold 后 WinUHid/竞态导致体感「没反应」 |
+| **修复** | `is_passthrough_binding` / `is_identity_binding`：同键与未绑定不 hold、不注入 |
+| **代码** | `native_suppress.rs`、`ble_keys.rs`、`runtime.rs` |
+
+---
+
+### B15. 音量±未绑定无效、绑定后也不触发（2026-09-07）
+
+| 项 | 说明 |
+|----|------|
+| **现象** | 未映射时调音量无反应；映射后目标键也不出 |
+| **根因** | ① `0xAE/AF/AD` 曾进**常驻闸门**，未绑定也不放行系统音量。② WinUHid boot keyboard **不支持**音量 VK，`tap_vks` 失败却常被当成已注入 |
+| **修复** | 音量闸门按配置动态开启（仅重映射时）；媒体/浏览器 VK 强制 SendInput+EXTRA_INFO；保存配置时 `refresh_media_gates_from_bindings` |
+| **代码** | `native_suppress.rs`、`ble_keys.rs` / `runtime.rs` `inject_mapped_keys`、`ipc/commands.rs` |
+
+---
+
+### B16. 主页→空格 / 删除→Backspace 不生效（2026-09-07）
+
+| 项 | 说明 |
+|----|------|
+| **现象** | UI 已绑定，按键无对应效果 |
+| **根因** | 与 B14/B15 叠加：侧效应键被闸门吞掉后依赖注入；默认主页曾为左 Win（易误判为「空格没生效」）。删除依赖 Browser Back 闸门 + Backspace 注入 |
+| **修复** | 保持 `0xAC`/`0xA6` 常驻闸门 + 映射注入；默认 `home` 改为 Space；媒体/浏览器目标走 SendInput |
+| **代码** | `config/manager.rs` `t1_default_bindings`、注入路径同上 |
+
+---
+
+### B17. 方向重映射漏原生 / 主页·删除·静音无反应（2026-09-07）
+
+| 项 | 说明 |
+|----|------|
+| **现象** | ① 方向绑其它键时「映射键 + 原生方向」双发；② 主页→空格、删除→Backspace、静音（绑/不绑）均无反应；③ 音量同键绑定困惑 |
+| **根因** | ① hold-suppress 在 Raw 才武装，LL 已先放行原生方向。② 主页/删除/静音常只走 Consumer HID，VK 闸门/HotKey 吃不到；删除未 `RegisterHotKey(0xA6)`；静音 HOGP 原生不可靠却被当「同键透传」。③ WinUHid 发不出音量 VK，同键应忽略绑定透传系统 |
+| **修复** | `refresh_dpad_remap_gates`：非同键方向/OK 进 LL 闸门并补注入；Consumer `02-23/24/E2` → `inject_after_consumer_hid`；`RegisterHotKey` 补 Browser Back；静音桥接期始终闸门 + SendInput（空绑默认 0xAD）；音量±仍仅重映射才闸门 |
+| **代码** | `native_suppress.rs`、`ble_keys.rs`、`runtime.rs`、`consumer_raw_input.rs`、`commands.rs` |
+| **取舍** | 某方向绑了其它键时，桥接期间实体键盘同 VK 也会变成该映射（与小米自定义方向同策略） |
+
+---
+
+### B18. 主页/删除仅 APPCOMMAND、无 VK（2026-09-07）
+
+| 项 | 说明 |
+|----|------|
+| **现象** | 主页→空格、删除→Backspace 完全无日志、无注入（菜单/方向正常） |
+| **根因** | BLE HOGP 主页/删除常只产生 `APPCOMMAND_BROWSER_HOME(7)` / `BACKWARD(1)`，不经 `0xAC`/`0xA6`；壳层原先只吞 Search(=5)。部分机型另发 `VK_HOME(0x24)` 未进别名 |
+| **修复** | Shell/DLL 吞 Home+Back 并 `inject_after_consumer_hid`；别名加 `kbd:VK_24`；主页非同键时开 `0x24` LL 闸门 |
+| **代码** | `native_suppress.rs`、`t1_shell_hook`、`mapping.rs` |
+| **状态** | **已回滚壳层 Home/Back 吞键与 DLL pending 轮询**（干扰语音键；主页/删除另案排查） |
+
+### B19. 语音结束要点多次 / 状态拧反（2026-09-07）
+
+| 项 | 说明 |
+|----|------|
+| **现象** | 一点开一点关不稳定；快速连点后快捷键与麦相反 |
+| **根因** | ① 状态机过复杂（live/zombie）；② HID 在关麦抑制期仍注入 Toggle；③ 去重/抑制窗过长（900/1200）挡连点 |
+| **修复** | 仅按 `host_mic_wanted`：未开→Open，已开→CloseEnd；ATVV 在线时 HID 只吞 Search 不注入；抑制期内禁注入；去重 350ms / 关麦抑制 400ms |
+| **代码** | `ble_session.rs`、`ble_voice.rs`、`ble_keys.rs` |
 
 ---
 
@@ -35,7 +100,7 @@
 |----|------|
 | **现象** | 主页→空格后实体空格失效；退格未映射也失效；方向键失效 |
 | **根因** | 常驻闸门 / `arm` 误含 Backspace、VK_HOME、方向等；LL 无法区分实体与遥控 |
-| **修复** | `is_ubiquitous_keyboard_vk` 硬放行；仅允许武装 Apps/Browser_*/音量；删除侧效应不再含 `0x08`；方向原生 VK 不再 TTL arm（改用 B1 按住吞键） |
+| **修复** | `is_ubiquitous_keyboard_vk` 硬放行；仅允许武装 Apps/Browser_* /（按需）音量；删除侧效应不再含 `0x08`；方向原生 VK 不再 TTL arm（改用 B1 按住吞键） |
 | **代码** | `native_suppress.rs` |
 
 ---

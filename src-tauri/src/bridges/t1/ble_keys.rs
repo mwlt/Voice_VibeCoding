@@ -61,11 +61,41 @@ fn parse_kbd_vk(event_id: &str) -> Option<u16> {
 }
 
 fn binding_vks(config: &DeviceConfig, button_id: &str) -> Vec<u16> {
-    match config.button_bindings.get(button_id) {
+    let vks = match config.button_bindings.get(button_id) {
         Some(KeyAction::SingleKey(vk)) => vec![*vk],
         Some(KeyAction::ComboKey(vks)) => vks.clone(),
         _ => Vec::new(),
+    };
+    // 静音未绑定：默认系统静音（HOGP 原生不可靠）
+    if button_id == "mute" && vks.is_empty() {
+        return vec![0xAD];
     }
+    vks
+}
+
+fn sync_media_gates(config: &DeviceConfig) {
+    let vol_plus = binding_vks(config, "vol_plus");
+    let vol_minus = binding_vks(config, "vol_minus");
+    let mute = binding_vks(config, "mute");
+    native_suppress::refresh_media_gates_from_bindings(
+        Some(vol_plus.as_slice()).filter(|v| !v.is_empty()),
+        Some(vol_minus.as_slice()).filter(|v| !v.is_empty()),
+        Some(mute.as_slice()).filter(|v| !v.is_empty()),
+    );
+    let up = binding_vks(config, "up");
+    let down = binding_vks(config, "down");
+    let left = binding_vks(config, "left");
+    let right = binding_vks(config, "right");
+    let ok = binding_vks(config, "ok");
+    native_suppress::refresh_dpad_remap_gates(
+        Some(up.as_slice()).filter(|v| !v.is_empty()),
+        Some(down.as_slice()).filter(|v| !v.is_empty()),
+        Some(left.as_slice()).filter(|v| !v.is_empty()),
+        Some(right.as_slice()).filter(|v| !v.is_empty()),
+        Some(ok.as_slice()).filter(|v| !v.is_empty()),
+    );
+    let home = binding_vks(config, "home");
+    native_suppress::refresh_home_vk24_gate(Some(home.as_slice()).filter(|v| !v.is_empty()));
 }
 
 fn format_vks_label(vks: &[u16]) -> String {
@@ -96,10 +126,11 @@ fn should_skip_duplicate(button_id: &str) -> bool {
 }
 
 fn inject_mapped_keys(vks: &[u16], hold_ms: u64) -> bool {
-    // 含修饰键：原子 tap + 硬清；与 hold-suppress 重叠时走 SendInput+EXTRA_INFO。
-    let force_sendinput = native_suppress::held_intersects(vks);
+    // 与 hold-suppress 重叠、或媒体/浏览器 VK（WinUHid 不支持）→ SendInput+EXTRA_INFO
+    let force_sendinput =
+        native_suppress::held_intersects(vks) || native_suppress::vks_need_sendinput(vks);
     let ok = if force_sendinput {
-        log::debug!("T1 BLE map: SendInput+EXTRA_INFO (hold overlaps targets) vks={vks:?}");
+        log::debug!("T1 BLE map: SendInput+EXTRA_INFO vks={vks:?}");
         native_suppress::allow_pass_vks(vks);
         let tapped = if vks.len() == 1 {
             tap_single_vk(vks[0], hold_ms)
@@ -138,6 +169,7 @@ fn handle_button(button_id: &str, config: &DeviceConfig, app: &AppHandle) {
     let vks: Vec<u16> = match action {
         KeyAction::SingleKey(vk) => vec![*vk],
         KeyAction::ComboKey(vks) => vks.clone(),
+        KeyAction::None if button_id == "mute" => vec![0xAD],
         KeyAction::None => {
             key_diag::emit_ble(
                 app,
@@ -243,23 +275,32 @@ fn dispatch_event(app: &AppHandle, ev: &ConsumerRawEvent, event_to_button: &Hash
         return;
     }
     let tokens: Vec<String> = BLE_DEVICE_MATCH.iter().map(|s| (*s).to_string()).collect();
+    let button_preview = resolve_button(&ev.event_id, event_to_button);
+    let is_home_or_delete = matches!(button_preview.as_deref(), Some("home" | "delete"));
     if !device_matches(&ev.device_name, &tokens) {
-        if let Some(vk) = parse_kbd_vk(&ev.event_id) {
-            native_suppress::on_foreign_keyboard(vk, ev.pressed);
+        // 主页/删除 Consumer 偶发无 VID 路径：KEYS 运行中仍处理
+        if !(KEYS_RUNNING.load(Ordering::SeqCst) && is_home_or_delete && ev.pressed) {
+            if let Some(vk) = parse_kbd_vk(&ev.event_id) {
+                native_suppress::on_foreign_keyboard(vk, ev.pressed);
+            }
+            if looks_like_t1_ble_device(&ev.device_name)
+                && ev.pressed
+                && !ev.event_id.eq_ignore_ascii_case("hid:02-00-00")
+            {
+                emit_native_probe(
+                    app,
+                    ev,
+                    None,
+                    &[],
+                    Some("像 BLE T1 但 token 未命中"),
+                );
+            }
+            return;
         }
-        if looks_like_t1_ble_device(&ev.device_name)
-            && ev.pressed
-            && !ev.event_id.eq_ignore_ascii_case("hid:02-00-00")
-        {
-            emit_native_probe(
-                app,
-                ev,
-                None,
-                &[],
-                Some("像 BLE T1 但 token 未命中"),
-            );
-        }
-        return;
+        log::info!(
+            "T1 BLE home/delete without device match — still handle event={}",
+            ev.event_id
+        );
     }
 
     let button_id = resolve_button(&ev.event_id, event_to_button);
@@ -271,10 +312,12 @@ fn dispatch_event(app: &AppHandle, ev: &ConsumerRawEvent, event_to_button: &Hash
         _ => Vec::new(),
     };
 
-    let atvv_skip_voice = button_id.as_deref() == Some("voice")
+    let atvv_owns_voice = button_id.as_deref() == Some("voice")
         && crate::bridges::t1::ble_host::atvv_ok();
-    let probe_extra = if atvv_skip_voice {
-        Some("HID 语音：尽早注入（ATVV 仍管麦；START_SEARCH 去重）")
+    let probe_extra = if atvv_owns_voice {
+        Some("HID 语音：仅吞 Search（开/关麦+注入由 ATVV START_SEARCH）")
+    } else if button_id.as_deref() == Some("voice") {
+        Some("HID 语音：无 ATVV，本路径注入")
     } else {
         None
     };
@@ -284,11 +327,15 @@ fn dispatch_event(app: &AppHandle, ev: &ConsumerRawEvent, event_to_button: &Hash
         return;
     };
 
-    // 语音 HID（含 AC Search）：最早 arm+看门狗，再注入；START_SEARCH 由 ble_voice 去重。
+    // 语音 HID（含 AC Search）：ATVV 在线时只吞 Search，禁止在此注入——
+    // 否则关麦抑制期内 HID 仍会 Toggle 快捷键，造成「麦关了微信却开了」。
     if button_id == "voice" {
         crate::bridges::t1::native_suppress::on_ac_search_hid_seen();
         if !ev.pressed {
             crate::bridges::t1::native_suppress::release_voice_browser_search();
+            return;
+        }
+        if atvv_owns_voice {
             return;
         }
         crate::bridges::t1::ble_voice::on_remote_press(app);
@@ -334,6 +381,21 @@ fn dispatch_event(app: &AppHandle, ev: &ConsumerRawEvent, event_to_button: &Hash
     }
     native_suppress::apply_native_press_policy(&button_id, native_vk, &target_vks);
 
+    // 同键 / 未绑定 / 音量同键：只透传，不注入（避免 OK→Enter 双发、音量空注入）
+    if native_suppress::is_passthrough_binding(&button_id, native_vk, &target_vks) {
+        key_diag::emit_ble(
+            app,
+            "key",
+            Some(&button_id),
+            Some(ev),
+            None,
+            None,
+            &target_vks,
+            &format!("同键/未绑定透传 {button_id}（不注入）"),
+        );
+        return;
+    }
+
     if should_skip_duplicate(&button_id) {
         key_diag::emit_ble(
             app,
@@ -365,9 +427,8 @@ pub fn on_browser_search_hotkey() {
     crate::bridges::t1::native_suppress::on_ac_search_hid_seen();
 }
 
-/// LL 闸门：仅菜单 / Browser Search / Browser Home 等侧效应键在 Raw 丢按下时补映射。
-/// 方向/OK 等 hold-suppress 的常用键**不得**由此补注入——否则实体键盘同 VK
-/// 被 LL 吞掉后会再打出遥控映射（例如遥控下→X 时，实体下也变成 X）。
+/// LL 闸门：侧效应键 + **重映射方向/OK** 在 Raw 丢按下时补映射。
+/// 同键/未绑定的方向不进闸门 → 实体键盘同 VK 仍可用。
 pub fn on_ll_gate_keydown(vk: u16) {
     if !native_suppress::is_gate_vk(vk) {
         return;
@@ -426,6 +487,19 @@ pub fn on_ll_gate_keydown(vk: u16) {
         return;
     };
     native_suppress::arm_for_button(&button_id, Some(vk), &target_vks);
+    if native_suppress::is_passthrough_binding(&button_id, Some(vk), &target_vks) {
+        key_diag::emit_ble(
+            &ctx.app,
+            "ll",
+            Some(&button_id),
+            None,
+            Some(&event_id),
+            Some(true),
+            &target_vks,
+            &format!("BLE LL 同键/未绑定透传 {button_id}"),
+        );
+        return;
+    }
     if should_skip_duplicate(&button_id) {
         key_diag::emit_ble(
             &ctx.app,
@@ -448,6 +522,12 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
     }
     special_keys::ensure_hook_for_capture();
     native_suppress::set_enabled(true);
+    if let Some(cfg) = app
+        .try_state::<ConfigManager>()
+        .and_then(|m| m.get_device_config("t1").ok())
+    {
+        sync_media_gates(&cfg);
+    }
     *BLE_LL_GATE_CTX.lock() = Some(BleLlGateCtx { app: app.clone() });
 
     let mut raw = ConsumerRawInput::new(true);

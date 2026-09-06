@@ -4,6 +4,7 @@ import {
   T1_BUTTON_IDS,
   T1_DEFAULT_LABELS,
   T1_FACE_BUTTON_IDS,
+  T1_FIXED_SYSTEM_HINTS,
   T1_LEFT_COLUMN_IDS,
   T1_RIGHT_COLUMN_IDS,
   T1_VOICE_QUICK_PRESETS,
@@ -11,6 +12,7 @@ import {
   applyT1VoiceQuick,
   clearT1Binding,
   t1ActionLabel,
+  t1IsFixedSystemKey,
   t1VksToHotkeyNames,
 } from "./t1Keys";
 
@@ -74,6 +76,14 @@ describe("T1 button registry", () => {
       "home",
       "menu",
     ]);
+  });
+
+  it("marks power and mouse as fixed system keys (not bindable)", () => {
+    expect(t1IsFixedSystemKey("power")).toBe(true);
+    expect(t1IsFixedSystemKey("mouse")).toBe(true);
+    expect(t1IsFixedSystemKey("ok")).toBe(false);
+    expect(T1_FIXED_SYSTEM_HINTS.power).toContain("不可绑定");
+    expect(T1_FIXED_SYSTEM_HINTS.mouse).toContain("不可绑定");
   });
 });
 
@@ -140,6 +150,14 @@ describe("applyT1CapturedBinding", () => {
     const next = applyT1CapturedBinding(baseConfig(), "mute", []);
     expect(next.button_bindings.mute).toEqual({ type: "None", value: null });
     expect(next.voice_hotkey).toEqual(["rightalt"]);
+  });
+
+  it("ignores capture/clear for fixed system keys", () => {
+    const base = baseConfig();
+    const afterCapture = applyT1CapturedBinding(base, "power", [0x1b]);
+    expect(afterCapture).toBe(base);
+    const afterClear = clearT1Binding(base, "mouse");
+    expect(afterClear).toBe(base);
   });
 });
 

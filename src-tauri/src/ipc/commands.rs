@@ -322,7 +322,48 @@ pub async fn save_config(
     config_manager: State<'_, ConfigManager>,
 ) -> Result<(), String> {
     let device = bridge_type_to_device(&bridge_type)?;
-    config_manager.save_device_config(device, &config)
+    config_manager.save_device_config(device, &config)?;
+    if device == "t1" {
+        sync_t1_media_gates(&config);
+    }
+    Ok(())
+}
+
+fn sync_t1_media_gates(config: &DeviceConfig) {
+    use crate::bridges::t1::native_suppress::{
+        refresh_dpad_remap_gates, refresh_media_gates_from_bindings,
+    };
+    fn vks(cfg: &DeviceConfig, id: &str) -> Vec<u16> {
+        match cfg.button_bindings.get(id) {
+            Some(KeyAction::SingleKey(vk)) => vec![*vk],
+            Some(KeyAction::ComboKey(v)) => v.clone(),
+            _ => Vec::new(),
+        }
+    }
+    let vp = vks(config, "vol_plus");
+    let vm = vks(config, "vol_minus");
+    let mu = vks(config, "mute");
+    refresh_media_gates_from_bindings(
+        Some(vp.as_slice()).filter(|v| !v.is_empty()),
+        Some(vm.as_slice()).filter(|v| !v.is_empty()),
+        Some(mu.as_slice()).filter(|v| !v.is_empty()),
+    );
+    let up = vks(config, "up");
+    let down = vks(config, "down");
+    let left = vks(config, "left");
+    let right = vks(config, "right");
+    let ok = vks(config, "ok");
+    refresh_dpad_remap_gates(
+        Some(up.as_slice()).filter(|v| !v.is_empty()),
+        Some(down.as_slice()).filter(|v| !v.is_empty()),
+        Some(left.as_slice()).filter(|v| !v.is_empty()),
+        Some(right.as_slice()).filter(|v| !v.is_empty()),
+        Some(ok.as_slice()).filter(|v| !v.is_empty()),
+    );
+    let home = vks(config, "home");
+    crate::bridges::t1::native_suppress::refresh_home_vk24_gate(
+        Some(home.as_slice()).filter(|v| !v.is_empty()),
+    );
 }
 
 /// 获取按键映射
@@ -347,7 +388,11 @@ pub async fn update_key_mapping(
     let device = bridge_type_to_device(&bridge_type)?;
     let mut config = config_manager.get_device_config(device)?;
     config.button_bindings.insert(button_id, action);
-    config_manager.save_device_config(device, &config)
+    config_manager.save_device_config(device, &config)?;
+    if device == "t1" {
+        sync_t1_media_gates(&config);
+    }
+    Ok(())
 }
 
 /// 开始快捷键捕获（物理键会被临时吞掉，松手/按完后自动完成）

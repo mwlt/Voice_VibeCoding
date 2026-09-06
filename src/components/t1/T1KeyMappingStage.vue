@@ -17,11 +17,14 @@ import {
   T1_LEFT_COLUMN_IDS,
   T1_RIGHT_COLUMN_IDS,
   T1_VOICE_QUICK_PRESETS,
+  T1_FIXED_SYSTEM_HINTS,
   applyT1CapturedBinding,
   applyT1VoiceQuick,
   clearT1Binding,
   t1ActionLabel,
+  t1IsFixedSystemKey,
   t1LabelOf,
+  type T1FixedSystemId,
   type T1VoiceQuickPreset,
 } from "../../utils/t1Keys";
 
@@ -47,6 +50,7 @@ const cardRefs = ref<Record<string, HTMLElement | null>>({});
 const linePath = ref("");
 const lineOpacity = ref(0);
 const lineStrong = ref(true);
+const lineFixed = ref(false);
 const dotA = ref({ x: 0, y: 0 });
 const dotB = ref({ x: 0, y: 0 });
 const svgSize = ref({ w: 0, h: 0 });
@@ -231,15 +235,26 @@ function updateLine() {
 
   const nextPath = `M ${cardPt.x} ${cardPt.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${keyPt.x} ${keyPt.y}`;
   const strong = selectedId.value === id;
-  const opacity = strong ? 1 : 0.45;
+  const fixed = t1IsFixedSystemKey(id);
+  const opacity = fixed ? 0.55 : strong ? 1 : 0.45;
   if (linePath.value !== nextPath) linePath.value = nextPath;
   if (dotA.value.x !== cardPt.x || dotA.value.y !== cardPt.y) dotA.value = cardPt;
   if (dotB.value.x !== keyPt.x || dotB.value.y !== keyPt.y) dotB.value = keyPt;
   if (lineStrong.value !== strong) lineStrong.value = strong;
+  if (lineFixed.value !== fixed) lineFixed.value = fixed;
   if (lineOpacity.value !== opacity) lineOpacity.value = opacity;
 }
 
+function fixedHintOf(id: string): string {
+  if (!t1IsFixedSystemKey(id)) return "";
+  return T1_FIXED_SYSTEM_HINTS[id as T1FixedSystemId];
+}
+
 async function selectButton(id: string) {
+  if (t1IsFixedSystemKey(id)) {
+    // 电源 / 鼠标：仅展示说明，不进入选中与录入
+    return;
+  }
   if (selectedId.value === id) {
     if (capturing.value) {
       await cancelCapture();
@@ -321,7 +336,7 @@ async function onCaptured(keys: number[], _labels: string[]) {
 
 async function startCapture() {
   const buttonId = selectedId.value;
-  if (!buttonId) return;
+  if (!buttonId || t1IsFixedSystemKey(buttonId)) return;
   if (capturing.value) {
     await cancelCapture();
     return;
@@ -428,8 +443,10 @@ onUnmounted(() => {
           v-if="linePath"
           :d="linePath"
           fill="none"
-          :stroke="lineStrong ? '#2563eb' : '#94a3b8'"
-          :stroke-width="lineStrong ? 2.2 : 1.5"
+          :stroke="
+            lineFixed ? '#6b8499' : lineStrong ? '#2563eb' : '#94a3b8'
+          "
+          :stroke-width="lineStrong && !lineFixed ? 2.2 : 1.5"
           stroke-linecap="round"
           :opacity="lineOpacity"
         />
@@ -438,7 +455,7 @@ onUnmounted(() => {
           :cx="dotA.x"
           :cy="dotA.y"
           r="3.5"
-          :fill="lineStrong ? '#2563eb' : '#94a3b8'"
+          :fill="lineFixed ? '#6b8499' : lineStrong ? '#2563eb' : '#94a3b8'"
           :opacity="lineOpacity"
         />
         <circle
@@ -446,7 +463,7 @@ onUnmounted(() => {
           :cx="dotB.x"
           :cy="dotB.y"
           r="3.5"
-          :fill="lineStrong ? '#2563eb' : '#94a3b8'"
+          :fill="lineFixed ? '#6b8499' : lineStrong ? '#2563eb' : '#94a3b8'"
           :opacity="lineOpacity"
         />
       </svg>
@@ -458,25 +475,46 @@ onUnmounted(() => {
           :ref="(el) => setCardRef(btn.id, el)"
           class="map-card"
           :class="{
-            active: selectedId === btn.id,
-            hover: hoverId === btn.id && selectedId !== btn.id,
+            active: !t1IsFixedSystemKey(btn.id) && selectedId === btn.id,
+            hover:
+              !t1IsFixedSystemKey(btn.id) &&
+              hoverId === btn.id &&
+              selectedId !== btn.id,
+            'map-card-fixed': t1IsFixedSystemKey(btn.id),
+            'map-card-fixed-hover':
+              t1IsFixedSystemKey(btn.id) && hoverId === btn.id,
           }"
           @mouseenter="onCardHover(btn.id)"
           @mouseleave="onCardHover(null)"
           @click="selectButton(btn.id)"
         >
           <div class="map-card-main">
-            <span class="map-name">
+            <span
+              class="map-name"
+              :class="{ 'map-name-fixed': t1IsFixedSystemKey(btn.id) }"
+            >
               <T1KeyIcon :key-id="btn.id" />
               {{ btn.label }}
             </span>
             <span
+              v-if="t1IsFixedSystemKey(btn.id)"
+              class="map-bind map-bind-fixed"
+              :title="fixedHintOf(btn.id)"
+            >
+              {{ fixedHintOf(btn.id) }}
+            </span>
+            <span
+              v-else
               :class="['map-bind', { unbound: btn.action.type === 'None' }]"
             >
               {{ t1ActionLabel(btn.action) }}
             </span>
           </div>
-          <div v-if="selectedId === btn.id" class="map-card-actions" @click.stop>
+          <div
+            v-if="!t1IsFixedSystemKey(btn.id) && selectedId === btn.id"
+            class="map-card-actions"
+            @click.stop
+          >
             <button
               type="button"
               class="btn-sm btn-edit"
@@ -557,25 +595,46 @@ onUnmounted(() => {
           :ref="(el) => setCardRef(btn.id, el)"
           class="map-card"
           :class="{
-            active: selectedId === btn.id,
-            hover: hoverId === btn.id && selectedId !== btn.id,
+            active: !t1IsFixedSystemKey(btn.id) && selectedId === btn.id,
+            hover:
+              !t1IsFixedSystemKey(btn.id) &&
+              hoverId === btn.id &&
+              selectedId !== btn.id,
+            'map-card-fixed': t1IsFixedSystemKey(btn.id),
+            'map-card-fixed-hover':
+              t1IsFixedSystemKey(btn.id) && hoverId === btn.id,
           }"
           @mouseenter="onCardHover(btn.id)"
           @mouseleave="onCardHover(null)"
           @click="selectButton(btn.id)"
         >
           <div class="map-card-main">
-            <span class="map-name">
+            <span
+              class="map-name"
+              :class="{ 'map-name-fixed': t1IsFixedSystemKey(btn.id) }"
+            >
               <T1KeyIcon :key-id="btn.id" />
               {{ btn.label }}
             </span>
             <span
+              v-if="t1IsFixedSystemKey(btn.id)"
+              class="map-bind map-bind-fixed"
+              :title="fixedHintOf(btn.id)"
+            >
+              {{ fixedHintOf(btn.id) }}
+            </span>
+            <span
+              v-else
               :class="['map-bind', { unbound: btn.action.type === 'None' }]"
             >
               {{ t1ActionLabel(btn.action) }}
             </span>
           </div>
-          <div v-if="selectedId === btn.id" class="map-card-actions" @click.stop>
+          <div
+            v-if="!t1IsFixedSystemKey(btn.id) && selectedId === btn.id"
+            class="map-card-actions"
+            @click.stop
+          >
             <button
               type="button"
               class="btn-sm btn-edit"
@@ -715,6 +774,38 @@ onUnmounted(() => {
   border-color: #2563eb;
   box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
   background: #eff6ff;
+}
+
+.map-card-fixed {
+  cursor: default;
+  border-color: #e6eaee;
+  background: #f4f6f8;
+}
+
+.map-card-fixed:hover,
+.map-card.map-card-fixed-hover {
+  border-color: #dde3e9;
+  background: #f1f4f7;
+  box-shadow: none;
+}
+
+.map-name-fixed {
+  color: #5f738a;
+}
+
+.map-name-fixed :deep(.t1-key-icon) {
+  color: #6b8499;
+  border-color: #9aafc2;
+  background: rgba(107, 132, 153, 0.12);
+}
+
+.map-bind-fixed {
+  background: transparent;
+  color: #6b8499;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 .map-card-main {

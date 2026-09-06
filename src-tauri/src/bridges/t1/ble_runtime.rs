@@ -4,7 +4,7 @@ use crate::bridges::t1::ble_connect::{self, T1BleConnection};
 use crate::bridges::t1::ble_pcm;
 use crate::bridges::t1::ble_session;
 use crate::bridges::t1::ble_voice;
-use crate::config::manager::ConfigManager;
+use crate::config::manager::{ConfigManager, KeyAction};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -65,6 +65,71 @@ pub fn start_t1_ble_bridge(app: AppHandle, runtime: Arc<T1BleRuntime>) -> Result
     runtime.running.store(true, Ordering::SeqCst);
     // 发现/重连窗口也要吞原生键，不能等 GATT 连上才挂闸门。
     crate::bridges::t1::native_suppress::set_enabled(true);
+    if let Some(cfg) = app
+        .try_state::<ConfigManager>()
+        .and_then(|m| m.get_device_config("t1").ok())
+    {
+        let vol_plus = match cfg.button_bindings.get("vol_plus") {
+            Some(KeyAction::SingleKey(vk)) => vec![*vk],
+            Some(KeyAction::ComboKey(v)) => v.clone(),
+            _ => Vec::new(),
+        };
+        let vol_minus = match cfg.button_bindings.get("vol_minus") {
+            Some(KeyAction::SingleKey(vk)) => vec![*vk],
+            Some(KeyAction::ComboKey(v)) => v.clone(),
+            _ => Vec::new(),
+        };
+        let mute = match cfg.button_bindings.get("mute") {
+            Some(KeyAction::SingleKey(vk)) => vec![*vk],
+            Some(KeyAction::ComboKey(v)) => v.clone(),
+            _ => Vec::new(),
+        };
+        crate::bridges::t1::native_suppress::refresh_media_gates_from_bindings(
+            Some(vol_plus.as_slice()).filter(|v| !v.is_empty()),
+            Some(vol_minus.as_slice()).filter(|v| !v.is_empty()),
+            Some(mute.as_slice()).filter(|v| !v.is_empty()),
+        );
+        let up = match cfg.button_bindings.get("up") {
+            Some(KeyAction::SingleKey(vk)) => vec![*vk],
+            Some(KeyAction::ComboKey(v)) => v.clone(),
+            _ => Vec::new(),
+        };
+        let down = match cfg.button_bindings.get("down") {
+            Some(KeyAction::SingleKey(vk)) => vec![*vk],
+            Some(KeyAction::ComboKey(v)) => v.clone(),
+            _ => Vec::new(),
+        };
+        let left = match cfg.button_bindings.get("left") {
+            Some(KeyAction::SingleKey(vk)) => vec![*vk],
+            Some(KeyAction::ComboKey(v)) => v.clone(),
+            _ => Vec::new(),
+        };
+        let right = match cfg.button_bindings.get("right") {
+            Some(KeyAction::SingleKey(vk)) => vec![*vk],
+            Some(KeyAction::ComboKey(v)) => v.clone(),
+            _ => Vec::new(),
+        };
+        let ok = match cfg.button_bindings.get("ok") {
+            Some(KeyAction::SingleKey(vk)) => vec![*vk],
+            Some(KeyAction::ComboKey(v)) => v.clone(),
+            _ => Vec::new(),
+        };
+        crate::bridges::t1::native_suppress::refresh_dpad_remap_gates(
+            Some(up.as_slice()).filter(|v| !v.is_empty()),
+            Some(down.as_slice()).filter(|v| !v.is_empty()),
+            Some(left.as_slice()).filter(|v| !v.is_empty()),
+            Some(right.as_slice()).filter(|v| !v.is_empty()),
+            Some(ok.as_slice()).filter(|v| !v.is_empty()),
+        );
+        let home = match cfg.button_bindings.get("home") {
+            Some(KeyAction::SingleKey(vk)) => vec![*vk],
+            Some(KeyAction::ComboKey(v)) => v.clone(),
+            _ => Vec::new(),
+        };
+        crate::bridges::t1::native_suppress::refresh_home_vk24_gate(
+            Some(home.as_slice()).filter(|v| !v.is_empty()),
+        );
+    }
 
     let configured = app
         .try_state::<ConfigManager>()

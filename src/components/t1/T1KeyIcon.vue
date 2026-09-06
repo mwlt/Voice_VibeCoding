@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { t1IsFixedSystemKey } from "../../utils/t1Keys";
 
 const props = defineProps<{
   keyId: string;
@@ -12,6 +13,8 @@ const isDpadDir = computed(() =>
 const isVolume = computed(
   () => props.keyId === "vol_plus" || props.keyId === "vol_minus"
 );
+
+const isFixedSystem = computed(() => t1IsFixedSystemKey(props.keyId));
 </script>
 
 <template>
@@ -21,6 +24,7 @@ const isVolume = computed(
       'shape-vol': isVolume,
       'shape-ok': keyId === 'ok',
       'shape-pill': keyId === 'mute' || keyId === 'mouse',
+      'icon-fixed': isFixedSystem,
     }"
     aria-hidden="true"
   >
@@ -206,6 +210,12 @@ const isVolume = computed(
   background: #fff;
   color: #64748b;
   border: 1px solid #cbd5e1;
+}
+
+.t1-key-icon.icon-fixed {
+  color: #6b8499;
+  border-color: #9aafc2;
+  background: rgba(107, 132, 153, 0.14);
 }
 
 .t1-key-icon.shape-vol {

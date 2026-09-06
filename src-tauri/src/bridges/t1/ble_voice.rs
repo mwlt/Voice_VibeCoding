@@ -11,13 +11,40 @@ use tauri::{AppHandle, Emitter, Manager};
 static VOICE_HELD: AtomicBool = AtomicBool::new(false);
 static HELD_VKS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 static LAST_PRESS: Mutex<Option<Instant>> = Mutex::new(None);
-/// HID AC Search 与 ATVV START_SEARCH 常跨线程前后脚；关搜索同步路径可达 ~1s。
-/// 去重窗必须盖住「慢 dismiss 后第二路才进锁」的双发，否则 Ctrl+Win 会点两下把微信开了又关。
-pub const VOICE_DUP_EVENT_MS: u64 = 900;
+/// 同一次物理按的双发（双 START_SEARCH）去重。ATVV 连上时 HID 不再注入，窗可短，方便连点开/关。
+pub const VOICE_DUP_EVENT_MS: u64 = 350;
+/// CloseEnd 后挡住固件回声 START_SEARCH；须短于正常连点间隔，且 inject 也要认这个窗。
+pub const REOPEN_SUPPRESS_MS: u64 = 400;
 static VOICE_INJECT: Mutex<()> = Mutex::new(());
+/// 主机是否希望开麦（与 ATVV host_mic_wanted 同步）：未开→点按开，开着→点按关。
+static MIC_SESSION_WANTED: AtomicBool = AtomicBool::new(false);
+static REOPEN_SUPPRESS_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
 
 pub fn is_voice_held() -> bool {
     VOICE_HELD.load(Ordering::SeqCst)
+}
+
+pub fn is_mic_session_wanted() -> bool {
+    MIC_SESSION_WANTED.load(Ordering::SeqCst)
+}
+
+pub fn set_mic_session_wanted(wanted: bool) {
+    MIC_SESSION_WANTED.store(wanted, Ordering::SeqCst);
+    if wanted {
+        *REOPEN_SUPPRESS_UNTIL.lock() = None;
+    }
+}
+
+pub fn arm_reopen_suppress() {
+    *REOPEN_SUPPRESS_UNTIL.lock() =
+        Some(Instant::now() + Duration::from_millis(REOPEN_SUPPRESS_MS));
+}
+
+pub fn is_reopen_suppressed() -> bool {
+    match *REOPEN_SUPPRESS_UNTIL.lock() {
+        Some(until) => Instant::now() < until,
+        None => false,
+    }
 }
 
 pub fn is_same_voice_press(elapsed: Duration) -> bool {
@@ -101,6 +128,14 @@ pub fn on_remote_press(app: &AppHandle) {
     }
 
     let _inject = VOICE_INJECT.lock();
+    // 关麦抑制期内禁止注入：否则 HID/晚到事件会 Toggle 微信而麦仍关 → 状态拧反。
+    if is_reopen_suppressed() {
+        crate::bridges::t1::native_suppress::arm_voice_browser_search();
+        crate::bridges::t1::native_suppress::dismiss_windows_search_async(false);
+        log::info!("T1 BLE voice skip inject (reopen suppressed, mic closed)");
+        emit(app, "BLE 语音：关麦抑制中（忽略注入）");
+        return;
+    }
     if same_physical_press() {
         crate::bridges::t1::native_suppress::arm_voice_browser_search();
         crate::bridges::t1::native_suppress::dismiss_windows_search_async(false);
@@ -283,8 +318,10 @@ mod tests {
 
     #[test]
     fn dup_window_only_covers_double_fire_not_rapid_clicks() {
-        // 同步关搜索可达 ~1s；去重须盖住双路，但仍短于正常连点
-        assert!(VOICE_DUP_EVENT_MS < 1200);
-        assert!(VOICE_DUP_EVENT_MS > 400);
+        // 仅挡同一次按双发；短于正常连点，便于「一点开一点关」
+        assert!(VOICE_DUP_EVENT_MS < 600);
+        assert!(VOICE_DUP_EVENT_MS >= 250);
+        assert!(REOPEN_SUPPRESS_MS <= 500);
+        assert!(REOPEN_SUPPRESS_MS >= VOICE_DUP_EVENT_MS);
     }
 }

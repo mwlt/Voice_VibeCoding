@@ -1,6 +1,11 @@
 //! T1 Consumer HID Raw Input — 对齐 Python `raw_input_bridge` 的 listen_consumer 路径
 //!
-//! 注册 Usage Page 0x0C / Usage 0x01；解析 HID report；附带设备路径供 VID/PID 过滤。
+//! 注册：
+//! - Consumer Control `0x0C/0x01`
+//! - System Control `0x01/0x80`（电源/睡眠，常不走 Consumer）
+//! - 可选 Keyboard `0x01/0x06`、Mouse `0x01/0x02`（探测空鼠键）
+//!
+//! 解析 HID report；附带设备路径供 VID/PID 过滤。
 //!
 //! **局限（吞搜索）：** Consumer TLC 为 Shared，`RIDEV_INPUTSINK` 仅并行观察，
 //! **不能**阻止系统 consumer/shell 处理 AC Search。`RIDEV_NOLEGACY` 只适用于
@@ -40,9 +45,16 @@ mod win32 {
     pub const RIDEV_INPUTSINK: DWORD = 0x100;
     pub const RID_INPUT: DWORD = 0x10000003;
     pub const RIDI_DEVICENAME: UINT = 0x20000007;
+    pub const RIM_TYPEMOUSE: DWORD = 0;
     pub const RIM_TYPEKEYBOARD: DWORD = 1;
     pub const RIM_TYPEHID: DWORD = 2;
     pub const RI_KEY_BREAK: u16 = 1;
+    pub const RI_MOUSE_LEFT_BUTTON_DOWN: u16 = 0x0001;
+    pub const RI_MOUSE_LEFT_BUTTON_UP: u16 = 0x0002;
+    pub const RI_MOUSE_RIGHT_BUTTON_DOWN: u16 = 0x0004;
+    pub const RI_MOUSE_RIGHT_BUTTON_UP: u16 = 0x0008;
+    pub const RI_MOUSE_MIDDLE_BUTTON_DOWN: u16 = 0x0010;
+    pub const RI_MOUSE_MIDDLE_BUTTON_UP: u16 = 0x0020;
 
     #[repr(C)]
     pub struct RAWINPUTDEVICE {
@@ -203,6 +215,26 @@ pub fn looks_like_t1_device(device_name: &str) -> bool {
         || low.contains("t1-remote")
         || low.contains("t1_remote");
     usb || ble
+}
+
+/// 电源/系统控制探测：Consumer Power `0x30`、System Power/Sleep/Wake `0x81/82/83`
+pub fn looks_power_probe_hex(hex: &str) -> bool {
+    let u = hex.to_ascii_uppercase();
+    if u.contains("02-30") || u.starts_with("30-") || u == "30" {
+        return true;
+    }
+    // 短报告里出现系统控制 usage（避免在长报告里误伤普通字节）
+    let parts: Vec<&str> = u.split('-').filter(|p| !p.is_empty()).collect();
+    if parts.len() <= 4 {
+        parts.iter().any(|b| matches!(*b, "30" | "81" | "82" | "83"))
+    } else {
+        false
+    }
+}
+
+/// 电源相关键盘 VK：Sleep / OEM FF（小米电源残留）/ 少见 0x5E
+pub fn looks_power_probe_vk(vk: u16) -> bool {
+    matches!(vk, 0x5F | 0xFF | 0x5E)
 }
 
 type EventCallback = Arc<Mutex<dyn FnMut(ConsumerRawEvent) + Send + 'static>>;
@@ -426,16 +458,32 @@ fn consumer_raw_thread(running: Arc<AtomicBool>, callback: EventCallback, listen
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, cb_raw as LONG_PTR);
     }
 
-    let mut devices = vec![RAWINPUTDEVICE {
-        usUsagePage: 0x0C,
-        usUsage: 0x01, // Consumer Control
-        dwFlags: RIDEV_INPUTSINK,
-        hwndTarget: hwnd,
-    }];
+    let mut devices = vec![
+        RAWINPUTDEVICE {
+            usUsagePage: 0x0C,
+            usUsage: 0x01, // Consumer Control
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: hwnd,
+        },
+        // 电源键常走 System Control，不在 Consumer TLC 上
+        RAWINPUTDEVICE {
+            usUsagePage: 0x01,
+            usUsage: 0x80, // System Control
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: hwnd,
+        },
+    ];
     if listen_keyboard {
         devices.push(RAWINPUTDEVICE {
             usUsagePage: 0x01,
-            usUsage: 0x06,
+            usUsage: 0x06, // Keyboard
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: hwnd,
+        });
+        // 空鼠/鼠标键探测（若键只切机内模式则仍无报告）
+        devices.push(RAWINPUTDEVICE {
+            usUsagePage: 0x01,
+            usUsage: 0x02, // Mouse
             dwFlags: RIDEV_INPUTSINK,
             hwndTarget: hwnd,
         });
@@ -449,7 +497,7 @@ fn consumer_raw_thread(running: Arc<AtomicBool>, callback: EventCallback, listen
         )
     } == 0
     {
-        log::error!("T1 RegisterRawInputDevices (consumer) failed");
+        log::error!("T1 RegisterRawInputDevices (consumer+system) failed");
         unsafe {
             let cb_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
             if cb_ptr != 0 {
@@ -461,8 +509,12 @@ fn consumer_raw_thread(running: Arc<AtomicBool>, callback: EventCallback, listen
     }
 
     log::info!(
-        "T1 Consumer RawInput registered (0x0C/0x01{})",
-        if listen_keyboard { " + keyboard" } else { "" }
+        "T1 Consumer RawInput registered (0x0C/0x01 + SystemControl 0x01/0x80{})",
+        if listen_keyboard {
+            " + keyboard + mouse"
+        } else {
+            ""
+        }
     );
 
     let mut msg: MSG = unsafe { mem::zeroed() };
@@ -539,12 +591,13 @@ fn consumer_raw_thread(running: Arc<AtomicBool>, callback: EventCallback, listen
                 {
                     let all_zero = report.iter().all(|&b| b == 0);
                     let hex = format_hid_report_hex(&report);
+                    let powerish = looks_power_probe_hex(&hex);
                     // 全零 = Consumer HID 抬起：回放上一笔（语音脉冲抬起由 runtime 忽略，不结束闩锁）
                     if all_zero {
                         if let Some((prev_dev, prev_event)) =
                             LAST_CONSUMER_HID.lock().ok().and_then(|mut g| g.take())
                         {
-                            if t1ish || looks_like_t1_device(&prev_dev) {
+                            if t1ish || looks_like_t1_device(&prev_dev) || powerish {
                                 log::info!(
                                     "T1 raw HID release device={} was={}",
                                     device_name,
@@ -560,12 +613,24 @@ fn consumer_raw_thread(running: Arc<AtomicBool>, callback: EventCallback, listen
                                 }
                             }
                         }
-                    } else if t1ish {
-                        log::info!(
-                            "T1 raw HID device={} report=hid:{}",
-                            device_name,
-                            hex
-                        );
+                    } else if t1ish || powerish || device_name.is_empty() {
+                        if t1ish {
+                            log::info!(
+                                "T1 raw HID device={} report=hid:{}",
+                                device_name,
+                                hex
+                            );
+                        } else {
+                            log::info!(
+                                "T1 probe HID (power/system?) device={} report=hid:{}",
+                                if device_name.is_empty() {
+                                    "?"
+                                } else {
+                                    &device_name
+                                },
+                                hex
+                            );
+                        }
                         crate::bridges::t1::native_suppress::maybe_arm_home_from_hid_hex(&hex);
                         let hex_up = hex.to_ascii_uppercase();
                         if hex_up.starts_with("02-21-02") || hex_up.contains("-21-02") {
@@ -573,7 +638,13 @@ fn consumer_raw_thread(running: Arc<AtomicBool>, callback: EventCallback, listen
                             crate::bridges::t1::native_suppress::on_ac_search_hid_seen();
                         }
                         if hex_up.starts_with("02-23-02") || hex_up.contains("-23-02") {
-                            crate::bridges::t1::native_suppress::on_ac_home_hid_seen();
+                            crate::bridges::t1::native_suppress::inject_after_consumer_hid(0xAC);
+                        }
+                        if hex_up.starts_with("02-24-02") || hex_up.contains("-24-02") {
+                            crate::bridges::t1::native_suppress::inject_after_consumer_hid(0xA6);
+                        }
+                        if hex_up.starts_with("02-E2") || hex_up.contains("-E2-") {
+                            crate::bridges::t1::native_suppress::inject_after_consumer_hid(0xAD);
                         }
                         // Boot keyboard HID（8 字节）：部分接收器不以 RIM_TYPEKEYBOARD 上报
                         if let Some(vk) = boot_keyboard_vk_from_hid(&report) {
@@ -608,27 +679,45 @@ fn consumer_raw_thread(running: Arc<AtomicBool>, callback: EventCallback, listen
                                 hid_report_hex: Some(hex),
                             });
                         }
-                    } else if let Ok(mut cb) = cb_arc.lock() {
-                        // 非 T1 consumer：仍上报按下，供 foreign 路径（若有）
-                        cb(ConsumerRawEvent {
-                            event_id: format!("hid:{hex}"),
-                            device_name: device_name.clone(),
-                            pressed: true,
-                            hid_report_hex: Some(hex),
-                        });
+                    } else {
+                        log::debug!(
+                            "T1 probe HID foreign device={} report=hid:{}",
+                            device_name,
+                            hex
+                        );
+                        if let Ok(mut cb) = cb_arc.lock() {
+                            // 非 T1 consumer：仍上报按下，供 foreign 路径（若有）
+                            cb(ConsumerRawEvent {
+                                event_id: format!("hid:{hex}"),
+                                device_name: device_name.clone(),
+                                pressed: true,
+                                hid_report_hex: Some(hex),
+                            });
+                        }
                     }
                 }
             } else if header.dwType == RIM_TYPEKEYBOARD {
                 // keyboard payload starts after header；手动读 VKey，避免对齐差异
                 let kb_off = header_size as usize;
                 if buf.len() >= kb_off + 8 {
+                    let make = u16::from_le_bytes([buf[kb_off], buf[kb_off + 1]]);
                     let flags = u16::from_le_bytes([buf[kb_off + 2], buf[kb_off + 3]]);
                     let vkey = u16::from_le_bytes([buf[kb_off + 6], buf[kb_off + 7]]);
                     let pressed = (flags & RI_KEY_BREAK) == 0;
+                    let powerish = looks_power_probe_vk(vkey) || make == 0x5E;
                     if t1ish {
                         log::info!(
-                            "T1 raw KBD device={} vk=0x{vkey:02X} pressed={pressed}",
+                            "T1 raw KBD device={} vk=0x{vkey:02X} sc=0x{make:02X} pressed={pressed}",
                             device_name
+                        );
+                    } else if powerish {
+                        log::info!(
+                            "T1 probe KBD (power?) device={} vk=0x{vkey:02X} sc=0x{make:02X} pressed={pressed}",
+                            if device_name.is_empty() {
+                                "?"
+                            } else {
+                                &device_name
+                            }
                         );
                     }
                     // 按下与抬起都回调：实体键盘 foreign 回放需要 keyup；T1 侧 runtime 会忽略抬起
@@ -637,6 +726,59 @@ fn consumer_raw_thread(running: Arc<AtomicBool>, callback: EventCallback, listen
                             cb(ConsumerRawEvent {
                                 event_id: format!("kbd:VK_{vkey:02X}"),
                                 device_name,
+                                pressed,
+                                hid_report_hex: None,
+                            });
+                        }
+                    }
+                }
+            } else if header.dwType == RIM_TYPEMOUSE {
+                // Windows RAWMOUSE：usFlags@0，union.usButtonFlags@2（见 MSDN）
+                let m_off = header_size as usize;
+                if buf.len() >= m_off + 4 {
+                    let btn_flags =
+                        u16::from_le_bytes([buf[m_off + 2], buf[m_off + 3]]);
+                    let mut events: Vec<(String, bool)> = Vec::new();
+                    if (btn_flags & RI_MOUSE_LEFT_BUTTON_DOWN) != 0 {
+                        events.push(("mouse:BTN_LEFT".into(), true));
+                    }
+                    if (btn_flags & RI_MOUSE_LEFT_BUTTON_UP) != 0 {
+                        events.push(("mouse:BTN_LEFT".into(), false));
+                    }
+                    if (btn_flags & RI_MOUSE_RIGHT_BUTTON_DOWN) != 0 {
+                        events.push(("mouse:BTN_RIGHT".into(), true));
+                    }
+                    if (btn_flags & RI_MOUSE_RIGHT_BUTTON_UP) != 0 {
+                        events.push(("mouse:BTN_RIGHT".into(), false));
+                    }
+                    if (btn_flags & RI_MOUSE_MIDDLE_BUTTON_DOWN) != 0 {
+                        events.push(("mouse:BTN_MIDDLE".into(), true));
+                    }
+                    if (btn_flags & RI_MOUSE_MIDDLE_BUTTON_UP) != 0 {
+                        events.push(("mouse:BTN_MIDDLE".into(), false));
+                    }
+                    for (event_id, pressed) in events {
+                        if t1ish {
+                            log::info!(
+                                "T1 raw MOUSE device={} {event_id} pressed={pressed}",
+                                device_name
+                            );
+                        } else if device_name.is_empty() {
+                            log::info!(
+                                "T1 probe MOUSE device=? {event_id} pressed={pressed}"
+                            );
+                        } else {
+                            // 非 T1 实体鼠标极多，避免刷屏
+                            log::debug!(
+                                "T1 probe MOUSE foreign device={} {event_id} pressed={pressed}",
+                                device_name
+                            );
+                            continue;
+                        }
+                        if let Ok(mut cb) = cb_arc.lock() {
+                            cb(ConsumerRawEvent {
+                                event_id,
+                                device_name: device_name.clone(),
                                 pressed,
                                 hid_report_hex: None,
                             });
@@ -687,6 +829,30 @@ mod tests {
     }
 
     #[test]
+    fn power_probe_hex_consumer_and_system() {
+        assert!(looks_power_probe_hex("02-30-00"));
+        assert!(looks_power_probe_hex("01-82"));
+        assert!(looks_power_probe_hex("82"));
+        assert!(!looks_power_probe_hex("02-E9-00"));
+        assert!(looks_power_probe_vk(0x5F));
+        assert!(!looks_power_probe_vk(0x0D));
+    }
+
+    #[test]
+    fn looks_like_t1_usb_and_ble() {
+        assert!(looks_like_t1_device(
+            r"\\?\HID#VID_1915&PID_1025&MI_01#7&abc#{"
+        ));
+        assert!(looks_like_t1_device(
+            r"\\?\HID#Dev_VID&01620a_PID&0407#{"
+        ));
+        assert!(looks_like_t1_device(
+            r"\\?\BTHLEDevice#dev_vid&01620a_pid&0407#12ac"
+        ));
+        assert!(!looks_like_t1_device(r"\\?\HID#VID_046D&PID_C52B"));
+    }
+
+    #[test]
     fn parse_hid_buffer_layout() {
         let header_size = raw_input_header_size();
         let mut buf = vec![0u8; header_size + 8 + 3];
@@ -697,16 +863,5 @@ mod tests {
         buf[header_size + 10] = 0x00;
         let report = parse_hid_report_from_raw_buffer(&buf, header_size).expect("report");
         assert_eq!(format_hid_report_hex(&report), "02-CF-00");
-    }
-
-    #[test]
-    fn looks_like_covers_ble_and_usb() {
-        assert!(looks_like_t1_device(
-            r"\\?\HID#VID_1915&PID_1025&MI_01#7&abc"
-        ));
-        assert!(looks_like_t1_device(
-            r"\\?\BTHLEDevice#dev_vid&01620a_pid&0407#12ac"
-        ));
-        assert!(!looks_like_t1_device(r"\\?\HID#VID_046D&PID_C52B"));
     }
 }

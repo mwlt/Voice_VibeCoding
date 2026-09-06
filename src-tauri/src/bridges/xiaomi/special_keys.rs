@@ -288,8 +288,8 @@ fn hook_loop() {
                 our_inject,
                 down,
             ) {
-                // 仅闸门侧效应键（Apps / Browser Search/Home）在 Raw 丢按下时补映射。
-                // hold-suppress 的方向键等：只吞不补，避免实体同键变成遥控映射。
+                // 仅闸门键（Apps / Browser_* / 重映射音量·静音·方向·OK）补映射。
+                // hold-suppress 的同键方向不进闸门，避免实体键盘误伤。
                 if down && crate::bridges::t1::native_suppress::is_gate_vk(vk as u16) {
                     crate::bridges::t1::runtime::on_ll_gate_keydown(vk as u16);
                     crate::bridges::t1::ble_keys::on_ll_gate_keydown(vk as u16);
@@ -302,14 +302,19 @@ fn hook_loop() {
                     if down {
                         crate::bridges::t1::native_suppress::on_browser_search_ll_swallowed();
                     }
-                } else if vk == 0xAC {
+                } else if vk == 0xAC || vk == 0x24 {
                     log::info!(
-                        "T1 LL swallow BrowserHome vk=0xAC down={down} llkhf_injected={}",
+                        "T1 LL swallow Home vk=0x{vk:02X} down={down} llkhf_injected={}",
                         (flags & 0x10) != 0
                     );
-                    if down {
+                    if down && vk == 0xAC {
                         crate::bridges::t1::native_suppress::on_ac_home_hid_seen();
                     }
+                } else if vk == 0xA6 {
+                    log::info!(
+                        "T1 LL swallow BrowserBack/delete vk=0xA6 down={down} llkhf_injected={}",
+                        (flags & 0x10) != 0
+                    );
                 } else if vk == 0x5D {
                     log::info!(
                         "T1 LL swallow Apps/Menu vk=0x5D down={down} llkhf_injected={}",

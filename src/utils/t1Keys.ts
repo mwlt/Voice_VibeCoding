@@ -76,6 +76,23 @@ export const T1_RIGHT_COLUMN_IDS: readonly T1ButtonId[] = [
   "menu",
 ];
 
+/**
+ * 系统/机内固定键：无主机可映射报告（电源→睡眠/关屏；鼠标→遥控器空鼠模式）。
+ * UI 仅展示说明，不开放录入。
+ */
+export const T1_FIXED_SYSTEM_IDS = ["power", "mouse"] as const;
+
+export type T1FixedSystemId = (typeof T1_FIXED_SYSTEM_IDS)[number];
+
+export const T1_FIXED_SYSTEM_HINTS: Record<T1FixedSystemId, string> = {
+  power: "作用为系统电源键 · 不可绑定",
+  mouse: "遥控器内部按键 · 不可绑定",
+};
+
+export function t1IsFixedSystemKey(id: string): id is T1FixedSystemId {
+  return (T1_FIXED_SYSTEM_IDS as readonly string[]).includes(id);
+}
+
 /** 映射台右栏底部 · 语音键快速设置（四种，对齐小米） */
 export interface T1VoiceQuickPreset {
   id: string;
@@ -147,6 +164,7 @@ export function applyT1CapturedBinding(
   buttonId: string,
   vks: number[]
 ): DeviceConfig {
+  if (t1IsFixedSystemKey(buttonId)) return config;
   const action = vksToAction(vks);
   const button_bindings = {
     ...(config.button_bindings || {}),
@@ -190,6 +208,7 @@ export function clearT1Binding(
   config: DeviceConfig,
   buttonId: string
 ): DeviceConfig {
+  if (t1IsFixedSystemKey(buttonId)) return config;
   const button_bindings = {
     ...(config.button_bindings || {}),
     [buttonId]: { type: "None" as const, value: null },

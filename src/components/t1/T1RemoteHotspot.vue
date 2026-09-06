@@ -165,16 +165,15 @@ defineExpose({ keyEl, rootRef });
             </div>
             <button
               type="button"
-              class="key-cap key-cap-power"
+              class="key-cap key-cap-power key-fixed"
               data-key-id="power"
-              aria-label="电源"
+              aria-label="电源（作用为系统电源键，不可绑定）"
+              title="作用为系统电源键 · 不可绑定"
               :class="{
-                active: selectedId === 'power',
                 hover: hoverId === 'power',
               }"
               @mouseenter="emit('hover', 'power')"
               @mouseleave="emit('hover', null)"
-              @click="emit('select', 'power')"
             >
               <svg class="key-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path
@@ -350,16 +349,15 @@ defineExpose({ keyEl, rootRef });
               </button>
               <button
                 type="button"
-                class="pill-half"
+                class="pill-half key-fixed"
                 data-key-id="mouse"
-                aria-label="鼠标"
+                aria-label="鼠标（遥控器内部按键，不可绑定）"
+                title="遥控器内部按键 · 不可绑定"
                 :class="{
-                  active: selectedId === 'mouse',
                   hover: hoverId === 'mouse',
                 }"
                 @mouseenter="emit('hover', 'mouse')"
                 @mouseleave="emit('hover', null)"
-                @click="emit('select', 'mouse')"
               >
                 <svg class="key-icon" viewBox="0 0 24 24" aria-hidden="true">
                   <path
@@ -695,6 +693,24 @@ defineExpose({ keyEl, rootRef });
   color: #eaf2ff;
   background: rgba(37, 99, 235, 0.92);
   box-shadow: inset 0 0 0 1.5px rgba(147, 197, 253, 0.95);
+}
+
+/* 电源 / 鼠标：灰蓝固定键，不走可映射高亮 */
+.key-cap.key-fixed,
+.pill-half.key-fixed {
+  color: #8fa3b8;
+  background: #2a3038;
+  cursor: default;
+  box-shadow: inset 0 0 0 1px rgba(143, 163, 184, 0.35);
+}
+
+.key-cap.key-fixed:hover,
+.key-cap.key-fixed.hover,
+.pill-half.key-fixed:hover,
+.pill-half.key-fixed.hover {
+  color: #a8bbcf;
+  background: #323a44;
+  box-shadow: inset 0 0 0 1.5px rgba(143, 163, 184, 0.55);
 }
 
 .dpad-wrap {

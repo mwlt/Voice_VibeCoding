@@ -20,8 +20,6 @@ const GET_CAPS_V10: [u8; 6] = [0x0A, 0x01, 0x00, 0x00, 0x03, 0x03];
 const MIC_EXTEND_INTERVAL: Duration = Duration::from_secs(8);
 /// 麦已开但长时间无 ADPCM：强制收口，否则 MIC_EXTEND 空转、CABLE 只播静音。
 const MIC_STALE_NO_AUDIO: Duration = Duration::from_secs(12);
-/// START_SEARCH 时若「已开麦」但超过此时长无 PCM，视为僵尸会话，强制 MIC_CLOSE→MIC_OPEN。
-const MIC_LIVE_AUDIO_MS: u64 = 2000;
 
 /// AUDIO_START 是否视为新会话（仅新会话 CLEAR；推流中 CLEAR 会掏空 CABLE）。
 /// 映射点按不在此决策——由 START_SEARCH/AUDIO_START 调 on_remote_press，450ms 去重。
@@ -29,53 +27,37 @@ pub fn audio_start_should_clear(already_streaming: bool, awaiting_audio_start: b
     awaiting_audio_start || !already_streaming
 }
 
-/// START_SEARCH 是否要发 MIC_OPEN / 是否需先关再开 / 是否结束会话。
-/// - 无麦 → OPEN（关麦后短抑制窗内除外）
-/// - 活流 + 同一次物理按连发 → SkipLive（防掐断）
-/// - 活流 + 新的一次按（或闩锁第二次）→ CloseEnd（按下开始、再按结束）
-/// - 开麦但无活 PCM → ReopenZombie
+/// START_SEARCH → 开/关麦：只看主机开麦意图。
+/// - 未开麦 → Open（关麦后短抑制窗内除外，挡固件回声）
+/// - 已开麦 + 同一次按连发 → SkipLive
+/// - 已开麦 + 新一次按 → CloseEnd
 pub fn start_search_mic_action(
-    remote_pressed: bool,
-    streaming: bool,
-    last_audio_age: Option<Duration>,
-    voice_held: bool,
-    _since_session_start: Option<Duration>,
+    host_mic_wanted: bool,
     within_dup_window: bool,
     reopen_suppressed: bool,
 ) -> StartSearchMicAction {
-    if !remote_pressed {
-        if reopen_suppressed {
-            return StartSearchMicAction::SkipAfterClose;
+    if host_mic_wanted {
+        if within_dup_window {
+            return StartSearchMicAction::SkipLive;
         }
-        return StartSearchMicAction::Open;
+        return StartSearchMicAction::CloseEnd;
     }
-    let live = streaming
-        && last_audio_age
-            .map(|d| d < Duration::from_millis(MIC_LIVE_AUDIO_MS))
-            .unwrap_or(false);
-    if live {
-        // 闩锁第二次按 = 用户结束；或点按模式下新一次按而麦仍开着 = 结束。
-        if voice_held || !within_dup_window {
-            return StartSearchMicAction::CloseEnd;
-        }
-        StartSearchMicAction::SkipLive
-    } else {
-        StartSearchMicAction::ReopenZombie
+    if reopen_suppressed {
+        return StartSearchMicAction::SkipAfterClose;
     }
+    StartSearchMicAction::Open
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartSearchMicAction {
     Open,
     SkipLive,
-    ReopenZombie,
-    /// 用户再按结束：MIC_CLOSE + 停 PCM（日志里曾 0 次 MIC_CLOSE、麦与 EXTEND 空转）。
+    /// 用户再按结束：MIC_CLOSE + 停 PCM。
     CloseEnd,
     /// 刚 CloseEnd，忽略紧随的 START_SEARCH，避免立刻又 MIC_OPEN。
     SkipAfterClose,
 }
 
-const REOPEN_SUPPRESS_MS: u64 = 800;
 const BATTERY_SERVICE: u128 = 0x0000180f_0000_1000_8000_00805f9b34fb;
 const BATTERY_LEVEL: u128 = 0x00002a19_0000_1000_8000_00805f9b34fb;
 
@@ -97,8 +79,6 @@ struct AtvvVoiceState {
     /// 主机是否希望开麦。CloseEnd/AUDIO_STOP 后为 false。
     /// 本机日志：MIC_CLOSE 后遥控器仍回 AUDIO_START，若不挡住会把会话重新打开。
     host_mic_wanted: bool,
-    /// CloseEnd 后短时禁止再次 MIC_OPEN（防止关麦后同一次按的 START_SEARCH 又 Open）。
-    reopen_suppressed_until: Option<Instant>,
 }
 
 /// 阻塞运行直到 `runtime` 请求停止
@@ -301,7 +281,6 @@ fn windows_run(
         last_audio: None,
         awaiting_audio_start: false,
         host_mic_wanted: false,
-        reopen_suppressed_until: None,
     }));
 
     // T1 用自己的 gain_db；勿用启动时写入的小米全局值（xiaomi.json 常为 0 → CABLE 近静音）
@@ -311,6 +290,7 @@ fn windows_run(
 
     crate::bridges::t1::ble_host::set_atvv_ok(false);
     crate::bridges::t1::ble_voice_meter::reset();
+    ble_voice::set_mic_session_wanted(false);
 
     let mut tokens: Vec<(GattCharacteristic, windows::Foundation::EventRegistrationToken)> =
         Vec::new();
@@ -448,6 +428,8 @@ fn windows_run(
                 s.host_mic_wanted = false;
                 s.decoder.reset();
             }
+            ble_voice::set_mic_session_wanted(false);
+            ble_voice::arm_reopen_suppress();
             ble_voice::on_remote_release(&app);
             crate::bridges::t1::ble_voice_meter::set_session(false);
         }
@@ -536,30 +518,18 @@ fn handle_control(
         .join("-");
     match payload[0] {
         0x08 => {
-            let voice_held = ble_voice::is_voice_held();
             let within_dup = ble_voice::is_within_voice_dup_window();
-            let action = state
+            let reopen_suppressed = ble_voice::is_reopen_suppressed();
+            let host_mic_wanted = state
                 .lock()
-                .map(|s| {
-                    let reopen_suppressed = s
-                        .reopen_suppressed_until
-                        .map(|t| Instant::now() < t)
-                        .unwrap_or(false);
-                    start_search_mic_action(
-                        s.remote_pressed,
-                        s.streaming,
-                        s.last_audio.map(|t| t.elapsed()),
-                        voice_held,
-                        s.session_started.map(|t| t.elapsed()),
-                        within_dup,
-                        reopen_suppressed,
-                    )
-                })
-                .unwrap_or(StartSearchMicAction::Open);
+                .map(|s| s.host_mic_wanted)
+                .unwrap_or(false);
+            let action =
+                start_search_mic_action(host_mic_wanted, within_dup, reopen_suppressed);
             #[cfg(target_os = "windows")]
             match action {
                 StartSearchMicAction::SkipLive => {
-                    log::info!("T1 BLE START_SEARCH skipped MIC_OPEN (live audio, same press)");
+                    log::info!("T1 BLE START_SEARCH skipped (mic open, same press)");
                 }
                 StartSearchMicAction::SkipAfterClose => {
                     log::info!("T1 BLE START_SEARCH skipped MIC_OPEN (reopen suppressed after close)");
@@ -576,41 +546,11 @@ fn handle_control(
                         st.frames = 0;
                         st.awaiting_audio_start = false;
                         st.host_mic_wanted = false;
-                        st.reopen_suppressed_until =
-                            Some(Instant::now() + Duration::from_millis(REOPEN_SUPPRESS_MS));
                         st.decoder.reset();
                     }
+                    ble_voice::set_mic_session_wanted(false);
                     ble_pcm::end_session();
                     crate::bridges::t1::ble_voice_meter::set_session(false);
-                }
-                StartSearchMicAction::ReopenZombie => {
-                    // 点按/僵尸：必须重开，否则无 AUDIO_START 或 ADPCM 长流近静音，输入法听不到。
-                    log::warn!(
-                        "T1 BLE START_SEARCH re-open mic (fresh gesture or zombie)"
-                    );
-                    write_tx(tx, &[0x0C, 0x00, 0x00], "MIC_CLOSE");
-                    if let Ok(mut st) = state.lock() {
-                        st.remote_pressed = false;
-                        st.streaming = false;
-                        st.pending.clear();
-                        st.session_started = None;
-                        st.last_audio = None;
-                        st.frames = 0;
-                        st.awaiting_audio_start = true;
-                        st.host_mic_wanted = false;
-                        st.decoder.reset();
-                    }
-                    ble_pcm::clear();
-                    // 对齐小米：MIC_OPEN 为 0x0C 0x00；T1 固件亦接受第三字节 enable=1
-                    write_tx(tx, &[0x0C, 0x00, 0x01], "MIC_OPEN");
-                    if let Ok(mut st) = state.lock() {
-                        st.remote_pressed = true;
-                        st.session_started = Some(Instant::now());
-                        st.last_extend = Instant::now();
-                        st.awaiting_audio_start = true;
-                        st.host_mic_wanted = true;
-                        st.reopen_suppressed_until = None;
-                    }
                 }
                 StartSearchMicAction::Open => {
                     write_tx(tx, &[0x0C, 0x00, 0x01], "MIC_OPEN");
@@ -620,16 +560,25 @@ fn handle_control(
                         st.last_extend = Instant::now();
                         st.awaiting_audio_start = true;
                         st.host_mic_wanted = true;
-                        st.reopen_suppressed_until = None;
                         st.decoder.reset();
                     }
+                    ble_voice::set_mic_session_wanted(true);
                 }
             }
             apply_t1_voice_gain(app);
             // 尽早吞 0xAA + 关搜索，再开语音（与 HID 共用 on_ac_search_hid_seen）
             crate::bridges::t1::native_suppress::on_ac_search_hid_seen();
-            // 每次用户按都走 on_remote_press；900ms 去重防 HID/START_SEARCH 双发。
-            ble_voice::on_remote_press(app);
+            // 仅真实开/关手势注入；Skip* 是同一次按的回声。
+            if !matches!(
+                action,
+                StartSearchMicAction::SkipLive | StartSearchMicAction::SkipAfterClose
+            ) {
+                ble_voice::on_remote_press(app);
+            }
+            // CloseEnd：抑制窗从 inject 之后起算，挡固件回声，且 inject 侧也会认这个窗。
+            if matches!(action, StartSearchMicAction::CloseEnd) {
+                ble_voice::arm_reopen_suppress();
+            }
             if !matches!(
                 action,
                 StartSearchMicAction::CloseEnd | StartSearchMicAction::SkipAfterClose
@@ -690,13 +639,13 @@ fn handle_control(
                 st.last_audio = None;
                 st.awaiting_audio_start = false;
                 st.host_mic_wanted = false;
-                st.reopen_suppressed_until =
-                    Some(Instant::now() + Duration::from_millis(REOPEN_SUPPRESS_MS));
             }
+            ble_voice::set_mic_session_wanted(false);
             // 遥控器报停后主机也发 MIC_CLOSE，避免只停 PCM 而麦口仍开、EXTEND 空转。
             #[cfg(target_os = "windows")]
             write_tx(tx, &[0x0C, 0x00, 0x00], "MIC_CLOSE");
             ble_voice::on_remote_release(app);
+            ble_voice::arm_reopen_suppress();
             crate::bridges::t1::ble_voice_meter::set_session(false);
             emit_msg(app, &format!("ATVV AUDIO_STOP(0x00) raw={raw}"));
             log::info!("T1 BLE AUDIO_STOP raw={raw}");
@@ -957,11 +906,12 @@ mod tests {
     #[test]
     fn start_search_opens_when_mic_closed() {
         assert_eq!(
-            start_search_mic_action(false, false, None, false, None, false, false),
+            start_search_mic_action(false, false, false),
             StartSearchMicAction::Open
         );
+        // 去重窗占用但未开麦：仍应开（HID 不再抢注入后，这是「开始」）
         assert_eq!(
-            start_search_mic_action(false, false, None, true, None, false, false),
+            start_search_mic_action(false, true, false),
             StartSearchMicAction::Open
         );
     }
@@ -969,74 +919,33 @@ mod tests {
     #[test]
     fn after_close_suppresses_immediate_reopen() {
         assert_eq!(
-            start_search_mic_action(false, false, None, false, None, true, true),
+            start_search_mic_action(false, false, true),
+            StartSearchMicAction::SkipAfterClose
+        );
+        assert_eq!(
+            start_search_mic_action(false, true, true),
             StartSearchMicAction::SkipAfterClose
         );
     }
 
     #[test]
-    fn live_pcm_skips_only_within_dup_window() {
-        // 同一次物理按连发 START_SEARCH：SkipLive，避免掐断
+    fn mic_open_same_press_skips_close() {
         assert_eq!(
-            start_search_mic_action(
-                true,
-                true,
-                Some(Duration::from_millis(200)),
-                false,
-                Some(Duration::from_secs(5)),
-                true,
-                false,
-            ),
+            start_search_mic_action(true, true, false),
             StartSearchMicAction::SkipLive
         );
     }
 
     #[test]
-    fn second_press_while_live_closes() {
-        // 新一次按 / 闩锁第二次：关麦结束
+    fn mic_open_new_press_closes() {
         assert_eq!(
-            start_search_mic_action(
-                true,
-                true,
-                Some(Duration::from_millis(200)),
-                false,
-                Some(Duration::from_secs(5)),
-                false,
-                false,
-            ),
+            start_search_mic_action(true, false, false),
             StartSearchMicAction::CloseEnd
         );
+        // 开麦意图优先于关麦抑制
         assert_eq!(
-            start_search_mic_action(
-                true,
-                true,
-                Some(Duration::from_millis(200)),
-                true,
-                Some(Duration::from_secs(5)),
-                true,
-                false,
-            ),
+            start_search_mic_action(true, false, true),
             StartSearchMicAction::CloseEnd
-        );
-    }
-
-    #[test]
-    fn zombie_reopens_without_live_audio() {
-        assert_eq!(
-            start_search_mic_action(true, false, None, false, None, false, false),
-            StartSearchMicAction::ReopenZombie
-        );
-        assert_eq!(
-            start_search_mic_action(
-                true,
-                true,
-                Some(Duration::from_secs(5)),
-                true,
-                Some(Duration::from_secs(5)),
-                false,
-                false,
-            ),
-            StartSearchMicAction::ReopenZombie
         );
     }
 

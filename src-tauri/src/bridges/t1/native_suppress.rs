@@ -3,9 +3,12 @@
 //! **硬约束：不得导致实体键盘任何常用键失效。**
 //!
 //! LL 钩子无法区分「遥控固件」与「实体键盘」。因此：
-//! - 空格 / 退格 / 方向 / Enter / 字母等 **永不** suppress；
-//! - 仅对遥控侧效应冷门键（Apps / Browser_* / 音量）在 T1 事件后短时 arm；
-//! - 常驻闸门：Apps + Browser Search（0xAA）+ Browser Home（0xAC）。
+//! - 空格 / 退格 / 方向 / Enter / 字母等 **永不** TTL-arm；
+//! - **同键映射**（如 OK→Enter、左→左）：不 hold、不注入，原生透传一次（避免 LL 先到 + 注入双发）；
+//! - 仅对遥控侧效应冷门键（Apps / Browser_*）常驻闸门；
+//! - 音量±：仅当映射**不是**同键/未绑定 时才进闸门（未绑定须让系统音量生效）；
+//! - 静音：HOGP 原生静音不可靠 → 桥接开启时**始终**闸门 + SendInput 注入（同键也注入 0xAD）；
+//! - 方向/OK：仅当映射到**其它**键时 LL 常驻闸门（否则 LL 先于 Raw 会漏出原生方向）。
 //!
 //! **0xAA / barsearch 完整吞掉：**
 //! - 闸门优先于 `allow_pass`（映射注入放行窗口不得开洞）；
@@ -23,6 +26,20 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// 音量±闸门：仅「重映射走」时开启（见 [`refresh_media_gates_from_bindings`]）。
+static GATE_VOL_UP: AtomicBool = AtomicBool::new(false);
+static GATE_VOL_DOWN: AtomicBool = AtomicBool::new(false);
+/// 静音：桥接期始终开（见 refresh；HOGP 原生静音常无效）。
+static GATE_MUTE: AtomicBool = AtomicBool::new(false);
+/// 方向/OK：仅重映射到其它键时开（见 [`refresh_dpad_remap_gates`]）。
+static GATE_LEFT: AtomicBool = AtomicBool::new(false);
+static GATE_RIGHT: AtomicBool = AtomicBool::new(false);
+static GATE_UP: AtomicBool = AtomicBool::new(false);
+static GATE_DOWN: AtomicBool = AtomicBool::new(false);
+static GATE_OK: AtomicBool = AtomicBool::new(false);
+/// VK_HOME(0x24)：主页绑到非 Home 时开（BLE 有时发 0x24 而非 Browser Home 0xAC）。
+static GATE_VK_HOME: AtomicBool = AtomicBool::new(false);
 
 static ALLOW_PASS: LazyLock<Mutex<HashMap<u16, Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -67,6 +84,7 @@ const CLAIM_TTL: Duration = Duration::from_millis(200);
 const BROWSER_HOME_GUARD_TTL: Duration = Duration::from_millis(900);
 const HOTKEY_ID_BROWSER_SEARCH: i32 = 0x54_AA;
 const HOTKEY_ID_BROWSER_HOME: i32 = 0x54_AC;
+const HOTKEY_ID_BROWSER_BACK: i32 = 0x54_A6;
 const HOTKEY_ID_APPS_MENU: i32 = 0x54_5D;
 
 /// Win32 `APPCOMMAND_BROWSER_SEARCH`（开搜索）。注意：Favorites 才是 6。
@@ -293,14 +311,124 @@ pub fn is_armable_suppress_vk(vk: u16) -> bool {
     )
 }
 
-/// 常驻闸门：T1 全部原生侧效应键（Consumer 常先于 Raw Input，短时 arm 会漏）。
+/// 常驻闸门：Apps / Browser_* 始终开；静音桥接期始终开；音量±/方向/OK/VK_HOME 仅重映射时开。
 pub fn is_gate_vk(vk: u16) -> bool {
+    match vk {
+        0xAF => GATE_VOL_UP.load(Ordering::SeqCst),
+        0xAE => GATE_VOL_DOWN.load(Ordering::SeqCst),
+        0xAD => GATE_MUTE.load(Ordering::SeqCst),
+        0x25 => GATE_LEFT.load(Ordering::SeqCst),
+        0x26 => GATE_UP.load(Ordering::SeqCst),
+        0x27 => GATE_RIGHT.load(Ordering::SeqCst),
+        0x28 => GATE_DOWN.load(Ordering::SeqCst),
+        0x0D => GATE_OK.load(Ordering::SeqCst),
+        0x24 => GATE_VK_HOME.load(Ordering::SeqCst),
+        0x5D | 0xA6 | 0xA7 | 0xAA | 0xAC => true,
+        _ => false,
+    }
+}
+
+/// 桥接开启时可能吞掉的 T1 原生侧效应 VK（不含空格/方向等常用键）。
+pub fn is_t1_native_side_effect_vk(vk: u16) -> bool {
     is_armable_suppress_vk(vk)
 }
 
-/// 桥接开启时必须吞掉的 T1 原生侧效应 VK（不含空格/方向等常用键）。
-pub fn is_t1_native_side_effect_vk(vk: u16) -> bool {
-    is_armable_suppress_vk(vk)
+/// 未绑定或同键（vol+→音量+）→ 不开闸，让系统 Consumer/VK 生效。
+fn media_gate_needed(native_vk: u16, binding_vks: Option<&[u16]>) -> bool {
+    match binding_vks {
+        None | Some([]) => false,
+        Some([vk]) if *vk == native_vk => false,
+        Some(_) => true,
+    }
+}
+
+/// 配置加载/保存后刷新音量/静音闸门。
+/// - 音量±：未绑定或同键 = 透传系统音量（WinUHid 也发不出音量 VK，不必绑回自身）。
+/// - 静音：始终开闸（HOGP 原生静音常无效，靠 SendInput 注入映射或 0xAD）。
+pub fn refresh_media_gates_from_bindings(
+    vol_plus: Option<&[u16]>,
+    vol_minus: Option<&[u16]>,
+    _mute: Option<&[u16]>,
+) {
+    GATE_VOL_UP.store(media_gate_needed(0xAF, vol_plus), Ordering::SeqCst);
+    GATE_VOL_DOWN.store(media_gate_needed(0xAE, vol_minus), Ordering::SeqCst);
+    GATE_MUTE.store(true, Ordering::SeqCst);
+    log::info!(
+        "T1 media gates vol+={} vol-={} mute={} (mute always-on)",
+        GATE_VOL_UP.load(Ordering::SeqCst),
+        GATE_VOL_DOWN.load(Ordering::SeqCst),
+        GATE_MUTE.load(Ordering::SeqCst)
+    );
+}
+
+/// 方向/OK 映射到其它键时开 LL 闸门，避免「原生方向 + 映射键」双发。
+/// 同键/未绑定不开 → 实体键盘同 VK 仍可用。
+pub fn refresh_dpad_remap_gates(
+    up: Option<&[u16]>,
+    down: Option<&[u16]>,
+    left: Option<&[u16]>,
+    right: Option<&[u16]>,
+    ok: Option<&[u16]>,
+) {
+    GATE_UP.store(media_gate_needed(0x26, up), Ordering::SeqCst);
+    GATE_DOWN.store(media_gate_needed(0x28, down), Ordering::SeqCst);
+    GATE_LEFT.store(media_gate_needed(0x25, left), Ordering::SeqCst);
+    GATE_RIGHT.store(media_gate_needed(0x27, right), Ordering::SeqCst);
+    GATE_OK.store(media_gate_needed(0x0D, ok), Ordering::SeqCst);
+    log::info!(
+        "T1 dpad remap gates up={} down={} left={} right={} ok={}",
+        GATE_UP.load(Ordering::SeqCst),
+        GATE_DOWN.load(Ordering::SeqCst),
+        GATE_LEFT.load(Ordering::SeqCst),
+        GATE_RIGHT.load(Ordering::SeqCst),
+        GATE_OK.load(Ordering::SeqCst)
+    );
+}
+
+/// 主页映射不是 VK_HOME(0x24) 时，LL 吞 0x24 并补注入（BLE 有时发 Home 而非 Browser Home）。
+pub fn refresh_home_vk24_gate(home: Option<&[u16]>) {
+    GATE_VK_HOME.store(media_gate_needed(0x24, home), Ordering::SeqCst);
+    log::info!(
+        "T1 home VK_HOME(0x24) gate={}",
+        GATE_VK_HOME.load(Ordering::SeqCst)
+    );
+}
+
+/// 原生 VK 与映射目标完全相同（单键）→ 同键映射，应透传、勿 hold/注入。
+pub fn is_identity_binding(native_vk: Option<u16>, target_vks: &[u16]) -> bool {
+    matches!((native_vk, target_vks), (Some(nv), [t]) if nv == *t)
+}
+
+/// 按钮侧效应 VK 与映射目标相同（如 vol_plus→0xAF）→ 透传系统行为。
+pub fn is_side_effect_identity(button_id: &str, target_vks: &[u16]) -> bool {
+    let side = side_effect_vks_for_button(button_id);
+    matches!((side, target_vks), ([s], [t]) if *s == *t)
+}
+
+/// 同键或侧效应同键：不吞、不注入。
+/// 静音例外：即使绑 0xAD 也必须注入（HOGP 原生静音常无效）。
+pub fn is_passthrough_binding(
+    button_id: &str,
+    native_vk: Option<u16>,
+    target_vks: &[u16],
+) -> bool {
+    if button_id == "mute" {
+        return false;
+    }
+    if target_vks.is_empty() {
+        return true;
+    }
+    is_identity_binding(native_vk, target_vks) || is_side_effect_identity(button_id, target_vks)
+}
+
+/// WinUHid boot keyboard 不支持的媒体/浏览器键 → 必须 SendInput。
+pub fn vks_need_sendinput(vks: &[u16]) -> bool {
+    vks.iter().any(|&vk| {
+        matches!(
+            vk,
+            0xAD | 0xAE | 0xAF | 0xA6 | 0xA7 | 0xAA | 0xAC | 0x5D
+        )
+    })
 }
 
 pub fn side_effect_vks_for_button(button_id: &str) -> &'static [u16] {
@@ -455,11 +583,15 @@ pub fn is_temporarily_allowed(vk: u16) -> bool {
     is_allow_pass(vk, Instant::now())
 }
 
-/// 有绑定就按住吞原生（含同键映射下→下），只走注入，避免原生+映射双发。
-/// 未绑定（`target_vks` 空）不吞，让原生键透传一次。
+/// 有绑定且**非同键**时按住吞原生，只走注入，避免原生+映射双发。
+/// 未绑定 / 同键映射：不吞，让原生透传一次。
 /// 空格等编辑键仍禁止 hold（保护实体键盘）。
 pub fn should_hold_suppress_native(native_vk: u16, target_vks: &[u16]) -> bool {
     if native_vk == 0 || target_vks.is_empty() || is_hold_suppress_forbidden(native_vk) {
+        return false;
+    }
+    // 同键（OK→Enter、左→左）：透传，禁止 hold+注入双发
+    if is_identity_binding(Some(native_vk), target_vks) {
         return false;
     }
     true
@@ -538,12 +670,46 @@ pub fn on_browser_search_ll_swallowed() {
 }
 
 /// HID 见 AC Home（02-23-02）时武装 Browser Home + Chromium 新窗守卫。
+/// 映射注入由调用方走 [`crate::bridges::t1::ble_keys::on_ll_gate_keydown`] / USB 同名函数。
 pub fn on_ac_home_hid_seen() {
     if !is_enabled() {
         return;
     }
     arm_for_button("home", Some(0xAC), &[]);
     log::info!("T1 arm home native suppress vk=0xAC (Browser Home) from HID");
+}
+
+/// HID 见 AC Back（02-24-02）→ 武装删除侧效应（Browser Back）。
+pub fn on_ac_back_hid_seen() {
+    if !is_enabled() {
+        return;
+    }
+    arm_for_button("delete", Some(0xA6), &[]);
+    log::info!("T1 arm delete native suppress vk=0xA6 (Browser Back) from HID");
+}
+
+/// HID 见 Consumer Mute（02-E2）→ 武装静音闸门侧效应。
+pub fn on_mute_hid_seen() {
+    if !is_enabled() {
+        return;
+    }
+    arm_for_button("mute", Some(0xAD), &[]);
+    log::info!("T1 arm mute native suppress vk=0xAD from HID");
+}
+
+/// Consumer HID 落盘后：武装 + LL 闸门同路径补映射（设备名偶发不匹配时仍能注入）。
+pub fn inject_after_consumer_hid(button_hint_vk: u16) {
+    if !is_enabled() {
+        return;
+    }
+    match button_hint_vk {
+        0xAC | 0x24 => on_ac_home_hid_seen(),
+        0xA6 => on_ac_back_hid_seen(),
+        0xAD => on_mute_hid_seen(),
+        _ => {}
+    }
+    crate::bridges::t1::runtime::on_ll_gate_keydown(button_hint_vk);
+    crate::bridges::t1::ble_keys::on_ll_gate_keydown(button_hint_vk);
 }
 
 /// 菜单键侧效应：闸门常驻即可。
@@ -1350,10 +1516,11 @@ fn browser_search_hotkey_thread() {
         return;
     }
 
-    // MOD_NOREPEAT = 0x4000 — 注册 Search / Home / Apps，堵住 APPCOMMAND 漏网
+    // MOD_NOREPEAT = 0x4000 — Search / Home / Back(删除) / Apps
     let hotkeys: &[(i32, u32, &str)] = &[
         (HOTKEY_ID_BROWSER_SEARCH, 0xAA, "VK_BROWSER_SEARCH"),
         (HOTKEY_ID_BROWSER_HOME, 0xAC, "VK_BROWSER_HOME"),
+        (HOTKEY_ID_BROWSER_BACK, 0xA6, "VK_BROWSER_BACK"),
         (HOTKEY_ID_APPS_MENU, 0x5D, "VK_APPS"),
     ];
     for &(id, vk, name) in hotkeys {
@@ -1431,6 +1598,11 @@ fn browser_search_hotkey_thread() {
                     crate::bridges::t1::runtime::on_ll_gate_keydown(0xAC);
                     crate::bridges::t1::ble_keys::on_ll_gate_keydown(0xAC);
                 }
+                HOTKEY_ID_BROWSER_BACK => {
+                    log::info!("T1 BrowserBack hotkey consumed — map inject delete");
+                    crate::bridges::t1::runtime::on_ll_gate_keydown(0xA6);
+                    crate::bridges::t1::ble_keys::on_ll_gate_keydown(0xA6);
+                }
                 HOTKEY_ID_APPS_MENU => {
                     log::info!("T1 Apps/Menu hotkey consumed — arm + map inject");
                     arm_menu_apps_key();
@@ -1460,6 +1632,7 @@ fn browser_search_hotkey_thread() {
         }
         UnregisterHotKey(hwnd, HOTKEY_ID_BROWSER_SEARCH);
         UnregisterHotKey(hwnd, HOTKEY_ID_BROWSER_HOME);
+        UnregisterHotKey(hwnd, HOTKEY_ID_BROWSER_BACK);
         UnregisterHotKey(hwnd, HOTKEY_ID_APPS_MENU);
         DestroyWindow(hwnd);
         CoUninitialize();
@@ -1679,7 +1852,28 @@ mod tests {
         set_enabled(true);
         assert!(is_gate_vk(0x5D));
         assert!(should_suppress_native(0x5D, false, true));
-        assert!(is_gate_vk(0xAF)); // 音量常驻闸门，避免 Consumer 抢在 arm 前漏出
+        // 未刷新重映射前，音量闸门默认关（未绑定透传）；静音 refresh 后始终开
+        assert!(!is_gate_vk(0xAF));
+        refresh_media_gates_from_bindings(Some(&[0x20]), Some(&[0x20]), Some(&[0x20]));
+        assert!(is_gate_vk(0xAF));
+        assert!(should_suppress_native(0xAF, false, true));
+        assert!(is_gate_vk(0xAD), "mute always gated");
+        refresh_media_gates_from_bindings(Some(&[0xAF]), Some(&[0xAE]), Some(&[0xAD]));
+        assert!(!is_gate_vk(0xAF), "identity vol+ must not gate");
+        assert!(is_gate_vk(0xAD), "mute stays gated even identity");
+        set_enabled(false);
+    }
+
+    #[test]
+    fn dpad_remap_gates_only_when_non_identity() {
+        set_enabled(true);
+        refresh_dpad_remap_gates(None, None, Some(&[0x46]), Some(&[0x27]), Some(&[0x0D]));
+        assert!(is_gate_vk(0x25), "left→F must gate");
+        assert!(!is_gate_vk(0x27), "right identity must not gate");
+        assert!(!is_gate_vk(0x0D), "ok identity must not gate");
+        assert!(!is_gate_vk(0x26), "unbound up must not gate");
+        refresh_dpad_remap_gates(None, None, None, None, None);
+        assert!(!is_gate_vk(0x25));
         set_enabled(false);
     }
 
@@ -1782,12 +1976,25 @@ mod tests {
     fn should_hold_suppress_when_bound_including_identity() {
         // 重映射：吞原生
         assert!(should_hold_suppress_native(0x27, &[0xA5, 0x20]));
-        // 同键映射：也吞，否则原生+注入双发
-        assert!(should_hold_suppress_native(0x27, &[0x27]));
-        assert!(should_hold_suppress_native(0x28, &[0x28]));
+        // 同键映射：不吞（透传，避免原生+注入双发）
+        assert!(!should_hold_suppress_native(0x27, &[0x27]));
+        assert!(!should_hold_suppress_native(0x28, &[0x28]));
+        assert!(!should_hold_suppress_native(0x0D, &[0x0D]));
         // 未绑定：不吞，原生透传
         assert!(!should_hold_suppress_native(0x27, &[]));
         assert!(!should_hold_suppress_native(0, &[0x20]));
+    }
+
+    #[test]
+    fn passthrough_binding_detects_identity_and_side_effect() {
+        assert!(is_passthrough_binding("ok", Some(0x0D), &[0x0D]));
+        assert!(is_passthrough_binding("vol_plus", None, &[0xAF]));
+        assert!(!is_passthrough_binding("home", Some(0xAC), &[0x20]));
+        assert!(!is_passthrough_binding("mute", Some(0xAD), &[0xAD]));
+        assert!(!is_passthrough_binding("mute", Some(0xAD), &[0x52]));
+        assert!(is_passthrough_binding("up", Some(0x26), &[]));
+        assert!(vks_need_sendinput(&[0xAF]));
+        assert!(!vks_need_sendinput(&[0x0D]));
     }
 
     #[test]
@@ -1799,6 +2006,10 @@ mod tests {
         assert!(!is_gate_vk(0x08));
         assert!(!is_gate_vk(0x24));
         assert!(!is_gate_vk(0x20));
+        refresh_home_vk24_gate(Some(&[0x20]));
+        assert!(is_gate_vk(0x24), "home→Space must gate VK_HOME");
+        refresh_home_vk24_gate(Some(&[0x24]));
+        assert!(!is_gate_vk(0x24), "home→Home identity must not gate");
     }
 
     #[test]

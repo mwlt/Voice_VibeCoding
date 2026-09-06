@@ -521,7 +521,7 @@ impl ConfigManager {
         m.insert("right".into(), KeyAction::SingleKey(0x27));
         m.insert("ok".into(), KeyAction::SingleKey(0x0D));
         m.insert("delete".into(), KeyAction::SingleKey(0x08));
-        m.insert("home".into(), KeyAction::ComboKey(vec![0x5B]));
+        m.insert("home".into(), KeyAction::SingleKey(0x20)); // Space（勿默认左 Win，易弹开始菜单）
         m.insert("vol_plus".into(), KeyAction::SingleKey(0xAF));
         m.insert("vol_minus".into(), KeyAction::SingleKey(0xAE));
         m.insert("mute".into(), KeyAction::SingleKey(0xAD));

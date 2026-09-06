@@ -128,6 +128,13 @@ pub fn safe_mapped_tap(vks: &[u16], hold_ms: u64) -> bool {
     if vks.is_empty() {
         return false;
     }
+    // 音量/浏览器等不在 WinUHid boot keyboard 内 → 直接 SendInput
+    if crate::bridges::t1::native_suppress::vks_need_sendinput(vks) {
+        crate::bridges::t1::native_suppress::allow_pass_vks(vks);
+        let ok = tap_vks(vks, hold_ms);
+        let _ = crate::bridges::xiaomi::hid_injector::release_all();
+        return ok;
+    }
     let needs_atomic = chord_has_modifier(vks);
     crate::bridges::t1::native_suppress::allow_pass_vks(vks);
     let ok = if crate::bridges::xiaomi::hid_injector::is_available() {

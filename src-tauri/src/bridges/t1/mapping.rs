@@ -27,6 +27,8 @@ pub fn default_event_aliases() -> HashMap<String, Vec<String>> {
         vec![
             "hid:02-23-02".into(),
             "kbd:VK_AC".into(),
+            // BLE HOGP 有时发普通 Home，而非 Browser Home
+            "kbd:VK_24".into(),
         ],
     );
     m.insert(

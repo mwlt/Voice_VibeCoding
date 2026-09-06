@@ -63,6 +63,18 @@ pub fn classify_event_note(event_id: &str) -> Option<&'static str> {
     if key.contains("02-E2-00") {
         return Some("Mute");
     }
+    if key.contains("02-30-00") || key.contains("HID:02-30") {
+        return Some("Consumer Power（电源）");
+    }
+    if key.contains("HID:01-82") || key == "HID:82" || key.starts_with("HID:82-") {
+        return Some("System Sleep（可能电源）");
+    }
+    if key.contains("HID:01-81") || key == "HID:81" || key.starts_with("HID:81-") {
+        return Some("System Power Down");
+    }
+    if key.starts_with("MOUSE:") {
+        return Some("鼠标键/空鼠探测");
+    }
     if key.contains("02-23-02") {
         return Some("AC Home");
     }
@@ -88,6 +100,9 @@ pub fn classify_event_note(event_id: &str) -> Option<&'static str> {
             0xAD => Some("Volume Mute VK"),
             0xAE => Some("Volume- VK"),
             0xAF => Some("Volume+ VK"),
+            0x5E => Some("OEM/电源相关"),
+            0x5F => Some("Sleep（可能电源）"),
+            0xFF => Some("OEM FF（可能电源）"),
             _ => None,
         };
     }

@@ -184,29 +184,29 @@ fn should_skip_duplicate_inject(button_id: &str) -> bool {
     false
 }
 
-/// LL / RegisterHotKey 吞掉闸门键后补映射。菜单(0x5D)、主页 Browser Home(0xAC)。
+/// LL / RegisterHotKey 吞掉闸门键后补映射（菜单/主页/删除/静音/音量/重映射方向·OK）。
 pub fn on_ll_gate_keydown(vk: u16) {
-    let button_id = match vk {
-        0x5D => "menu",
-        0xAC => "home",
-        _ => return,
-    };
+    if !native_suppress::is_gate_vk(vk) {
+        return;
+    }
     let Some(ctx) = LL_GATE_CTX.lock().clone() else {
         return;
     };
-    let event_id = format!("ll:VK_{vk:02X}");
+    let event_id = format!("kbd:VK_{vk:02X}");
+    let event_to_button = build_event_to_button(&default_event_aliases());
+    let button_id = resolve_button(&event_id, &event_to_button);
     let config = ctx
         .app
         .try_state::<ConfigManager>()
         .and_then(|mgr| mgr.get_device_config("t1").ok());
-    let target_vks = config
-        .as_ref()
-        .map(|c| binding_vks(c, button_id))
-        .unwrap_or_default();
+    let target_vks = match (&button_id, &config) {
+        (Some(bid), Some(cfg)) => binding_vks(cfg, bid),
+        _ => Vec::new(),
+    };
     let msg = key_diag::format_line(
         &event_id,
         true,
-        Some(button_id),
+        button_id.as_deref(),
         &target_vks,
         None,
         "LL-gate",
@@ -215,19 +215,44 @@ pub fn on_ll_gate_keydown(vk: u16) {
     key_diag::emit_usb(
         &ctx.app,
         "ll",
-        Some(button_id),
+        button_id.as_deref(),
         None,
         Some(&event_id),
         Some(true),
         &target_vks,
         &msg,
     );
-    native_suppress::arm_for_button(button_id, Some(vk), &target_vks);
-    if should_skip_duplicate_inject(button_id) {
+    let Some(button_id) = button_id else {
+        return;
+    };
+    if button_id == "voice" {
+        return;
+    }
+    if button_id == "home" {
+        native_suppress::on_ac_home_hid_seen();
+    }
+    if button_id == "menu" {
+        native_suppress::arm_menu_apps_key();
+    }
+    native_suppress::arm_for_button(&button_id, Some(vk), &target_vks);
+    if native_suppress::is_passthrough_binding(&button_id, Some(vk), &target_vks) {
         key_diag::emit_usb(
             &ctx.app,
             "ll",
-            Some(button_id),
+            Some(&button_id),
+            None,
+            Some(&event_id),
+            Some(true),
+            &target_vks,
+            &format!("LL 同键/未绑定透传 {button_id}"),
+        );
+        return;
+    }
+    if should_skip_duplicate_inject(&button_id) {
+        key_diag::emit_usb(
+            &ctx.app,
+            "ll",
+            Some(&button_id),
             None,
             Some(&event_id),
             Some(true),
@@ -240,7 +265,7 @@ pub fn on_ll_gate_keydown(vk: u16) {
         key_diag::emit_usb(
             &ctx.app,
             "ll",
-            Some(button_id),
+            Some(&button_id),
             None,
             Some(&event_id),
             Some(true),
@@ -317,6 +342,7 @@ pub fn start_t1_bridge(
 
     crate::bridges::xiaomi::special_keys::ensure_hook_for_capture();
     native_suppress::set_enabled(true);
+    sync_media_gates(&_config);
 
     if hid_injector::is_available() {
         log::info!("T1 WinUHid ready for key inject");
@@ -426,6 +452,11 @@ pub fn start_t1_bridge(
             return;
         }
 
+        if native_suppress::is_passthrough_binding(&button_id, native_vk, &target_vks) {
+            log::info!("T1 passthrough button={button_id} (identity/unbound, no inject)");
+            return;
+        }
+
         if should_skip_duplicate_inject(&button_id) {
             log::info!("T1 dedupe skip inject button={button_id} event={}", ev.event_id);
             let _ = app_for_cb.emit(
@@ -510,11 +541,40 @@ fn binding_vks(config: &DeviceConfig, button_id: &str) -> Vec<u16> {
     if button_id == "voice" {
         return resolve_voice_vks(config);
     }
-    match config.button_bindings.get(button_id) {
+    let vks = match config.button_bindings.get(button_id) {
         Some(KeyAction::SingleKey(vk)) => vec![*vk],
         Some(KeyAction::ComboKey(vks)) => vks.clone(),
         _ => Vec::new(),
+    };
+    if button_id == "mute" && vks.is_empty() {
+        return vec![0xAD];
     }
+    vks
+}
+
+fn sync_media_gates(config: &DeviceConfig) {
+    let vol_plus = binding_vks(config, "vol_plus");
+    let vol_minus = binding_vks(config, "vol_minus");
+    let mute = binding_vks(config, "mute");
+    native_suppress::refresh_media_gates_from_bindings(
+        Some(vol_plus.as_slice()).filter(|v| !v.is_empty()),
+        Some(vol_minus.as_slice()).filter(|v| !v.is_empty()),
+        Some(mute.as_slice()).filter(|v| !v.is_empty()),
+    );
+    let up = binding_vks(config, "up");
+    let down = binding_vks(config, "down");
+    let left = binding_vks(config, "left");
+    let right = binding_vks(config, "right");
+    let ok = binding_vks(config, "ok");
+    native_suppress::refresh_dpad_remap_gates(
+        Some(up.as_slice()).filter(|v| !v.is_empty()),
+        Some(down.as_slice()).filter(|v| !v.is_empty()),
+        Some(left.as_slice()).filter(|v| !v.is_empty()),
+        Some(right.as_slice()).filter(|v| !v.is_empty()),
+        Some(ok.as_slice()).filter(|v| !v.is_empty()),
+    );
+    let home = binding_vks(config, "home");
+    native_suppress::refresh_home_vk24_gate(Some(home.as_slice()).filter(|v| !v.is_empty()));
 }
 
 /// 与小米一致：button_bindings.voice 优先，其次 voice_hotkey
@@ -557,6 +617,7 @@ fn handle_button(
     let vks: Vec<u16> = match action {
         KeyAction::SingleKey(vk) => vec![*vk],
         KeyAction::ComboKey(vks) => vks.clone(),
+        KeyAction::None if button_id == "mute" => vec![0xAD],
         KeyAction::None => {
             let msg = format!("映射无效：{button_id} 为空");
             key_diag::emit_usb(app, "inject", Some(button_id), None, None, None, &[], &msg);
@@ -604,9 +665,10 @@ fn hold_ms_for(vks: &[u16]) -> u64 {
 }
 
 fn inject_mapped_keys(vks: &[u16], hold_ms: u64) -> bool {
-    let force_sendinput = native_suppress::held_intersects(vks);
+    let force_sendinput =
+        native_suppress::held_intersects(vks) || native_suppress::vks_need_sendinput(vks);
     let ok = if force_sendinput {
-        log::debug!("T1 map: SendInput+EXTRA_INFO (hold overlaps targets) vks={vks:?}");
+        log::debug!("T1 map: SendInput+EXTRA_INFO vks={vks:?}");
         native_suppress::allow_pass_vks(vks);
         let tapped = if vks.len() == 1 {
             tap_single_vk(vks[0], hold_ms)
