@@ -35,6 +35,8 @@ vite.config.ts.timestamp-*.mjs
 logs/
 语音效率及白屏优化.md
 bug修复.md
+# 本机双远端推送备忘（含个人仓库 URL）；禁止入库
+LOCAL_GIT_PUSH.md
 
 # Env & secrets
 .env
