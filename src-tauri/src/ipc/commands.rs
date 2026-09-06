@@ -59,8 +59,20 @@ pub async fn start_bridge(
 
     match bt {
         BridgeType::Xiaomi => start_xiaomi_bridge(app, &state, &config_manager).await,
-        BridgeType::T1 | BridgeType::Hanvon => {
-            // 其他设备后续接入；避免假成功
+        BridgeType::T1 => {
+            match crate::bridges::t1::runtime::start_t1_bridge(
+                app.clone(),
+                &state,
+                &config_manager,
+            ) {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    state.update_status(bt, BridgeStatus::Error(e.clone()));
+                    Err(e)
+                }
+            }
+        }
+        BridgeType::Hanvon => {
             let msg = format!("{bt} 连接逻辑尚未接入");
             state.update_status(bt, BridgeStatus::Error(msg.clone()));
             Err(msg)
@@ -222,9 +234,74 @@ pub async fn stop_bridge(
         if let Some(runtime) = app.try_state::<Arc<XiaomiRuntime>>() {
             runtime.request_stop();
         }
+    } else if bt == BridgeType::T1 {
+        crate::bridges::t1::runtime::stop_t1_bridge(&app, &state);
+        return Ok(());
     }
     state.update_status(bt, BridgeStatus::Disconnected);
     Ok(())
+}
+
+/// 启动 T1 蓝牙桥接（与 USB `start_bridge("t1")` 完全独立）
+#[tauri::command]
+pub async fn start_t1_ble_bridge(
+    app: AppHandle,
+    runtime: State<'_, Arc<crate::bridges::t1::ble_runtime::T1BleRuntime>>,
+) -> Result<(), String> {
+    crate::bridges::t1::ble_runtime::start_t1_ble_bridge(app, Arc::clone(&runtime))
+}
+
+/// 停止 T1 蓝牙桥接（不影响 USB）
+#[tauri::command]
+pub async fn stop_t1_ble_bridge(
+    app: AppHandle,
+    runtime: State<'_, Arc<crate::bridges::t1::ble_runtime::T1BleRuntime>>,
+) -> Result<(), String> {
+    crate::bridges::t1::ble_runtime::stop_t1_ble_bridge(&app, &runtime);
+    Ok(())
+}
+
+/// T1 蓝牙是否在跑
+#[tauri::command]
+pub async fn t1_ble_running(
+    runtime: State<'_, Arc<crate::bridges::t1::ble_runtime::T1BleRuntime>>,
+) -> Result<bool, String> {
+    Ok(crate::bridges::t1::ble_runtime::is_running(&runtime))
+}
+
+/// T1 BLE 主机状态（虚拟声卡 / WinUHid / L0 Search剥离 / ATVV / USB）
+#[tauri::command]
+pub async fn get_t1_ble_host_status(
+    app: AppHandle,
+) -> Result<crate::bridges::t1::ble_host::T1BleHostStatus, String> {
+    Ok(crate::bridges::t1::ble_host::host_status_now(&app))
+}
+
+/// T1 蓝牙专属 L0 HID Filter 状态
+#[tauri::command]
+pub async fn get_t1_hid_filter_status(
+) -> Result<crate::bridges::t1::t1_hid_filter_env::T1HidFilterEnvStatus, String> {
+    Ok(tokio::task::spawn_blocking(
+        crate::bridges::t1::t1_hid_filter_env::env_status,
+    )
+    .await
+    .map_err(|e| format!("t1 L0 status task: {e}"))?)
+}
+
+/// T1 蓝牙专属 L0：自动修复 / 安装 Search 剥离驱动（白名单仅 T1 BLE）
+#[tauri::command]
+pub async fn repair_t1_hid_filter(
+) -> Result<crate::bridges::t1::t1_hid_filter_env::T1HidFilterActionResult, String> {
+        Ok(tokio::task::spawn_blocking(crate::bridges::t1::t1_hid_filter_env::repair)
+            .await
+            .map_err(|e| format!("t1 L0 repair task: {e}"))??)
+}
+
+/// T1 BLE 语音电平快照
+#[tauri::command]
+pub async fn get_t1_ble_voice_meter(
+) -> Result<crate::bridges::t1::ble_voice_meter::T1BleVoiceMeterSnapshot, String> {
+    Ok(crate::bridges::t1::ble_voice_meter::current_snapshot())
 }
 
 /// 获取设备配置

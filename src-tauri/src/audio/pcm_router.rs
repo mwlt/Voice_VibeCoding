@@ -115,11 +115,32 @@ pub fn run_audio_router_cli(args: &[String]) -> i32 {
 fn resolve_cable_device() -> Result<(cpal::Device, cpal::SupportedStreamConfig, cpal::StreamConfig), String> {
     let host = cpal::default_host();
     let device = find_cable(&host)?;
-    let supported = device
-        .default_output_config()
-        .map_err(|e| format!("输出配置: {e}"))?;
+    // 优先 48k（与 16k→48k 上采样一致）；否则退回设备默认
+    let supported = preferred_output_config(&device)?;
     let stream_config = low_latency_stream_config(&supported);
     Ok((device, supported, stream_config))
+}
+
+fn preferred_output_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
+    use cpal::{SampleFormat, SampleRate};
+    if let Ok(configs) = device.supported_output_configs() {
+        let configs: Vec<_> = configs.collect();
+        for &fmt in &[SampleFormat::F32, SampleFormat::I16] {
+            for range in &configs {
+                if range.sample_format() != fmt {
+                    continue;
+                }
+                let min = range.min_sample_rate().0;
+                let max = range.max_sample_rate().0;
+                if min <= 48000 && 48000 <= max {
+                    return Ok(range.clone().with_sample_rate(SampleRate(48000)));
+                }
+            }
+        }
+    }
+    device
+        .default_output_config()
+        .map_err(|e| format!("输出配置: {e}"))
 }
 
 fn build_stream_for(
@@ -172,16 +193,29 @@ fn open_held_cable(
     } else {
         None
     };
+    #[cfg(target_os = "windows")]
+    {
+        // 1.6.7 后本机曾把进程在音量混合器静音；开流时解除，避免 cpal「写成功但无声」。
+        match crate::audio::session_volume::unmute_current_process_sessions() {
+            Ok(s) => log::info!("AUDIO ROUTER session volume: {s}"),
+            Err(e) => log::warn!("AUDIO ROUTER session unmute failed: {e}"),
+        }
+    }
     log::info!(
-        "AUDIO ROUTER CABLE HELD device={} play={} format={:?} buffer={:?}",
+        "AUDIO ROUTER CABLE HELD device={} play={} rate={}Hz ch={} format={:?} buffer={:?}",
         name,
         play_now,
+        stream_config.sample_rate.0,
+        stream_config.channels,
         supported.sample_format(),
         stream_config.buffer_size
     );
     eprintln!(
-        "AUDIO ROUTER CABLE HELD device={} play={}",
-        name, play_now
+        "AUDIO ROUTER CABLE HELD device={} play={} rate={}Hz ch={}",
+        name,
+        play_now,
+        stream_config.sample_rate.0,
+        stream_config.channels
     );
     Ok(HeldCable {
         device,
@@ -206,6 +240,13 @@ fn ensure_stream_playing(
         buffer,
         running,
     )?);
+    #[cfg(target_os = "windows")]
+    {
+        match crate::audio::session_volume::unmute_current_process_sessions() {
+            Ok(s) => log::info!("AUDIO ROUTER session volume: {s}"),
+            Err(e) => log::warn!("AUDIO ROUTER session unmute failed: {e}"),
+        }
+    }
     log::info!("AUDIO ROUTER STREAM PLAY");
     eprintln!("AUDIO ROUTER STREAM PLAY");
     Ok(())
@@ -233,18 +274,71 @@ fn run_router(port: u16) -> Result<(), String> {
     let mode = audio_lifecycle();
     let buffer = Arc::new(Mutex::new(VecDeque::<i16>::new()));
     let running = Arc::new(AtomicBool::new(true));
+    // 仅 WinMM 回退路径使用；cpal（v1.6.7 默认）不依赖此门控。
+    let session_live = Arc::new(AtomicBool::new(false));
     let mut held: Option<HeldCable> = None;
     let mut idle_deadline: Option<Instant> = None;
     let mut last_pcm_at: Option<Instant> = None;
 
-    match mode {
-        AudioLifecycle::AlwaysPlay => {
-            held = Some(open_held_cable(true, &buffer, &running)?);
+    // 默认对齐 v1.6.7：cpal 回调连续时钟。本机 cpal 无声时再设
+    // REMOTE_BRIDGE_AUDIO_OUTPUT=winmm|wasapi_push。
+    #[cfg(target_os = "windows")]
+    let push_out = {
+        let backend = std::env::var("REMOTE_BRIDGE_AUDIO_OUTPUT")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        match backend.as_str() {
+            "winmm" => match crate::audio::winmm_cable::spawn_winmm_writer(
+                Arc::clone(&buffer),
+                Arc::clone(&running),
+                Arc::clone(&session_live),
+            ) {
+                Ok(()) => {
+                    log::info!("AUDIO ROUTER output=winmm (env override)");
+                    true
+                }
+                Err(e) => {
+                    log::warn!("AUDIO ROUTER winmm failed ({e}); fallback cpal");
+                    false
+                }
+            },
+            "wasapi_push" | "wasapi" | "push" => {
+                match crate::audio::wasapi_push::spawn_wasapi_writer(
+                    Arc::clone(&buffer),
+                    Arc::clone(&running),
+                ) {
+                    Ok(()) => {
+                        log::info!("AUDIO ROUTER output=wasapi_push (env override)");
+                        true
+                    }
+                    Err(e) => {
+                        log::warn!("AUDIO ROUTER wasapi_push failed ({e}); fallback cpal");
+                        false
+                    }
+                }
+            }
+            _ => {
+                log::info!("AUDIO ROUTER output=cpal (v1.6.7 default)");
+                false
+            }
         }
-        AudioLifecycle::HoldDevice => {
-            held = Some(open_held_cable(false, &buffer, &running)?);
+    };
+    #[cfg(not(target_os = "windows"))]
+    let push_out = false;
+
+    let wasapi_push = push_out;
+
+    if !wasapi_push {
+        match mode {
+            AudioLifecycle::AlwaysPlay => {
+                held = Some(open_held_cable(true, &buffer, &running)?);
+            }
+            AudioLifecycle::HoldDevice => {
+                held = Some(open_held_cable(false, &buffer, &running)?);
+            }
+            AudioLifecycle::Deferred => {}
         }
-        AudioLifecycle::Deferred => {}
     }
 
     let sock = UdpSocket::bind(format!("127.0.0.1:{port}"))
@@ -252,19 +346,28 @@ fn run_router(port: u16) -> Result<(), String> {
     sock.set_read_timeout(Some(Duration::from_millis(200)))
         .map_err(|e| e.to_string())?;
     log::info!(
-        "AUDIO ROUTER READY pcm=127.0.0.1:{port} lifecycle={}",
-        lifecycle_label(mode)
+        "AUDIO ROUTER READY pcm=127.0.0.1:{port} lifecycle={} push={}",
+        lifecycle_label(mode),
+        wasapi_push
     );
     eprintln!(
-        "AUDIO ROUTER READY pcm=127.0.0.1:{port} lifecycle={}",
-        lifecycle_label(mode)
+        "AUDIO ROUTER READY pcm=127.0.0.1:{port} lifecycle={} push={}",
+        lifecycle_label(mode),
+        wasapi_push
     );
 
+    // 对齐 v1.6.7：约 60ms@48k。过大缓冲会让输入法「等一会才出字」。
     const MAX_BUFFER_SAMPLES: usize = 2_880;
+    let mut pcm_packets: u64 = 0;
+    let mut overflow_drops: u64 = 0;
 
     let ensure_session_output = |held: &mut Option<HeldCable>,
                                 idle_deadline: &mut Option<Instant>|
      -> Result<(), String> {
+        if wasapi_push {
+            *idle_deadline = None;
+            return Ok(());
+        }
         *idle_deadline = None;
         match mode {
             AudioLifecycle::AlwaysPlay => {
@@ -292,6 +395,10 @@ fn run_router(port: u16) -> Result<(), String> {
     };
 
     let on_session_end = |idle_deadline: &mut Option<Instant>| {
+        if wasapi_push {
+            *idle_deadline = None;
+            return;
+        }
         match mode {
             AudioLifecycle::AlwaysPlay => {
                 *idle_deadline = None;
@@ -307,6 +414,10 @@ fn run_router(port: u16) -> Result<(), String> {
                             idle_deadline: &mut Option<Instant>,
                             last_pcm_at: &mut Option<Instant>,
                             reason: &str| {
+        if wasapi_push {
+            *idle_deadline = None;
+            return;
+        }
         match mode {
             AudioLifecycle::AlwaysPlay => {
                 *idle_deadline = None;
@@ -335,16 +446,21 @@ fn run_router(port: u16) -> Result<(), String> {
                     let _ = sock.send_to(b"PONG", peer);
                 } else if data == b"CLEAR" {
                     buffer.lock().clear();
+                    session_live.store(true, Ordering::Release);
+                    // 对齐 v1.6.7：只清缓冲并确保在播，不拆 cpal 流（拆流=冷启动、出字变慢）。
                     if let Err(e) = ensure_session_output(&mut held, &mut idle_deadline) {
                         eprintln!("AUDIO ROUTER session open failed: {e}");
+                        log::warn!("AUDIO ROUTER session open failed: {e}");
                     }
                     last_pcm_at = Some(Instant::now());
                 } else if data == b"END" {
+                    session_live.store(false, Ordering::Release);
                     buffer.lock().clear();
                     on_session_end(&mut idle_deadline);
                 } else if data == b"STOP" || data.is_empty() {
                     // ignore
                 } else if n % 2 == 0 {
+                    session_live.store(true, Ordering::Release);
                     if let Err(e) = ensure_session_output(&mut held, &mut idle_deadline) {
                         eprintln!("AUDIO ROUTER session open failed: {e}");
                         continue;
@@ -354,10 +470,33 @@ fn run_router(port: u16) -> Result<(), String> {
                     for chunk in data.chunks_exact(2) {
                         samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
                     }
+                    pcm_packets = pcm_packets.wrapping_add(1);
+                    if pcm_packets == 1 || pcm_packets % 200 == 0 {
+                        let mut sum = 0.0f64;
+                        for &s in &samples {
+                            let v = s as f64;
+                            sum += v * v;
+                        }
+                        let rms = ((sum / samples.len().max(1) as f64).sqrt() / 32768.0)
+                            .clamp(0.0, 1.0);
+                        log::info!(
+                            "AUDIO ROUTER PCM packets={pcm_packets} samples={} rms={rms:.4}",
+                            samples.len()
+                        );
+                    }
                     let mut b = buffer.lock();
                     b.extend(samples);
+                    let mut dropped = 0usize;
                     while b.len() > MAX_BUFFER_SAMPLES {
                         b.pop_front();
+                        dropped += 1;
+                    }
+                    if dropped > 0 {
+                        overflow_drops = overflow_drops.wrapping_add(dropped as u64);
+                        log::warn!(
+                            "AUDIO ROUTER buffer overflow drop_samples={dropped} total_dropped={overflow_drops} queued={}",
+                            b.len()
+                        );
                     }
                 }
             }
@@ -376,7 +515,7 @@ fn run_router(port: u16) -> Result<(), String> {
                 buffer.lock().clear();
                 apply_idle_close(&mut held, &mut idle_deadline, &mut last_pcm_at, "end_idle");
             }
-        } else if mode != AudioLifecycle::AlwaysPlay {
+        } else if !wasapi_push && mode != AudioLifecycle::AlwaysPlay {
             let playing = held.as_ref().and_then(|h| h.stream.as_ref()).is_some();
             if playing {
                 if let Some(t) = last_pcm_at {
@@ -575,6 +714,14 @@ fn create_kill_on_close_job() -> Result<windows::Win32::Foundation::HANDLE, Stri
         }
         Ok(job)
     }
+}
+
+/// 若路由子进程已在跑则复用，避免每次语音/会话把 CABLE 链路冷启动一遍。
+pub fn ensure_audio_router_process() -> Result<(), String> {
+    if audio_router_process_alive() {
+        return Ok(());
+    }
+    spawn_audio_router_process()
 }
 
 /// 主进程：拉起 audio router 子进程（对齐 Python XiaomiWorkers audio 角色）

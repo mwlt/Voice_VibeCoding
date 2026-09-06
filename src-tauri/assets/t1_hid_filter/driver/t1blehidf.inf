@@ -1,0 +1,64 @@
+; T1 BLE-only HID lower filter — strip AC Search (0x0221).
+; NEVER bind USB T1 (VID_1915&PID_1025), Xiaomi (VID_2717), WinUHid, or class-wide HID.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = HIDClass
+ClassGuid   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+Provider    = %Provider%
+DriverVer   = 09/06/2026,1.0.0.0
+CatalogFile = t1blehidf.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[Manufacturer]
+%Provider% = T1Ble,NTamd64
+
+; Exact Hardware IDs only (BLE HOGP). Install script also filters by allowlist.
+[T1Ble.NTamd64]
+%T1Ble.DeviceDesc% = T1BleFilter_Install, HID\VID_1620&PID_0407
+%T1Ble.DeviceDesc% = T1BleFilter_Install, HID\VID_1620A&PID_0407
+%T1Ble.DeviceDesc% = T1BleFilter_Install, HID\VID_01620A&PID_0407
+%T1Ble.DeviceDesc% = T1BleFilter_Install, HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&01620A_PID&0407
+
+[T1BleFilter_Install.NT]
+Include   = input.inf
+Needs     = HID_INST.NT
+CopyFiles = T1BleFilter.CopyFiles
+
+[T1BleFilter_Install.NT.HW]
+AddReg = T1BleFilter.HW.AddReg
+
+[T1BleFilter.HW.AddReg]
+; Lower filter so read completions can be rewritten before hidclass consumer path.
+HKR,,"LowerFilters",0x00010008,t1blehidf
+
+[T1BleFilter_Install.NT.Services]
+Include = input.inf
+Needs   = HID_INST.NT.Services
+AddService = t1blehidf,,T1BleFilter_Service_Inst
+
+[T1BleFilter_Service_Inst]
+DisplayName    = %T1Ble.ServiceDesc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %12%\t1blehidf.sys
+LoadOrderGroup = extended base
+
+[T1BleFilter.CopyFiles]
+t1blehidf.sys
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[SourceDisksFiles]
+t1blehidf.sys = 1
+
+[Strings]
+Provider           = "Voice VibeCoding"
+T1Ble.DeviceDesc   = "T1 BLE Remote HID (AC Search strip filter)"
+T1Ble.ServiceDesc  = "T1 BLE HID Filter (t1blehidf)"
+DiskName           = "T1 BLE HID Filter"

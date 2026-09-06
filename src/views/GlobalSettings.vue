@@ -37,10 +37,7 @@ async function onSettingChange() {
   const ok = await globalSettings.save();
   if (ok) {
     showSavedToast();
-    if (
-      settings.value.hide_dev_menus &&
-      (route.path === "/t1" || route.path === "/v60")
-    ) {
+    if (settings.value.hide_dev_menus && route.path === "/v60") {
       router.push("/xiaomi");
     }
   } else {
@@ -159,7 +156,7 @@ async function checkUpdate() {
           <div class="setting-info">
             <span class="setting-label">隐藏开发中项目菜单</span>
             <span class="setting-desc"
-              >开启后隐藏顶部 T1、V60 菜单；关闭则显示</span
+              >开启后隐藏顶部 V60 等开发中项目菜单；T1 始终显示</span
             >
           </div>
           <label class="toggle">

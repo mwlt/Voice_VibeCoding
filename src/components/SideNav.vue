@@ -29,7 +29,7 @@ function statusClass(status: BridgeStatus): string {
 
 const allDeviceItems = [
   { path: "/xiaomi", label: "小米2 pro", type: "xiaomi" as const },
-  { path: "/t1", label: "T1 [开发中]", type: "t1" as const, dev: true },
+  { path: "/t1", label: "T1", type: "t1" as const },
   { path: "/v60", label: "V60 [开发中]", type: "hanvon" as const, dev: true },
 ];
 

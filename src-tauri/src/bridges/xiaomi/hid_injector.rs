@@ -281,6 +281,32 @@ pub fn tap_vks(vks: &[u16], hold_ms: u64) -> bool {
     true
 }
 
+/// 语音多修饰键点按：**单报告**同时按下/抬起。
+///
+/// 普通 `tap_vks`→`press` 会对 Win+Alt 先单独发 Win（~4ms），系统当成点 Win → 开始菜单 +
+/// Alt 菜单态残留，表现为「第一次漏 Alt、整机卡死」。语音路径必须走本函数。
+pub fn tap_vks_atomic(vks: &[u16], hold_ms: u64) -> bool {
+    if vks.is_empty() || !ensure_init() {
+        return false;
+    }
+    let hold = hold_ms.clamp(20, 1000);
+    if let Err(e) = press_single(vks) {
+        log::warn!("WinUHid press_single failed: {e}");
+        return false;
+    }
+    std::thread::sleep(Duration::from_millis(hold));
+    if let Err(e) = release_single(vks) {
+        log::warn!("WinUHid release_single failed: {e}");
+        let _ = release_all();
+        return false;
+    }
+    // 再发一次全零，防止 modifier 位残留
+    if let Err(e) = release_all() {
+        log::warn!("WinUHid release_all after atomic tap failed: {e}");
+    }
+    true
+}
+
 const MOD_STAGGER_MS: u64 = 4;
 
 fn press_keyboard(dev: &Devices, vks: &[u16]) -> Result<(), String> {

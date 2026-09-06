@@ -1,0 +1,30 @@
+T1 蓝牙专属 Search 剥离驱动（L0）
+================================
+
+作用
+----
+仅对 T1 蓝牙遥控器（HardwareId 含 dev_vid&01620a_pid&0407）安装内核过滤驱动，
+在报告进系统前清除 AC Search（0x0221 / 02-21-02），避免弹出 Windows 搜索。
+
+明确不绑定
+----------
+- USB 接收器 VID_1915&PID_1025
+- 小米遥控器 VID_2717
+- WinUHid 虚拟键盘
+- 其它 HID / 键盘
+
+安装
+----
+1. 需已用 WDK 编译出 driver\t1blehidf.sys（或使用已签名发布包）
+2. 右键「以管理员身份运行」Run-Install.cmd
+   或在应用 T1 页点「自动修复 Search 剥离」
+3. 若提示测试签名：管理员执行 bcdedit /set testsigning on 后重启
+
+状态
+----
+Run-Status.cmd 或应用状态行「Search剥离」
+
+卸载
+----
+管理员 PowerShell：
+  .\install-t1-hid-filter.ps1 -Mode Uninstall

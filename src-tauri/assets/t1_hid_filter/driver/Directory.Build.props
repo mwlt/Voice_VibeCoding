@@ -1,0 +1,28 @@
+<Project>
+  <!-- WDK via NuGet — no system WDK MSI required.
+       Do NOT gate Imports on $(Platform): Directory.Build.props evaluates before Platform is set. -->
+  <PropertyGroup>
+    <WdkNugetVersion>10.0.26100.6584</WdkNugetVersion>
+  </PropertyGroup>
+  <Import Project="$(MSBuildThisFileDirectory)packages\Microsoft.Windows.WDK.x64.$(WdkNugetVersion)\build\native\Microsoft.Windows.WDK.x64.props"
+          Condition="Exists('$(MSBuildThisFileDirectory)packages\Microsoft.Windows.WDK.x64.$(WdkNugetVersion)\build\native\Microsoft.Windows.WDK.x64.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)packages\Microsoft.Windows.SDK.CPP.x64.$(WdkNugetVersion)\build\native\Microsoft.Windows.SDK.CPP.x64.props"
+          Condition="Exists('$(MSBuildThisFileDirectory)packages\Microsoft.Windows.SDK.CPP.x64.$(WdkNugetVersion)\build\native\Microsoft.Windows.SDK.CPP.x64.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)packages\Microsoft.Windows.SDK.CPP.$(WdkNugetVersion)\build\native\Microsoft.Windows.SDK.CPP.props"
+          Condition="Exists('$(MSBuildThisFileDirectory)packages\Microsoft.Windows.SDK.CPP.$(WdkNugetVersion)\build\native\Microsoft.Windows.SDK.CPP.props')" />
+  <PropertyGroup>
+    <!-- Match NuGet kit version so MSBuild does not hunt a system SDK install. -->
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <TargetPlatformVersion>10.0.26100.0</TargetPlatformVersion>
+    <DDKPlatform Condition="'$(Platform)' == 'x64' or '$(Platform)' == ''">x64</DDKPlatform>
+    <!-- 32-bit MSBuild sets Processor_Architecture=x86 and would look for WDKBinRoot_x86
+         tools that the WDK NuGet package does not ship. Force x64 tool paths. -->
+    <InfToolPath>$(MSBuildThisFileDirectory)packages\Microsoft.Windows.WDK.x64.$(WdkNugetVersion)\c\bin\10.0.26100.0\x64\</InfToolPath>
+    <!-- Local NuGet build: skip Inf2Cat (no package layout / .cat required for test install). -->
+    <EnableInf2cat>false</EnableInf2cat>
+    <Inf2Cat>false</Inf2Cat>
+  </PropertyGroup>
+  <!-- NuGet WDK does not auto-import DesignTime WDK.props (sets KM_IncludePath / DDK_LIB_PATH). -->
+  <Import Project="$(WDKContentRoot)DesignTime\CommonConfiguration\Neutral\WDK\$(WindowsTargetPlatformVersion)\WDK.props"
+          Condition="'$(WDKContentRoot)' != '' and Exists('$(WDKContentRoot)DesignTime\CommonConfiguration\Neutral\WDK\$(WindowsTargetPlatformVersion)\WDK.props')" />
+</Project>

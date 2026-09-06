@@ -28,6 +28,35 @@ const VK_RCONTROL: u32 = 0xA3;
 const VK_LMENU: u32 = 0xA4;
 const VK_RMENU: u32 = 0xA5;
 
+/// LLKHF_EXTENDED：右 Alt / 右 Ctrl 等扩展键。右 Alt 常报成 VK_MENU/VK_LMENU，需靠此位还原。
+const LLKHF_EXTENDED: u32 = 0x01;
+
+/// 按 LL flags 区分左右修饰键，避免录入「右 Alt → 左 Alt」。
+pub fn canonicalize_side_vk(vk: u32, flags: u32) -> u32 {
+    let extended = (flags & LLKHF_EXTENDED) != 0;
+    match vk {
+        VK_MENU | VK_LMENU => {
+            if extended {
+                VK_RMENU
+            } else {
+                VK_LMENU
+            }
+        }
+        VK_RMENU => VK_RMENU,
+        VK_CONTROL | VK_LCONTROL => {
+            if extended {
+                VK_RCONTROL
+            } else {
+                VK_LCONTROL
+            }
+        }
+        VK_RCONTROL => VK_RCONTROL,
+        VK_SHIFT | VK_LSHIFT => VK_LSHIFT, // 右 Shift 通常无 EXTENDED，靠扫描码；此处保持左
+        VK_RSHIFT => VK_RSHIFT,
+        other => other,
+    }
+}
+
 fn is_modifier(vk: u32) -> bool {
     matches!(
         vk,
@@ -68,10 +97,11 @@ pub fn normalize_chord(keys: &[u32]) -> Vec<u32> {
     } else {
         None
     };
-    let alt = if set.contains(&VK_LMENU) {
-        Some(VK_LMENU)
-    } else if set.contains(&VK_RMENU) {
+    // 侧别明确时优先保留；仅有通用 VK_MENU 时默认左（无 flags 可辨）
+    let alt = if set.contains(&VK_RMENU) {
         Some(VK_RMENU)
+    } else if set.contains(&VK_LMENU) {
+        Some(VK_LMENU)
     } else if set.contains(&VK_MENU) {
         Some(VK_LMENU)
     } else {
@@ -456,8 +486,8 @@ fn commit_consumer_vk(vk: u32) {
 }
 
 /// 由常驻 `special_keys` LL 钩子最前调用。true = 已吞掉，调用方必须 `return LRESULT(1)`。
-/// 在回调内用 vk/wParam 识别和弦；**禁止** GetAsyncKeyState（吞键后状态不更新）。
-pub fn try_swallow_capture_key(vk: u32, wparam: u32, is_injected: bool) -> bool {
+/// 在回调内用 vk/wParam/flags 识别和弦；**禁止** GetAsyncKeyState（吞键后状态不更新）。
+pub fn try_swallow_capture_key(vk: u32, wparam: u32, is_injected: bool, flags: u32) -> bool {
     if is_injected || !SWALLOW_ACTIVE.load(Ordering::SeqCst) {
         return false;
     }
@@ -473,6 +503,8 @@ pub fn try_swallow_capture_key(vk: u32, wparam: u32, is_injected: bool) -> bool 
         return true;
     }
 
+    let vk = canonicalize_side_vk(vk, flags);
+
     // 必须记录每个物理键：丢事件会丢 Win → 只录到 Ctrl，并提前关吞键漏出 Win/语音
     track_blocked_vk(vk, is_down);
     if is_up {
@@ -485,7 +517,7 @@ pub fn try_swallow_capture_key(vk: u32, wparam: u32, is_injected: bool) -> bool 
     feed_capture_key(vk, is_down);
 
     if !SWALLOW_HIT_LOGGED.swap(true, Ordering::SeqCst) {
-        log::info!("Shortcut capture swallow vk=0x{vk:02X} wp=0x{wparam:X}");
+        log::info!("Shortcut capture swallow vk=0x{vk:02X} wp=0x{wparam:X} flags=0x{flags:X}");
     }
     true
 }
@@ -1164,12 +1196,22 @@ mod tests {
     #[test]
     fn try_swallow_blocks_syskeydown_when_active() {
         set_swallow_active(false);
-        assert!(!try_swallow_capture_key(0x20, 0x0104, false));
+        assert!(!try_swallow_capture_key(0x20, 0x0104, false, 0));
         // 无 engine/runtime 时仍应吞键
         set_swallow_active(true);
-        assert!(try_swallow_capture_key(0x20, 0x0104, false));
-        assert!(!try_swallow_capture_key(0x53, 0x0104, true));
+        assert!(try_swallow_capture_key(0x20, 0x0104, false, 0));
+        assert!(!try_swallow_capture_key(0x53, 0x0104, true, 0));
         set_swallow_active(false);
+    }
+
+    #[test]
+    fn right_alt_extended_flag_becomes_rmenu() {
+        assert_eq!(canonicalize_side_vk(VK_MENU, LLKHF_EXTENDED), VK_RMENU);
+        assert_eq!(canonicalize_side_vk(VK_LMENU, LLKHF_EXTENDED), VK_RMENU);
+        assert_eq!(canonicalize_side_vk(VK_MENU, 0), VK_LMENU);
+        assert_eq!(canonicalize_side_vk(VK_RMENU, 0), VK_RMENU);
+        // normalize 优先右 Alt，避免与左 Alt 并存时被压成左
+        assert_eq!(normalize_chord(&[VK_LMENU, VK_RMENU]), vec![VK_RMENU]);
     }
 
     #[test]

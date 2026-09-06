@@ -103,7 +103,7 @@ pub struct DeviceConfig {
 }
 
 fn default_gain_db() -> f32 {
-    10.0
+    18.0
 }
 fn default_retry_delay() -> f32 {
     3.0
@@ -150,7 +150,7 @@ pub struct GlobalSettings {
     /// 启动后最小化到托盘（不显示主窗口）
     #[serde(default)]
     pub start_minimized_to_tray: bool,
-    /// 隐藏开发中项目菜单（T1 / V60）
+    /// 隐藏开发中项目菜单（V60）
     #[serde(default = "default_hide_dev_menus")]
     pub hide_dev_menus: bool,
     /// 用户忽略的更新版本（直到更高版本再提示）
@@ -304,6 +304,10 @@ impl ConfigManager {
             config.gain_db =
                 crate::bridges::xiaomi::voice_gain::normalize_gain_db(config.gain_db);
         }
+        if device == "t1" {
+            config.gain_db =
+                crate::bridges::xiaomi::voice_gain::normalize_gain_db(config.gain_db);
+        }
         let path = self.device_config_path(device);
         let tmp_path = path.with_extension("json.tmp");
 
@@ -324,7 +328,7 @@ impl ConfigManager {
             format!("替换配置文件失败: {}", e)
         })?;
 
-        if device == "xiaomi" {
+        if device == "xiaomi" || device == "t1" {
             crate::bridges::xiaomi::voice_gain::set_gain_db(config.gain_db);
         }
 
@@ -406,7 +410,7 @@ impl ConfigManager {
                 voice_hotkey: Some(vec!["leftctrl".into(), "leftwin".into()]),
                 trigger_mode: TriggerMode::Toggle,
                 bluetooth_address: None,
-                gain_db: 10.0,
+                gain_db: 18.0,
                 retry_delay: 3.0,
                 voice_shortcut_enabled: true,
                 tv_action_ready_delay: 2.0,
@@ -417,8 +421,9 @@ impl ConfigManager {
             "t1" => DeviceConfig {
                 button_aliases: Self::t1_button_aliases(),
                 button_bindings: Self::t1_default_bindings(),
-                voice_hotkey: Some(vec!["rightalt".into()]),
-                trigger_mode: TriggerMode::Hold,
+                // 对齐 Python T1 standalone：Left Shift + K
+                voice_hotkey: Some(vec!["leftshift".into(), "k".into()]),
+                trigger_mode: TriggerMode::Toggle,
                 bluetooth_address: None,
                 ..DeviceConfig::new()
             },
@@ -500,24 +505,12 @@ impl ConfigManager {
         m
     }
 
-    // ---- T1 遥控器默认按键 ----
+    // ---- T1 遥控器默认按键（别名单一来源：bridges::t1::config）----
     fn t1_button_aliases() -> HashMap<String, String> {
-        let mut m = HashMap::new();
-        m.insert("power".into(), "电源".into());
-        m.insert("up".into(), "上".into());
-        m.insert("down".into(), "下".into());
-        m.insert("left".into(), "左".into());
-        m.insert("right".into(), "右".into());
-        m.insert("ok".into(), "确定".into());
-        m.insert("delete".into(), "删除".into());
-        m.insert("voice".into(), "语音".into());
-        m.insert("mute".into(), "静音".into());
-        m.insert("home".into(), "主页".into());
-        m.insert("mouse".into(), "鼠标".into());
-        m.insert("menu".into(), "菜单".into());
-        m.insert("vol_plus".into(), "音量+".into());
-        m.insert("vol_minus".into(), "音量-".into());
-        m
+        crate::bridges::t1::config::default_button_aliases()
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     fn t1_default_bindings() -> HashMap<String, KeyAction> {
@@ -650,6 +643,21 @@ mod tests {
         let config = ConfigManager::default_config_for("t1");
         assert_eq!(config.button_aliases.len(), 14);
         assert!(config.button_bindings.contains_key("ok"));
+
+        // 与前端 T1_BUTTON_IDS / bridges::t1::T1Button::to_id 契约对齐
+        let expected = [
+            "power", "up", "down", "left", "right", "ok", "delete", "voice", "mute",
+            "home", "mouse", "menu", "vol_plus", "vol_minus",
+        ];
+        for id in expected {
+            assert!(
+                config.button_aliases.contains_key(id),
+                "missing T1 alias: {id}"
+            );
+        }
+        assert!(!config.button_aliases.contains_key("mic"));
+        assert!(!config.button_aliases.contains_key("back"));
+        assert!(!config.button_aliases.contains_key("volume_up"));
     }
 
     #[test]

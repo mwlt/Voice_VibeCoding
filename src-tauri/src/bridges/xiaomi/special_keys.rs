@@ -269,12 +269,62 @@ fn hook_loop() {
         let up = msg == 0x0101 || msg == 0x0105;
         let tap_ready = HID_TAP_READY.load(Ordering::Acquire);
 
-        // 快捷键录入：最优先（含嵌套路径）
-        if crate::bridges::shared::shortcut_capture::try_swallow_capture_key(vk, msg, our_inject) {
+        // 快捷键录入：最优先（含嵌套路径）；flags 用于区分右 Alt / 右 Ctrl
+        if crate::bridges::shared::shortcut_capture::try_swallow_capture_key(
+            vk, msg, our_inject, flags,
+        ) {
             return LRESULT(1);
         }
         if crate::bridges::shared::shortcut_capture::is_swallow_active() {
             return CallNextHookEx(hook, code, wparam, lparam);
+        }
+
+        // T1 键盘/媒体键闸门：LL-first 吞掉遥控侧键原生功能（不超时回放）
+        // 注意：只豁免 our_inject（EXTRA_INFO）。HOGP 常带 LLKHF_INJECTED，若当注入放行会漏 0xAA。
+        if down || up {
+            crate::bridges::t1::native_suppress::sweep_expired_pending();
+            if crate::bridges::t1::native_suppress::should_suppress_native(
+                vk as u16,
+                our_inject,
+                down,
+            ) {
+                // 仅闸门侧效应键（Apps / Browser Search/Home）在 Raw 丢按下时补映射。
+                // hold-suppress 的方向键等：只吞不补，避免实体同键变成遥控映射。
+                if down && crate::bridges::t1::native_suppress::is_gate_vk(vk as u16) {
+                    crate::bridges::t1::runtime::on_ll_gate_keydown(vk as u16);
+                    crate::bridges::t1::ble_keys::on_ll_gate_keydown(vk as u16);
+                }
+                if vk == 0xAA {
+                    log::info!(
+                        "T1 LL swallow BrowserSearch vk=0xAA down={down} llkhf_injected={}",
+                        (flags & 0x10) != 0
+                    );
+                    if down {
+                        crate::bridges::t1::native_suppress::on_browser_search_ll_swallowed();
+                    }
+                } else if vk == 0xAC {
+                    log::info!(
+                        "T1 LL swallow BrowserHome vk=0xAC down={down} llkhf_injected={}",
+                        (flags & 0x10) != 0
+                    );
+                    if down {
+                        crate::bridges::t1::native_suppress::on_ac_home_hid_seen();
+                    }
+                } else if vk == 0x5D {
+                    log::info!(
+                        "T1 LL swallow Apps/Menu vk=0x5D down={down} llkhf_injected={}",
+                        (flags & 0x10) != 0
+                    );
+                } else {
+                    log::debug!("T1 native gate swallow vk=0x{vk:02X} down={down}");
+                }
+                return LRESULT(1);
+            }
+            // 语音 Hold 闩锁会一直按着右 Alt：实体键盘按键变成 Alt+x。
+            // 检测到真实键盘非修饰键时结束闩锁并松开 Alt。
+            if down && !injected && !our_inject {
+                crate::bridges::t1::runtime::maybe_end_voice_latch_on_physical_key(vk as u16);
+            }
         }
 
         // 重叠 bump：新旧钩子同 proc。旧实现此处一刀切转发 → F5 抑制真空。

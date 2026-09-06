@@ -34,7 +34,10 @@
     "resources": [
       "assets/xiaomi/*",
       "assets/winuhid/*",
-      "assets/winuhid/driver/*"
+      "assets/winuhid/driver/*",
+      "assets/t1_hid_filter/*",
+      "assets/t1_hid_filter/driver/*",
+      "assets/t1_hid_filter/driver/src/*"
     ],
     "icon": [
       "icons/32x32.png",

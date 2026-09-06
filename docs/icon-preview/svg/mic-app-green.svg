@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- App / desktop: squircle fill + white mic, edge-to-edge -->
+  <defs>
+    <clipPath id="sq">
+      <rect x="0" y="0" width="64" height="64" rx="14"/>
+    </clipPath>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#12B76A"/>
+  <g fill="#FFFFFF" clip-path="url(#sq)">
+    <rect x="22" y="8" width="20" height="32" rx="10"/>
+    <path d="
+      M 14 30
+      A 18 18 0 0 0 50 30
+      A 5 5 0 0 0 40 30
+      A 8 8 0 0 1 24 30
+      A 5 5 0 0 0 14 30
+      Z"/>
+  </g>
+</svg>

@@ -15,6 +15,7 @@ use std::fs::File;
 use std::io::copy;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub const DRIVER_ZIP_NAME: &str = "VBCABLE_Driver_Pack45.zip";
@@ -377,15 +378,20 @@ fn humanize_script_result(raw: &str, ready: bool, needs_reboot: bool) -> String 
 }
 
 fn run_configure_script(mode: &str, zip: &Path) -> Result<VoiceEnvActionResult, String> {
-    run_configure_script_ex(mode, zip, false)
+    run_configure_script_ex(mode, Some(zip), false)
 }
 
-fn run_configure_script_ex(mode: &str, zip: &Path, force: bool) -> Result<VoiceEnvActionResult, String> {
+fn run_configure_script_ex(
+    mode: &str,
+    zip: Option<&Path>,
+    force: bool,
+) -> Result<VoiceEnvActionResult, String> {
     let script = find_configure_script().ok_or_else(|| "未找到 configure-xiaomi-audio.ps1".to_string())?;
     let app_path = app_path_for_script();
     log::info!(
         "XIAOMI VOICE ENV: run script mode={mode} force={force} zip={} app={}",
-        zip.display(),
+        zip.map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(none)".into()),
         app_path.display()
     );
 
@@ -402,9 +408,11 @@ fn run_configure_script_ex(mode: &str, zip: &Path, force: bool) -> Result<VoiceE
         mode.to_string(),
         "-AppPath".into(),
         app_path.display().to_string(),
-        "-DriverZipPath".into(),
-        zip.display().to_string(),
     ];
+    if let Some(zip) = zip {
+        args.push("-DriverZipPath".into());
+        args.push(zip.display().to_string());
+    }
     if force {
         args.push("-Force".into());
     }
@@ -478,6 +486,44 @@ fn run_configure_script_ex(mode: &str, zip: &Path, force: bool) -> Result<VoiceE
     })
 }
 
+/// 语音键按下：异步把默认麦设为 CABLE Output，并取消静音、拉满 CABLE 两端音量。
+pub fn ensure_cable_mic_for_voice_async() {
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+
+    {
+        let mut last = LAST.lock();
+        if let Some(t) = *last {
+            if t.elapsed() < Duration::from_secs(8) {
+                return;
+            }
+        }
+        *last = Some(Instant::now());
+    }
+    if BUSY
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    std::thread::spawn(|| {
+        let result = ensure_cable_mic_for_voice();
+        BUSY.store(false, Ordering::SeqCst);
+        match result {
+            Ok(r) => {
+                log::info!("XIAOMI VOICE EnsureMic: {}", r.message);
+                // 不在此处 respawn router：会打断正在推流的 CABLE 输出
+            }
+            Err(e) => log::warn!("XIAOMI VOICE EnsureMic failed: {e}"),
+        }
+    });
+}
+
+/// 同步 EnsureMic（测试 / 手动修复）
+pub fn ensure_cable_mic_for_voice() -> Result<VoiceEnvActionResult, String> {
+    run_configure_script_ex("EnsureMic", None, false)
+}
+
 /// 检测；若已就绪则直接 Repair（设默认麦）；若未就绪则返回 needs_choice
 pub fn check_or_prompt() -> VoiceEnvActionResult {
     let status = voice_env_status_fresh();
@@ -526,7 +572,7 @@ pub fn install_embedded() -> Result<VoiceEnvActionResult, String> {
 /// 强制走提权安装（即使已检测到 CABLE），用于驱动异常 / 排障测试
 pub fn install_embedded_force() -> Result<VoiceEnvActionResult, String> {
     let zip = find_driver_zip().ok_or_else(|| "内嵌 VB-CABLE 驱动包不可用".to_string())?;
-    run_configure_script_ex("Repair", &zip, true)
+    run_configure_script_ex("Repair", Some(&zip), true)
 }
 
 pub fn open_download_page() -> Result<VoiceEnvActionResult, String> {

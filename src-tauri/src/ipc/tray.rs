@@ -263,8 +263,41 @@ fn on_menu_event(app: &AppHandle, id: &str) {
             // 断开后回到「初始化中」黄标，避免仍显示已就绪
             sync_runtime_icons(app, TrayIconKind::Init);
         }
-        "t1_connect" => log::info!("Tray: connecting T1"),
-        "t1_disconnect" => log::info!("Tray: disconnecting T1"),
+        "t1_connect" => {
+            log::info!("Tray: connecting T1");
+            let app = app.clone();
+            std::thread::spawn(move || {
+                let Some(state) = app.try_state::<crate::bridges::BridgeState>() else {
+                    return;
+                };
+                let Some(config_manager) =
+                    app.try_state::<crate::config::manager::ConfigManager>()
+                else {
+                    return;
+                };
+                state.update_status(
+                    crate::bridges::BridgeType::T1,
+                    crate::bridges::BridgeStatus::Connecting,
+                );
+                if let Err(e) = crate::bridges::t1::runtime::start_t1_bridge(
+                    app.clone(),
+                    &state,
+                    &config_manager,
+                ) {
+                    log::warn!("Tray T1 connect failed: {e}");
+                    state.update_status(
+                        crate::bridges::BridgeType::T1,
+                        crate::bridges::BridgeStatus::Error(e),
+                    );
+                }
+            });
+        }
+        "t1_disconnect" => {
+            log::info!("Tray: disconnecting T1");
+            if let Some(state) = app.try_state::<crate::bridges::BridgeState>() {
+                crate::bridges::t1::runtime::stop_t1_bridge(app, &state);
+            }
+        }
         "hanvon_connect" => log::info!("Tray: connecting V60"),
         "hanvon_disconnect" => log::info!("Tray: disconnecting V60"),
         _ => {}

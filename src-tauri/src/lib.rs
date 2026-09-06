@@ -18,6 +18,15 @@ fn cleanup_on_exit(app: &tauri::AppHandle) {
     {
         runtime.request_stop();
     }
+    if let Some(runtime) = app.try_state::<std::sync::Arc<bridges::t1::runtime::T1Runtime>>() {
+        runtime.request_stop();
+    }
+    if let Some(runtime) = app.try_state::<std::sync::Arc<bridges::t1::ble_runtime::T1BleRuntime>>() {
+        bridges::t1::ble_runtime::stop_t1_ble_bridge(app, &runtime);
+    }
+    if let Some(state) = app.try_state::<bridges::BridgeState>() {
+        bridges::t1::runtime::stop_t1_bridge(app, &state);
+    }
     bridges::xiaomi::hid_report_tap::stop_and_join();
     bridges::xiaomi::special_keys::stop_special_key_hook();
 }
@@ -105,6 +114,12 @@ pub fn run() {
                 bridges::xiaomi::connect::XiaomiRuntime::new(),
             ));
 
+            // T1 Raw Input 运行时
+            app.manage(std::sync::Arc::new(bridges::t1::runtime::T1Runtime::new()));
+            app.manage(std::sync::Arc::new(
+                bridges::t1::ble_runtime::T1BleRuntime::new(),
+            ));
+
             // 快捷键录制会话
             app.manage(bridges::shared::shortcut_capture::ShortcutCaptureSession::new());
 
@@ -114,6 +129,7 @@ pub fn run() {
 
             // 语音电平/波形 UI 事件
             bridges::xiaomi::voice_meter::bind_app(app.handle().clone());
+            bridges::t1::ble_voice_meter::bind_app(app.handle().clone());
             bridges::xiaomi::conflict_guard::bind_app(app.handle().clone());
 
             if let Some(window) = app.get_webview_window("main") {
@@ -140,12 +156,15 @@ pub fn run() {
             } else {
                 // 路由起来后立刻预热 UDP，避免首句语音才 PING
                 bridges::xiaomi::voice_pcm::warmup_async();
+                bridges::t1::ble_pcm::warmup_async();
                 bridges::xiaomi::conflict_guard::check_audio_router_after_spawn(app.handle());
             }
 
             // 启动环境串行自动修复：声卡 → 键盘 → 等路由 → 等桥接 → ATVV
             // （取代原先并行的 winuhid-ensure，避免与声卡提权/桥接重启冲突）
             startup_env::spawn_startup_env_pipeline(app.handle().clone());
+            // L0 状态后台探测（勿同步跑 PowerShell，否则会卡死主机状态/蓝牙 IPC）
+            bridges::t1::t1_hid_filter_env::kick_status_refresh_if_stale();
 
             // 启动后自动连接 + 断线重连（对齐 Python worker 循环）
             let auto_app = app.handle().clone();
@@ -186,6 +205,42 @@ pub fn run() {
                     }
                 })?;
 
+            // T1：有已保存蓝牙地址则自动连（对齐小米）。不连则闸门不挂，原生键会漏。
+            let t1_auto = app.handle().clone();
+            std::thread::Builder::new()
+                .name("t1-ble-auto-connect".into())
+                .spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    let Some(config_manager) =
+                        t1_auto.try_state::<config::manager::ConfigManager>()
+                    else {
+                        return;
+                    };
+                    let Some(runtime) = t1_auto
+                        .try_state::<std::sync::Arc<bridges::t1::ble_runtime::T1BleRuntime>>()
+                    else {
+                        return;
+                    };
+                    if runtime.running.load(std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
+                    let addr = config_manager
+                        .get_device_config("t1")
+                        .ok()
+                        .and_then(|c| c.bluetooth_address);
+                    if !bridges::t1::ble_runtime::should_autostart_t1_ble(addr.as_deref()) {
+                        log::info!("T1 BLE autostart skipped (no saved address)");
+                        return;
+                    }
+                    log::info!("T1 BLE autostart address={}", addr.as_deref().unwrap_or(""));
+                    if let Err(e) = bridges::t1::ble_runtime::start_t1_ble_bridge(
+                        t1_auto.clone(),
+                        std::sync::Arc::clone(&runtime),
+                    ) {
+                        log::warn!("T1 BLE autostart failed: {e}");
+                    }
+                })?;
+
             // 启动后静默检查更新（有新版才向前端发事件）
             app_update::spawn_startup_check(app.handle().clone());
 
@@ -213,6 +268,13 @@ pub fn run() {
             ipc::commands::get_device_status,
             ipc::commands::start_bridge,
             ipc::commands::stop_bridge,
+            ipc::commands::start_t1_ble_bridge,
+            ipc::commands::stop_t1_ble_bridge,
+            ipc::commands::t1_ble_running,
+            ipc::commands::get_t1_ble_host_status,
+            ipc::commands::get_t1_hid_filter_status,
+            ipc::commands::repair_t1_hid_filter,
+            ipc::commands::get_t1_ble_voice_meter,
             ipc::commands::get_config,
             ipc::commands::save_config,
             ipc::commands::get_key_mappings,
@@ -300,7 +362,7 @@ mod tests {
 
     #[test]
     fn second_instance_policy_follows_setting() {
-        use config::manager::GlobalSettings;
+        use crate::config::manager::GlobalSettings;
         assert!(!GlobalSettings::default().start_minimized_to_tray);
         assert!(GlobalSettings::parse_start_minimized_to_tray_json(
             r#"{"autostart":false,"language":"zh-CN","minimize_to_tray":true,"start_minimized_to_tray":true}"#

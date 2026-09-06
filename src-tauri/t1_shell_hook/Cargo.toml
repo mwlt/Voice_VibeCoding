@@ -1,0 +1,12 @@
+[package]
+name = "t1_shell_hook"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal WH_SHELL DLL: swallow APPCOMMAND_BROWSER_SEARCH when T1 gate is on"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# none — injected into every GUI process; keep tiny

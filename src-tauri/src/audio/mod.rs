@@ -2,3 +2,8 @@ pub mod mixer;
 pub mod udp_server;
 pub mod pcm_router;
 pub mod vb_cable;
+#[cfg(target_os = "windows")]
+pub mod session_volume;
+pub mod wasapi_push;
+#[cfg(target_os = "windows")]
+pub mod winmm_cable;

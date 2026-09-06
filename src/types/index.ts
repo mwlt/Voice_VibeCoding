@@ -52,7 +52,7 @@ export interface GlobalSettings {
   language: string;
   minimize_to_tray: boolean;
   start_minimized_to_tray?: boolean;
-  /** 开启时隐藏 T1 / V60 等开发中项目菜单 */
+  /** 开启时隐藏 V60 等开发中项目菜单 */
   hide_dev_menus?: boolean;
   ignored_update_version?: string | null;
 }

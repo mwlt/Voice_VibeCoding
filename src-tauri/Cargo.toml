@@ -5,6 +5,10 @@ description = "Voice VibeCoding — 语音氛围编程 / 小米·T1·V60 遥控�
 authors = ["Voice VibeCoding"]
 edition = "2021"
 
+[workspace]
+members = [".", "t1_shell_hook"]
+resolver = "2"
+
 [lib]
 name = "remote_bridge_hub_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
@@ -59,6 +63,12 @@ windows = { version = "0.58", features = [
     "Win32_System_IO",
     "Win32_Networking_WinSock",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_Media_Audio",
+    "Win32_Media_Multimedia",
+    "Win32_Media_KernelStreaming",
 ] }
 hidapi = "2.6"
 cpal = "0.15"

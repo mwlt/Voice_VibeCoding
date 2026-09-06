@@ -11,10 +11,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:winuhid-install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-winuhid-install.ps1",
-    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --test config_voice_release --test voice_chord_and_release --test voice_chord_sanitize --test voice_first_packet --test ime_voice_wake_route",
+    "test:rust": "cargo build -p t1_shell_hook --manifest-path src-tauri/Cargo.toml && cargo test --manifest-path src-tauri/Cargo.toml --test config_voice_release --test voice_chord_and_release --test voice_chord_sanitize --test voice_first_packet --test ime_voice_wake_route --test t1_browser_search_swallow",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:dev": "cargo build -p t1_shell_hook --manifest-path src-tauri/Cargo.toml && tauri dev",
+    "tauri:build": "cargo build -p t1_shell_hook --release --manifest-path src-tauri/Cargo.toml && tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

@@ -36,7 +36,7 @@ const router = createRouter({
 });
 
 router.beforeEach(async (to) => {
-  if (to.path !== "/t1" && to.path !== "/v60") return true;
+  if (to.path !== "/v60") return true;
   const store = useGlobalSettingsStore();
   if (!store.loaded) {
     await store.load();

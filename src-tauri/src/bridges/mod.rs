@@ -152,6 +152,16 @@ impl BridgeState {
         if let Some(b) = battery { guard.battery_level = Some(b); }
     }
 
+    /// 只写电量，不改连接状态（T1 USB / BLE 互相独立）。
+    pub fn update_battery_level(&self, bridge_type: BridgeType, battery: u8) {
+        let info = match bridge_type {
+            BridgeType::Xiaomi => &self.xiaomi,
+            BridgeType::T1 => &self.t1,
+            BridgeType::Hanvon => &self.hanvon,
+        };
+        info.write().battery_level = Some(battery);
+    }
+
     pub fn get_info(&self, bridge_type: BridgeType) -> DeviceInfo {
         match bridge_type {
             BridgeType::Xiaomi => self.xiaomi.read().clone(),

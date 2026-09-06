@@ -51,3 +51,9 @@ docs/install-winuhid(1).ps1
 
 tools/silent-updater/target/
 
+# WDK NuGet restore + local KMDF build intermediates (keep t1blehidf.sys)
+src-tauri/assets/t1_hid_filter/driver/packages/
+src-tauri/assets/t1_hid_filter/driver/obj/
+src-tauri/assets/t1_hid_filter/driver/out/
+src-tauri/assets/t1_hid_filter/driver/nuget.exe
+

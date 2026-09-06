@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// 与 UI 步进器一致
 pub const GAIN_DB_MIN: f32 = -12.0;
 pub const GAIN_DB_MAX: f32 = 30.0;
-pub const GAIN_DB_DEFAULT: f32 = 10.0;
+pub const GAIN_DB_DEFAULT: f32 = 18.0;
 
 static LIVE_GAIN_DB: AtomicU32 = AtomicU32::new(GAIN_DB_DEFAULT.to_bits());
 

@@ -3976,6 +3976,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "t1_shell_hook"
+version = "0.1.0"
+
+[[package]]
 name = "tao"
 version = "0.35.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

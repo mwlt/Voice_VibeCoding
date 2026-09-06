@@ -1,11 +1,9 @@
 [CmdletBinding()]
 param(
-  [ValidateSet("Install", "InstallElevated", "Finish", "Repair", "Restore", "Audit")]
+  [ValidateSet("Install", "InstallElevated", "Finish", "Repair", "Restore", "Audit", "EnsureMic")]
   [string] $Mode = "Install",
-  [Parameter(Mandatory = $true)]
-  [string] $AppPath,
-  [Parameter(Mandatory = $true)]
-  [string] $DriverZipPath,
+  [string] $AppPath = "",
+  [string] $DriverZipPath = "",
   [switch] $Force
 )
 
@@ -68,6 +66,22 @@ internal interface IPolicyConfig {
   int GetPropertyValue(string d, IntPtr k, IntPtr v); int SetPropertyValue(string d, IntPtr k, IntPtr v);
   int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string d, ERole role); int SetEndpointVisibility(string d, int v);
 }
+[ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IAudioEndpointVolume {
+  int RegisterControlChangeNotify(IntPtr p);
+  int UnregisterControlChangeNotify(IntPtr p);
+  int GetChannelCount(out uint pnChannelCount);
+  int SetMasterVolumeLevel(float levelDB, ref Guid ctx);
+  int GetMasterVolumeLevel(out float levelDB);
+  int SetMasterVolumeLevelScalar(float fLevel, ref Guid ctx);
+  int GetMasterVolumeLevelScalar(out float pfLevel);
+  int SetChannelVolumeLevel(uint n, float levelDB, ref Guid ctx);
+  int GetChannelVolumeLevel(uint n, out float levelDB);
+  int SetChannelVolumeLevelScalar(uint n, float fLevel, ref Guid ctx);
+  int GetChannelVolumeLevelScalar(uint n, out float fLevel);
+  int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, ref Guid ctx);
+  int GetMute(out bool pbMute);
+}
 public static class XiaomiAudioEndpoint {
   public static string GetDefaultCapture() {
     IMMDeviceEnumerator e = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject(); IMMDevice d = null;
@@ -76,6 +90,23 @@ public static class XiaomiAudioEndpoint {
   }
   public static void SetDefaultCapture(string id) {
     IPolicyConfig c=(IPolicyConfig)new PolicyConfigClient(); try { for(int r=0;r<3;r++){int hr=c.SetDefaultEndpoint(id,(ERole)r);if(hr!=0)Marshal.ThrowExceptionForHR(hr);} } finally { Marshal.ReleaseComObject(c); }
+  }
+  public static string SetEndpointVolume(string id, float level) {
+    IMMDeviceEnumerator e = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+    IMMDevice d = null; IntPtr pVol = IntPtr.Zero;
+    try {
+      int hr = e.GetDevice(id, out d); if (hr != 0) return "GetDevice hr="+hr;
+      Guid iid = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
+      hr = d.Activate(ref iid, 23, IntPtr.Zero, out pVol); if (hr != 0) return "Activate hr="+hr;
+      IAudioEndpointVolume vol = (IAudioEndpointVolume)Marshal.GetTypedObjectForIUnknown(pVol, typeof(IAudioEndpointVolume));
+      Guid g = Guid.Empty; vol.SetMute(false, ref g); vol.SetMasterVolumeLevelScalar(level, ref g);
+      float cur; bool mute; vol.GetMasterVolumeLevelScalar(out cur); vol.GetMute(out mute);
+      return "level="+cur+" mute="+mute;
+    } finally {
+      if (pVol != IntPtr.Zero) Marshal.Release(pVol);
+      if (d != null) Marshal.ReleaseComObject(d);
+      Marshal.ReleaseComObject(e);
+    }
   }
 }
 '@
@@ -134,6 +165,16 @@ function Prepare-DriverFiles {
   return $inf
 }
 
+function Set-CableEndpointVolume([string] $DeviceId, [float] $Level = 1.0) {
+  Initialize-AudioEndpointApi
+  try {
+    $r = [XiaomiAudioEndpoint]::SetEndpointVolume($DeviceId, $Level)
+    Write-Output ("Phase: Volume | {0} => {1}" -f $DeviceId, $r)
+  } catch {
+    Write-Output ("Phase: VolumeWarn | {0}" -f $_.Exception.Message)
+  }
+}
+
 function Set-DefaultCableMicrophone {
   $capture = Get-VBCableCapture
   if (-not $capture) { throw "CABLE Output is not available" }
@@ -148,6 +189,10 @@ function Set-DefaultCableMicrophone {
   $null = New-Item -ItemType Directory -Force -Path $root, $desktop
   Set-ItemProperty -LiteralPath $root -Name Value -Value Allow -Type String
   Set-ItemProperty -LiteralPath $desktop -Name Value -Value Allow -Type String
+  # 输入法听的是 Capture「CABLE Output」；播放端是 Render「CABLE Input」——两端都拉满并取消静音
+  Set-CableEndpointVolume -DeviceId $capture.Id -Level 1.0
+  $render = Get-VBCableRender
+  if ($render) { Set-CableEndpointVolume -DeviceId $render.Id -Level 1.0 }
 }
 
 function Set-FinishRunOnce {
@@ -195,8 +240,17 @@ try {
     }
     "Repair" {
       # 默认：已就绪则只修默认麦，不重装驱动。-Force：始终走提权安装（排障/测试用）
-      if ($Force -or -not (Test-VBCableReady)) { Invoke-ElevatedInstall }
+      if ($Force -or -not (Test-VBCableReady)) {
+        if ([string]::IsNullOrWhiteSpace($DriverZipPath)) { throw "DriverZipPath required for install" }
+        Invoke-ElevatedInstall
+      }
       if (Wait-VBCable 45) { Set-DefaultCableMicrophone } else { Set-FinishRunOnce; $result = "Driver installed; Windows restart required" }
+    }
+    "EnsureMic" {
+      # 轻量：仅把默认麦设为 CABLE Output 并拉满音量（语音键按下时调用，无需 zip）
+      if (-not (Test-VBCableReady)) { throw "VB-CABLE is not ready" }
+      Set-DefaultCableMicrophone
+      $result = "OK"
     }
     "Restore" {
       if (Test-Path -LiteralPath $PreviousMicFile) { Initialize-AudioEndpointApi; $id=(Get-Content -LiteralPath $PreviousMicFile -Raw -Encoding UTF8).Trim(); if($id){[XiaomiAudioEndpoint]::SetDefaultCapture($id)}; Remove-Item -LiteralPath $PreviousMicFile -Force }

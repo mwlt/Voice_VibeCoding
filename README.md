@@ -84,7 +84,7 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 ### 其它
 
-- **T1 / V60**：界面与配置页已预留，我没有对应设备无法测试，需要使用的请自行二次开发
+- **T1 / V60**：T1 已接入 **USB** Consumer HID + Standalone 语音，以及独立 **蓝牙 ATVV**（设置页「蓝牙连接」；PCM→CABLE）。见 [docs/T1_BRIDGE_PLAN.md](./docs/T1_BRIDGE_PLAN.md)、[docs/T1_MAPPING_UI_PLAN.md](./docs/T1_MAPPING_UI_PLAN.md)。V60 仍预留。我没有 T1 设备时请自行二次验证实机
 - **托盘**：可最小化到托盘；开机自启与是否进托盘独立（由「启动后最小化到托盘」控制；Run 项 `--minimized` 仅单实例去重）
 
 界面图界面图2
