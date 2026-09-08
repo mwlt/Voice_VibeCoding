@@ -2,11 +2,14 @@
 
 对齐 Python `before-v0.6.42` 的 Raw Input / Standalone 路径。
 
+> **产品拆分**：侧栏 **T1(蓝牙)** / **T1(USB)** 分离；配置 `t1_ble.json` / `t1_usb.json`。  
+> 契约见 [T1_USB_BLE_SPLIT.md](./T1_USB_BLE_SPLIT.md)。本文件偏 USB；蓝牙见 [T1_BLE_PLAN.md](./T1_BLE_PLAN.md)。
+
 ## 状态
 
 | 能力 | 状态 | 说明 |
 |------|------|------|
-| `start_bridge("t1")` | 已接入 | 不再返回「连接逻辑尚未接入」 |
+| `start_bridge("t1_usb")`（别名 `"t1"`） | 已接入 | USB 接收器路径 |
 | Consumer HID `0x0C/0x01` | 已接入 | [`consumer_raw_input.rs`](../src-tauri/src/bridges/t1/consumer_raw_input.rs) |
 | VID/PID `1915:1025` 过滤 | 已接入 | 设备路径子串匹配 |
 | HID → 按键映射 → 注入 | 已接入 | **优先 WinUHid**，失败降级 SendInput；注入在后台线程，不堵 WM_INPUT |

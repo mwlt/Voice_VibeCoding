@@ -17,6 +17,7 @@ fn pipeline_order_is_cable_winuhid_audio_bridge_atvv() {
             PipelineStep::WaitAudio,
             PipelineStep::WaitBridge,
             PipelineStep::Atvv,
+            PipelineStep::T1L0,
         ]
     );
 }

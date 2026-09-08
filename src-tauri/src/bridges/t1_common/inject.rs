@@ -63,7 +63,7 @@ pub const ALL_MODIFIER_VKS: &[u16] = &[
 
 pub fn chord_has_modifier(vks: &[u16]) -> bool {
     vks.iter()
-        .any(|&vk| crate::bridges::xiaomi::voice_chord_sanitizer::is_modifier_vk(vk))
+        .any(|&vk| crate::bridges::shared::input_vk::is_modifier_vk(vk))
 }
 
 pub fn mapped_tap_needs_shell_dummy(vks: &[u16]) -> bool {
@@ -95,13 +95,13 @@ pub fn after_mapped_tap(vks: &[u16]) {
 /// **硬清全部修饰键**：WinUHid 全零 + 逐个 SendInput KEYUP。
 /// 任何 T1 注入（语音/映射）结束后都应调用；漏 Alt/Ctrl 按住会导致系统无法使用。
 pub fn panic_clear_all_modifiers(reason: &str) {
-    let _ = crate::bridges::xiaomi::hid_injector::release_all();
+    let _ = crate::bridges::shared::hid_injector::release_all();
     crate::bridges::t1::native_suppress::allow_pass_vks(ALL_MODIFIER_VKS);
     // 逐个 KEYUP 比整组更可靠（粘住的可能只有其中一个）
     for &vk in ALL_MODIFIER_VKS {
         let _ = release_vks(&[vk]);
     }
-    let _ = crate::bridges::xiaomi::hid_injector::release_all();
+    let _ = crate::bridges::shared::hid_injector::release_all();
     log::info!("T1 panic_clear_all_modifiers reason={reason}");
 }
 
@@ -132,12 +132,12 @@ pub fn safe_mapped_tap(vks: &[u16], hold_ms: u64) -> bool {
     if crate::bridges::t1::native_suppress::vks_need_sendinput(vks) {
         crate::bridges::t1::native_suppress::allow_pass_vks(vks);
         let ok = tap_vks(vks, hold_ms);
-        let _ = crate::bridges::xiaomi::hid_injector::release_all();
+        let _ = crate::bridges::shared::hid_injector::release_all();
         return ok;
     }
     let needs_atomic = chord_has_modifier(vks);
     crate::bridges::t1::native_suppress::allow_pass_vks(vks);
-    let ok = if crate::bridges::xiaomi::hid_injector::is_available() {
+    let ok = if crate::bridges::shared::hid_injector::is_available() {
         if needs_atomic {
             log::info!(
                 "T1 mapped tap atomic vks={}",
@@ -146,9 +146,9 @@ pub fn safe_mapped_tap(vks: &[u16], hold_ms: u64) -> bool {
                     .collect::<Vec<_>>()
                     .join("+")
             );
-            crate::bridges::xiaomi::hid_injector::tap_vks_atomic(vks, hold_ms)
+            crate::bridges::shared::hid_injector::tap_vks_atomic(vks, hold_ms)
         } else {
-            crate::bridges::xiaomi::hid_injector::tap_vks(vks, hold_ms)
+            crate::bridges::shared::hid_injector::tap_vks(vks, hold_ms)
         }
     } else {
         log::warn!("T1 mapped tap: WinUHid unavailable, SendInput fallback");
@@ -157,7 +157,7 @@ pub fn safe_mapped_tap(vks: &[u16], hold_ms: u64) -> bool {
     if needs_atomic {
         panic_clear_all_modifiers("mapped_tap_mods");
     } else {
-        let _ = crate::bridges::xiaomi::hid_injector::release_all();
+        let _ = crate::bridges::shared::hid_injector::release_all();
     }
     ok
 }
@@ -169,7 +169,7 @@ pub fn voice_chord_tap(vks: &[u16], hold_ms: u64) -> bool {
     }
     sanitize_before_voice_chord_tap(vks);
     crate::bridges::t1::native_suppress::allow_pass_vks(vks);
-    let ok = if crate::bridges::xiaomi::hid_injector::is_available() {
+    let ok = if crate::bridges::shared::hid_injector::is_available() {
         log::info!(
             "T1 voice chord tap atomic vks={}",
             vks.iter()
@@ -177,7 +177,7 @@ pub fn voice_chord_tap(vks: &[u16], hold_ms: u64) -> bool {
                 .collect::<Vec<_>>()
                 .join("+")
         );
-        crate::bridges::xiaomi::hid_injector::tap_vks_atomic(vks, hold_ms)
+        crate::bridges::shared::hid_injector::tap_vks_atomic(vks, hold_ms)
     } else {
         log::warn!("T1 voice chord: WinUHid unavailable, SendInput fallback");
         tap_vks(vks, hold_ms)
@@ -244,7 +244,7 @@ fn send_chord(vks: &[u16], key_up: bool) -> bool {
     for &vk in iter {
         let mapped = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) } as u16;
         // MapVirtualKey(VK_RMENU) 部分环境返回 0，输入法认不出右 Alt
-        let scan = crate::bridges::xiaomi::voice_inject::scan_code_for_vk(vk, mapped);
+        let scan = crate::bridges::shared::input_vk::scan_code_for_vk(vk, mapped);
         let mut flags = if is_extended(vk) {
             KEYEVENTF_EXTENDEDKEY
         } else {
@@ -261,7 +261,7 @@ fn send_chord(vks: &[u16], key_up: bool) -> bool {
                     wScan: scan,
                     dwFlags: flags,
                     time: 0,
-                    dwExtraInfo: crate::bridges::xiaomi::key_mapping::EXTRA_INFO,
+                    dwExtraInfo: crate::bridges::shared::input_vk::EXTRA_INFO,
                 },
             },
         });
@@ -312,7 +312,7 @@ mod tests {
     fn voice_win_alt_is_multi_modifier_chord() {
         let mods: Vec<_> = [0x5Bu16, 0xA4]
             .into_iter()
-            .filter(|&vk| crate::bridges::xiaomi::voice_chord_sanitizer::is_modifier_vk(vk))
+            .filter(|&vk| crate::bridges::shared::input_vk::is_modifier_vk(vk))
             .collect();
         assert!(mods.len() >= 2, "Win+Alt must use atomic HID tap");
     }

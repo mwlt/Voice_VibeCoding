@@ -1174,6 +1174,26 @@ mod tests {
     }
 
     #[test]
+    fn special_keys_skips_t1_gate_while_capture_active() {
+        // 录入窗内必须先 is_swallow_active 早退，再跑 T1 should_suppress_native
+        let src = include_str!("../xiaomi/special_keys.rs");
+        let swallow = src
+            .find("is_swallow_active()")
+            .expect("missing is_swallow_active early-out");
+        let t1_gate = src
+            .find("should_suppress_native")
+            .expect("missing T1 should_suppress_native");
+        assert!(
+            swallow < t1_gate,
+            "capture swallow_active must precede T1 gate so recording is not remapped/swallowed"
+        );
+        assert!(
+            src.contains("录入窗内硬跳过整段 T1 闸门"),
+            "keep explicit capture-skip-T1-gate comment for reviewers"
+        );
+    }
+
+    #[test]
     fn consumer_listen_must_not_call_feed_capture_key() {
         // 回归：Consumer 线程若与 LL 钩子争用 HOOK_ENGINE，会拖死 WH_KEYBOARD_LL，
         // 表现为「媒体键能录、其它键不吞不录、一直停在录入中」。

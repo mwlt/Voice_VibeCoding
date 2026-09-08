@@ -1,7 +1,7 @@
 pub mod conflict_guard;
 pub mod ble_bridge;
 pub mod adpcm_decoder;
-pub mod hid_injector;
+pub use crate::bridges::shared::hid_injector;
 pub mod winuhid_env;
 #[cfg(test)]
 mod voice_f5_suppress_tests;
@@ -12,7 +12,7 @@ pub mod key_mapping;
 pub mod special_keys;
 pub mod tv_gate;
 pub mod voice_pcm;
-pub mod voice_gain;
+pub use crate::bridges::shared::voice_gain;
 pub mod voice_meter;
 pub mod voice_chord_state;
 pub mod voice_chord_sanitizer;

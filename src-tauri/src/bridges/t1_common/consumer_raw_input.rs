@@ -210,10 +210,13 @@ pub fn device_matches(device_name: &str, tokens: &[String]) -> bool {
 pub fn looks_like_t1_device(device_name: &str) -> bool {
     let low = device_name.to_ascii_lowercase();
     let usb = low.contains("vid_1915") && low.contains("pid_1025");
-    let ble = (low.contains("01620a") && (low.contains("0407") || low.contains("pid&0407")))
+    let ble = ((low.contains("01620a") || low.contains("1620a"))
+        && (low.contains("0407") || low.contains("pid&0407") || low.contains("pid_0407")))
         || low.contains("dev_vid&01620a")
         || low.contains("t1-remote")
-        || low.contains("t1_remote");
+        || low.contains("t1_remote")
+        || (low.contains("bthledevice")
+            && (low.contains("01620a") || low.contains("1620a") || low.contains("0407")));
     usb || ble
 }
 
@@ -613,7 +616,13 @@ fn consumer_raw_thread(running: Arc<AtomicBool>, callback: EventCallback, listen
                                 }
                             }
                         }
-                    } else if t1ish || powerish || device_name.is_empty() {
+                    } else if t1ish
+                        || powerish
+                        || device_name.is_empty()
+                        || crate::bridges::t1::ble_keys::is_running()
+                    {
+                        // BLE 按键会话中：即使 Raw 设备名偶发不像 T1，也要早处理 Consumer
+                        //（尤其 02-21-02 AC Search，否则 APPCOMMAND 会先弹出 Browser Search）
                         if t1ish {
                             log::info!(
                                 "T1 raw HID device={} report=hid:{}",
@@ -622,7 +631,7 @@ fn consumer_raw_thread(running: Arc<AtomicBool>, callback: EventCallback, listen
                             );
                         } else {
                             log::info!(
-                                "T1 probe HID (power/system?) device={} report=hid:{}",
+                                "T1 probe HID (power/system/ble-session) device={} report=hid:{}",
                                 if device_name.is_empty() {
                                     "?"
                                 } else {
@@ -645,6 +654,13 @@ fn consumer_raw_thread(running: Arc<AtomicBool>, callback: EventCallback, listen
                         }
                         if hex_up.starts_with("02-E2") || hex_up.contains("-E2-") {
                             crate::bridges::t1::native_suppress::inject_after_consumer_hid(0xAD);
+                        }
+                        // 音量 ±：对齐 Home/删除/静音，HID 落盘即补映射（不依赖设备名 token）
+                        if hex_up.starts_with("02-E9") || hex_up.contains("-E9-") {
+                            crate::bridges::t1::native_suppress::inject_after_consumer_hid(0xAF);
+                        }
+                        if hex_up.starts_with("02-EA") || hex_up.contains("-EA-") {
+                            crate::bridges::t1::native_suppress::inject_after_consumer_hid(0xAE);
                         }
                         // Boot keyboard HID（8 字节）：部分接收器不以 RIM_TYPEKEYBOARD 上报
                         if let Some(vk) = boot_keyboard_vk_from_hid(&report) {
@@ -848,6 +864,9 @@ mod tests {
         ));
         assert!(looks_like_t1_device(
             r"\\?\BTHLEDevice#dev_vid&01620a_pid&0407#12ac"
+        ));
+        assert!(looks_like_t1_device(
+            r"\\?\HID#VID_1620A&PID_0407&MI_00#8&xyz"
         ));
         assert!(!looks_like_t1_device(r"\\?\HID#VID_046D&PID_C52B"));
     }

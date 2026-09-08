@@ -3,34 +3,28 @@ import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { DeviceInfo, BridgeType, BridgeStatus } from "../types";
 
+function emptyDevice(type: BridgeType): DeviceInfo {
+  return {
+    bridge_type: type,
+    status: "Disconnected",
+    device_name: null,
+    device_address: null,
+    battery_level: null,
+  };
+}
+
 export const useBridgeStore = defineStore("bridge", () => {
   const devices = ref<Record<BridgeType, DeviceInfo>>({
-    xiaomi: {
-      bridge_type: "xiaomi",
-      status: "Disconnected",
-      device_name: null,
-      device_address: null,
-      battery_level: null,
-    },
-    t1: {
-      bridge_type: "t1",
-      status: "Disconnected",
-      device_name: null,
-      device_address: null,
-      battery_level: null,
-    },
-    hanvon: {
-      bridge_type: "hanvon",
-      status: "Disconnected",
-      device_name: null,
-      device_address: null,
-      battery_level: null,
-    },
+    xiaomi: emptyDevice("xiaomi"),
+    t1_ble: emptyDevice("t1_ble"),
+    t1_usb: emptyDevice("t1_usb"),
+    hanvon: emptyDevice("hanvon"),
   });
 
   const loading = ref<Record<BridgeType, boolean>>({
     xiaomi: false,
-    t1: false,
+    t1_ble: false,
+    t1_usb: false,
     hanvon: false,
   });
 
@@ -41,7 +35,6 @@ export const useBridgeStore = defineStore("bridge", () => {
       });
       devices.value[type] = info;
     } catch (e) {
-      // Silently fail in browser dev mode (Tauri API not available)
       console.warn(`Failed to get ${type} status (expected in browser dev):`, e);
     }
   }
@@ -49,7 +42,8 @@ export const useBridgeStore = defineStore("bridge", () => {
   async function refreshAll() {
     await Promise.all([
       refreshStatus("xiaomi"),
-      refreshStatus("t1"),
+      refreshStatus("t1_ble"),
+      refreshStatus("t1_usb"),
       refreshStatus("hanvon"),
     ]);
   }

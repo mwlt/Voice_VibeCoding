@@ -64,10 +64,12 @@ pub fn start_t1_ble_bridge(app: AppHandle, runtime: Arc<T1BleRuntime>) -> Result
     runtime.clear_stop();
     runtime.running.store(true, Ordering::SeqCst);
     // 发现/重连窗口也要吞原生键，不能等 GATT 连上才挂闸门。
-    crate::bridges::t1::native_suppress::set_enabled(true);
+    crate::bridges::t1::native_suppress::arm_reason(
+        crate::bridges::t1::native_suppress::SwallowReason::BleBridge,
+    );
     if let Some(cfg) = app
         .try_state::<ConfigManager>()
-        .and_then(|m| m.get_device_config("t1").ok())
+        .and_then(|m| m.get_device_config("t1_ble").ok())
     {
         let vol_plus = match cfg.button_bindings.get("vol_plus") {
             Some(KeyAction::SingleKey(vk)) => vec![*vk],
@@ -133,7 +135,7 @@ pub fn start_t1_ble_bridge(app: AppHandle, runtime: Arc<T1BleRuntime>) -> Result
 
     let configured = app
         .try_state::<ConfigManager>()
-        .and_then(|m| m.get_device_config("t1").ok())
+        .and_then(|m| m.get_device_config("t1_ble").ok())
         .and_then(|c| c.bluetooth_address.clone());
 
     let app2 = app.clone();
@@ -166,15 +168,28 @@ pub fn start_t1_ble_bridge(app: AppHandle, runtime: Arc<T1BleRuntime>) -> Result
                                 "address": conn.address,
                             }),
                         );
+                        if let Some(state) = app2.try_state::<crate::bridges::BridgeState>() {
+                            state.update_device_info(
+                                crate::bridges::BridgeType::T1Ble,
+                                Some(conn.name.clone()),
+                                Some(conn.address.clone()),
+                                None,
+                            );
+                        }
                         log::info!(
                             "T1 BLE connected name={} address={}",
                             conn.name,
                             conn.address
                         );
+                        crate::bridges::t1::ble_keys::remember_ble_address(&conn.address);
+                        // HOGP 重连后 Consumer 集合可能重新启用 → 自动再禁 AC Search
+                        crate::bridges::t1::t1_hid_filter_env::kick_auto_repair_if_needed(
+                            "ble_connect",
+                        );
                         if let Some(mgr) = app2.try_state::<ConfigManager>() {
-                            if let Ok(mut cfg) = mgr.get_device_config("t1") {
+                            if let Ok(mut cfg) = mgr.get_device_config("t1_ble") {
                                 cfg.bluetooth_address = Some(conn.address.clone());
-                                let _ = mgr.save_device_config("t1", &cfg);
+                                let _ = mgr.save_device_config("t1_ble", &cfg);
                             }
                         }
                         if let Err(e) = crate::bridges::t1::ble_keys::start(&app2) {
@@ -229,6 +244,15 @@ pub fn start_t1_ble_bridge(app: AppHandle, runtime: Arc<T1BleRuntime>) -> Result
             crate::bridges::t1::ble_host::set_atvv_ok(false);
             crate::bridges::t1::ble_voice_meter::reset();
             runtime2.running.store(false, Ordering::SeqCst);
+            crate::bridges::t1::native_suppress::disarm_reason(
+                crate::bridges::t1::native_suppress::SwallowReason::BleBridge,
+            );
+            if let Some(state) = app2.try_state::<crate::bridges::BridgeState>() {
+                state.update_status(
+                    crate::bridges::BridgeType::T1Ble,
+                    crate::bridges::BridgeStatus::Disconnected,
+                );
+            }
             emit(
                 &app2,
                 "disconnected",
@@ -239,6 +263,9 @@ pub fn start_t1_ble_bridge(app: AppHandle, runtime: Arc<T1BleRuntime>) -> Result
         })
         .map_err(|e| {
             runtime.running.store(false, Ordering::SeqCst);
+            crate::bridges::t1::native_suppress::disarm_reason(
+                crate::bridges::t1::native_suppress::SwallowReason::BleBridge,
+            );
             format!("启动 T1 BLE worker 失败: {e}")
         })?;
 

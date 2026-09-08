@@ -1,6 +1,8 @@
 import type { DeviceConfig, KeyAction, TriggerMode } from "../types";
 import { vkDisplayName } from "./vkDisplay";
 
+export type T1Transport = "ble" | "usb";
+
 /** 与 Rust `T1Button::to_id` 对齐的 14 键 */
 export const T1_BUTTON_IDS = [
   "power",
@@ -54,8 +56,45 @@ export const T1_DEFAULT_LABELS: Record<T1ButtonId, string> = {
   vol_minus: "音量-",
 };
 
-/** 映射台左栏（对齐机身左侧） */
-export const T1_LEFT_COLUMN_IDS: readonly T1ButtonId[] = [
+/**
+ * USB：仅电源/鼠标机内固定（仍展示说明卡，不可录入）。
+ * BLE：另含方向/OK/音量/静音等系统透传键（映射台直接不展示）。
+ */
+export const T1_USB_FIXED_SYSTEM_IDS = ["power", "mouse"] as const;
+
+export const T1_BLE_FIXED_SYSTEM_IDS = [
+  "power",
+  "mouse",
+  "up",
+  "down",
+  "left",
+  "right",
+  "ok",
+  "mute",
+  "vol_plus",
+  "vol_minus",
+] as const;
+
+/** @deprecated 用 t1FixedSystemIds(transport)；默认 BLE 透传集合 */
+export const T1_FIXED_SYSTEM_IDS = T1_BLE_FIXED_SYSTEM_IDS;
+
+export type T1FixedSystemId = (typeof T1_BLE_FIXED_SYSTEM_IDS)[number];
+
+export const T1_FIXED_SYSTEM_HINTS: Record<T1FixedSystemId, string> = {
+  power: "系统电源 · 不可绑定",
+  mouse: "遥控器空鼠 · 不可绑定",
+  up: "系统原生方向 · 不可绑定",
+  down: "系统原生方向 · 不可绑定",
+  left: "系统原生方向 · 不可绑定",
+  right: "系统原生方向 · 不可绑定",
+  ok: "系统原生确定 · 不可绑定",
+  mute: "系统原生静音 · 不可绑定",
+  vol_plus: "系统原生音量 · 不可绑定",
+  vol_minus: "系统原生音量 · 不可绑定",
+};
+
+/** USB 映射台左栏（与拆分前一致） */
+export const T1_USB_LEFT_COLUMN_IDS: readonly T1ButtonId[] = [
   "up",
   "left",
   "ok",
@@ -65,8 +104,8 @@ export const T1_LEFT_COLUMN_IDS: readonly T1ButtonId[] = [
   "mouse",
 ];
 
-/** 映射台右栏（对齐机身右侧：电源 → 音量 ± → 右 → 语音 → 主页 → 菜单） */
-export const T1_RIGHT_COLUMN_IDS: readonly T1ButtonId[] = [
+/** USB 映射台右栏 */
+export const T1_USB_RIGHT_COLUMN_IDS: readonly T1ButtonId[] = [
   "power",
   "vol_plus",
   "vol_minus",
@@ -76,21 +115,60 @@ export const T1_RIGHT_COLUMN_IDS: readonly T1ButtonId[] = [
   "menu",
 ];
 
-/**
- * 系统/机内固定键：无主机可映射报告（电源→睡眠/关屏；鼠标→遥控器空鼠模式）。
- * UI 仅展示说明，不开放录入。
- */
-export const T1_FIXED_SYSTEM_IDS = ["power", "mouse"] as const;
+/** BLE：仅可映射键 */
+export const T1_BLE_LEFT_COLUMN_IDS: readonly T1ButtonId[] = ["delete"];
 
-export type T1FixedSystemId = (typeof T1_FIXED_SYSTEM_IDS)[number];
+export const T1_BLE_RIGHT_COLUMN_IDS: readonly T1ButtonId[] = [
+  "voice",
+  "home",
+  "menu",
+];
 
-export const T1_FIXED_SYSTEM_HINTS: Record<T1FixedSystemId, string> = {
-  power: "作用为系统电源键 · 不可绑定",
-  mouse: "遥控器内部按键 · 不可绑定",
-};
+/** @deprecated 默认 BLE 列；组件请用 t1Left/RightColumnIds(transport) */
+export const T1_LEFT_COLUMN_IDS = T1_BLE_LEFT_COLUMN_IDS;
+export const T1_RIGHT_COLUMN_IDS = T1_BLE_RIGHT_COLUMN_IDS;
 
-export function t1IsFixedSystemKey(id: string): id is T1FixedSystemId {
-  return (T1_FIXED_SYSTEM_IDS as readonly string[]).includes(id);
+export function t1FixedSystemIds(
+  transport: T1Transport
+): readonly string[] {
+  return transport === "usb"
+    ? T1_USB_FIXED_SYSTEM_IDS
+    : T1_BLE_FIXED_SYSTEM_IDS;
+}
+
+export function t1LeftColumnIds(
+  transport: T1Transport
+): readonly T1ButtonId[] {
+  return transport === "usb"
+    ? T1_USB_LEFT_COLUMN_IDS
+    : T1_BLE_LEFT_COLUMN_IDS;
+}
+
+export function t1RightColumnIds(
+  transport: T1Transport
+): readonly T1ButtonId[] {
+  return transport === "usb"
+    ? T1_USB_RIGHT_COLUMN_IDS
+    : T1_BLE_RIGHT_COLUMN_IDS;
+}
+
+export function t1IsFixedSystemKey(
+  id: string,
+  transport: T1Transport = "ble"
+): id is T1FixedSystemId {
+  return t1FixedSystemIds(transport).includes(id);
+}
+
+/** 清掉该传输下固定键上的历史绑定（未绑定） */
+export function stripT1FixedBindings(
+  config: DeviceConfig,
+  transport: T1Transport = "ble"
+): DeviceConfig {
+  const button_bindings = { ...(config.button_bindings || {}) };
+  for (const id of t1FixedSystemIds(transport)) {
+    button_bindings[id] = { type: "None", value: null };
+  }
+  return { ...config, button_bindings };
 }
 
 /** 映射台右栏底部 · 语音键快速设置（四种，对齐小米） */
@@ -162,9 +240,10 @@ function vksToAction(vks: number[]): KeyAction {
 export function applyT1CapturedBinding(
   config: DeviceConfig,
   buttonId: string,
-  vks: number[]
+  vks: number[],
+  transport: T1Transport = "ble"
 ): DeviceConfig {
-  if (t1IsFixedSystemKey(buttonId)) return config;
+  if (t1IsFixedSystemKey(buttonId, transport)) return config;
   const action = vksToAction(vks);
   const button_bindings = {
     ...(config.button_bindings || {}),
@@ -176,39 +255,42 @@ export function applyT1CapturedBinding(
   };
   if (buttonId === "voice") {
     next.voice_hotkey = t1VksToHotkeyNames(vks);
-    // 豆包/千问「长按右 Alt」→ Hold 闩锁（T1 HID 仅为脉冲，软件保持按下直到再按一次）
-    // 「免按 右Alt+空格」→ Toggle 点按
     const onlyAlt =
       vks.length === 1 && (vks[0] === 0xa4 || vks[0] === 0xa5 || vks[0] === 0x12);
     if (onlyAlt) next.trigger_mode = "Hold";
     else if (vks.length > 1) next.trigger_mode = "Toggle";
   }
-  return next;
+  return stripT1FixedBindings(next, transport);
 }
 
 export function applyT1VoiceQuick(
   config: DeviceConfig,
-  preset: T1VoiceQuickPreset
+  preset: T1VoiceQuickPreset,
+  transport: T1Transport = "ble"
 ): DeviceConfig {
   const action = vksToAction(preset.vks);
-  return {
-    ...config,
-    button_bindings: {
-      ...(config.button_bindings || {}),
-      voice: action,
+  return stripT1FixedBindings(
+    {
+      ...config,
+      button_bindings: {
+        ...(config.button_bindings || {}),
+        voice: action,
+      },
+      voice_hotkey: t1VksToHotkeyNames(preset.vks),
+      trigger_mode: preset.triggerMode,
+      voice_shortcut_enabled: true,
+      voice_release_behavior: "None",
     },
-    voice_hotkey: t1VksToHotkeyNames(preset.vks),
-    trigger_mode: preset.triggerMode,
-    voice_shortcut_enabled: true,
-    voice_release_behavior: "None",
-  };
+    transport
+  );
 }
 
 export function clearT1Binding(
   config: DeviceConfig,
-  buttonId: string
+  buttonId: string,
+  transport: T1Transport = "ble"
 ): DeviceConfig {
-  if (t1IsFixedSystemKey(buttonId)) return config;
+  if (t1IsFixedSystemKey(buttonId, transport)) return config;
   const button_bindings = {
     ...(config.button_bindings || {}),
     [buttonId]: { type: "None" as const, value: null },
@@ -220,7 +302,7 @@ export function clearT1Binding(
   if (buttonId === "voice") {
     next.voice_hotkey = [];
   }
-  return next;
+  return stripT1FixedBindings(next, transport);
 }
 
 export function t1ActionLabel(action: KeyAction): string {
@@ -239,5 +321,6 @@ export function t1LabelOf(
   id: string,
   aliases?: Record<string, string> | null
 ): string {
-  return aliases?.[id] || T1_DEFAULT_LABELS[id as T1ButtonId] || id;
+  if (aliases?.[id]) return aliases[id];
+  return T1_DEFAULT_LABELS[id as T1ButtonId] || id;
 }

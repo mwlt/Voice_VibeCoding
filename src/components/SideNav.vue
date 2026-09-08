@@ -29,7 +29,8 @@ function statusClass(status: BridgeStatus): string {
 
 const allDeviceItems = [
   { path: "/xiaomi", label: "小米2 pro", type: "xiaomi" as const },
-  { path: "/t1", label: "T1", type: "t1" as const },
+  { path: "/t1-ble", label: "T1(蓝牙)", type: "t1_ble" as const },
+  { path: "/t1-usb", label: "T1(USB)", type: "t1_usb" as const },
   { path: "/v60", label: "V60 [开发中]", type: "hanvon" as const, dev: true },
 ];
 
@@ -111,6 +112,13 @@ async function confirmQuit() {
     </nav>
 
     <div class="nav-actions">
+      <button
+        type="button"
+        :class="['nav-item', { active: isActive('/keyboard-test') }]"
+        @click="navigate('/keyboard-test')"
+      >
+        <span class="nav-label">键盘测试</span>
+      </button>
       <button
         type="button"
         :class="['nav-item', { active: isActive('/settings') }]"

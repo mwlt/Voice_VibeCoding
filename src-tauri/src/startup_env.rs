@@ -1,6 +1,6 @@
 //! 启动环境自动修复流水线：决策纯函数 + 串行编排
 //!
-//! 顺序：虚拟声卡 → 虚拟键盘 → 等语音路由 → 等桥接落定 → ATVV（条件性一次）
+//! 顺序：虚拟声卡 → 虚拟键盘 → 等语音路由 → 等桥接落定 → ATVV → T1 Consumer 恢复
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -12,6 +12,8 @@ pub enum PipelineStep {
     WaitAudio,
     WaitBridge,
     Atvv,
+    /// 禁用 T1 BLE Consumer Control（AC Search）；无设备则跳过
+    T1L0,
 }
 
 /// 固定启动修复顺序（桥接本身不单独「修复」，只等待落定）
@@ -22,6 +24,7 @@ pub fn pipeline_steps() -> &'static [PipelineStep] {
         PipelineStep::WaitAudio,
         PipelineStep::WaitBridge,
         PipelineStep::Atvv,
+        PipelineStep::T1L0,
     ]
 }
 
@@ -381,6 +384,20 @@ pub fn run_startup_env_pipeline(app: tauri::AppHandle) -> PipelineReport {
         Ok(())
     });
     runner.push(PipelineStep::Atvv, move || step_atvv_once(&app_atvv));
+    runner.push(PipelineStep::T1L0, || {
+        let r = crate::bridges::t1::t1_hid_filter_env::ensure_ready_once("startup_pipeline");
+        if r.ready {
+            Ok(())
+        } else if r.result_code.eq_ignore_ascii_case("NO_T1_BLE_DEVICE") {
+            // 尚未配对/未插遥控：不算失败
+            Ok(())
+        } else if r.result_code.eq_ignore_ascii_case("NOT_BOUND") {
+            Err(r.message)
+        } else {
+            // UAC 取消等：记入错误但不阻断后续（流水线已是末步）
+            Err(format!("{} ({})", r.message, r.result_code))
+        }
+    });
 
     let report = runner.run();
     log::info!(

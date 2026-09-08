@@ -91,6 +91,44 @@ pub fn ensure_mic_device(label: &str) -> Result<String, String> {
         .ok_or_else(|| format!("Windows 未找到设备自带麦克风：{label}"))
 }
 
+/// 当前系统默认捕获端点是否已是 Mic Device（输入法多数跟默认麦走）。
+pub fn default_capture_is_mic_device(label: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        let needle = label.trim().to_ascii_lowercase();
+        if needle.is_empty() {
+            return false;
+        }
+        let host = cpal::default_host();
+        let Some(dev) = host.default_input_device() else {
+            return false;
+        };
+        let Ok(name) = dev.name() else {
+            return false;
+        };
+        name.to_ascii_lowercase().contains(&needle)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = label;
+        false
+    }
+}
+
+/// 若默认麦不是 Mic Device，同步切过去（阻塞约 1–2s）；已是则跳过。
+pub fn ensure_default_mic_device_for_ime(label: &str) {
+    if default_capture_is_mic_device(label) {
+        log::info!("T1 USB default capture already [{label}] — skip EnsureUsbMic");
+        return;
+    }
+    log::info!("T1 USB default capture is not [{label}] — EnsureUsbMic now");
+    match crate::audio::vb_cable::ensure_usb_mic_for_voice() {
+        Ok(r) => log::info!("T1 USB EnsureUsbMic sync: {}", r.message),
+        Err(e) => log::warn!("T1 USB EnsureUsbMic sync failed: {e}"),
+    }
+}
+
 /// 尽量关掉 T1（VID_1915）USB 选择暂停 / 增强电源管理，减轻约 20s 麦静音。
 /// 无管理员权限时可能失败，仅打日志。
 pub fn disable_t1_usb_selective_suspend() {

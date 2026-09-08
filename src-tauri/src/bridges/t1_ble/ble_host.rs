@@ -81,7 +81,7 @@ pub fn build_host_status(
     let items = vec![
         item("cable", "虚拟声卡", cable_ready, "已安装", "未检测到"),
         item("winuhid", "虚拟键盘", winuhid_ready, "已就绪", "未就绪"),
-        item_warn("l0", "Search剥离", l0_ready, "已就绪", "未安装"),
+        item_warn("l0", "Consumer", l0_ready, "已启用", "需修复"),
         item("audio", "语音路由", audio_alive, "运行中", "已停止"),
         item("ble", "蓝牙桥接", ble_alive, "已连接", "未启动"),
         item("atvv", "ATVV 语音", atvv_ok, "已订阅", "未订阅"),
@@ -90,11 +90,15 @@ pub fn build_host_status(
 
     let (status_text, detail, tone) =
         if ble_alive && atvv_ok && audio_alive && cable_ready && winuhid_ready && l0_ready {
-            ("蓝牙运行正常".into(), String::new(), "ok".into())
+            (
+                "蓝牙运行正常".into(),
+                "Consumer 已启用（Home/删除/音量可用）；AC Search 由应用 L1 吞键。".into(),
+                "ok".into(),
+            )
         } else if ble_alive && !l0_ready {
             (
-                "Search 剥离未就绪".into(),
-                "T1 蓝牙专属 L0 驱动可从根上挡住 Windows 搜索。点下方「自动修复 Search 剥离」。".into(),
+                "Consumer 未就绪".into(),
+                "若曾整集禁用请点「自动修复」重新启用，否则 Home/删除无响应。搜索靠 L1，非整集剥离。".into(),
                 "warn".into(),
             )
         } else if ble_alive && !winuhid_ready {
@@ -164,7 +168,7 @@ pub fn host_status_now(app: &AppHandle) -> T1BleHostStatus {
     let audio_alive = crate::audio::pcm_router::audio_router_ready()
         || crate::audio::pcm_router::audio_router_process_alive();
     let cable_ready = crate::audio::vb_cable::voice_env_status().ready;
-    let winuhid_ready = crate::bridges::xiaomi::hid_injector::is_ready_cached();
+    let winuhid_ready = crate::bridges::shared::hid_injector::is_ready_cached();
     let l0_ready = crate::bridges::t1::t1_hid_filter_env::l0_ready_fast();
     build_host_status(
         ble_alive,

@@ -1,6 +1,6 @@
 // 前端类型定义
 
-export type BridgeType = "xiaomi" | "t1" | "hanvon";
+export type BridgeType = "xiaomi" | "t1_ble" | "t1_usb" | "hanvon";
 
 export type BridgeStatus =
   | "Disconnected"

@@ -275,12 +275,14 @@ fn hook_loop() {
         ) {
             return LRESULT(1);
         }
+        // 录入窗内硬跳过整段 T1 闸门：避免吞键/补映射干扰小米与 T1 快捷键录入
         if crate::bridges::shared::shortcut_capture::is_swallow_active() {
             return CallNextHookEx(hook, code, wparam, lparam);
         }
 
         // T1 键盘/媒体键闸门：LL-first 吞掉遥控侧键原生功能（不超时回放）
         // 注意：只豁免 our_inject（EXTRA_INFO）。HOGP 常带 LLKHF_INJECTED，若当注入放行会漏 0xAA。
+        // 录入期见上方 is_swallow_active 早退，此处保证不会再进闸门。
         if down || up {
             crate::bridges::t1::native_suppress::sweep_expired_pending();
             if crate::bridges::t1::native_suppress::should_suppress_native(
@@ -291,8 +293,16 @@ fn hook_loop() {
                 // 仅闸门键（Apps / Browser_* / 重映射音量·静音·方向·OK）补映射。
                 // hold-suppress 的同键方向不进闸门，避免实体键盘误伤。
                 if down && crate::bridges::t1::native_suppress::is_gate_vk(vk as u16) {
-                    crate::bridges::t1::runtime::on_ll_gate_keydown(vk as u16);
-                    crate::bridges::t1::ble_keys::on_ll_gate_keydown(vk as u16);
+                    let vk16 = vk as u16;
+                    // 方向/OK/VK_HOME 是实体键盘常用键：LL 拿不到设备来源，不能盲补
+                    // 映射。改为暂挂，由 Raw Input（能拿设备路径）裁决：T1 → 补映射，
+                    // 真实键盘 → 回放原生键。
+                    if crate::bridges::t1::native_suppress::gate_needs_source_decision(vk16) {
+                        crate::bridges::t1::native_suppress::defer_gate_source(vk16, true);
+                    } else {
+                        crate::bridges::t1::runtime::on_ll_gate_keydown(vk16);
+                        crate::bridges::t1::ble_keys::on_ll_gate_keydown(vk16);
+                    }
                 }
                 if vk == 0xAA {
                     log::info!(

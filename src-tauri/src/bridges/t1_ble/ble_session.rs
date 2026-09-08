@@ -111,10 +111,10 @@ fn apply_t1_voice_gain(app: &AppHandle) {
     use tauri::Manager;
     let gain = app
         .try_state::<crate::config::manager::ConfigManager>()
-        .and_then(|m| m.get_device_config("t1").ok())
+        .and_then(|m| m.get_device_config("t1_ble").ok())
         .map(|c| c.gain_db)
-        .unwrap_or(crate::bridges::xiaomi::voice_gain::GAIN_DB_DEFAULT);
-    crate::bridges::xiaomi::voice_gain::set_gain_db(gain);
+        .unwrap_or(crate::bridges::shared::voice_gain::GAIN_DB_DEFAULT);
+    crate::bridges::shared::voice_gain::set_gain_db(gain);
 }
 
 #[cfg(target_os = "windows")]
@@ -692,7 +692,7 @@ fn publish_battery(app: &AppHandle, level: u8, last: &mut Option<u8>, force_log:
     let changed = last.map(|v| v != level).unwrap_or(true);
     *last = Some(level);
     if let Some(state) = app.try_state::<BridgeState>() {
-        state.update_battery_level(BridgeType::T1, level);
+        state.update_battery_level(BridgeType::T1Ble, level);
     }
     if force_log || changed {
         let _ = app.emit(
@@ -782,7 +782,7 @@ fn setup_battery_monitor(
                                 if let Some(state) = app2.try_state::<crate::bridges::BridgeState>()
                                 {
                                     state.update_battery_level(
-                                        crate::bridges::BridgeType::T1,
+                                        crate::bridges::BridgeType::T1Ble,
                                         level,
                                     );
                                 }
@@ -872,7 +872,7 @@ fn handle_audio(state: &Arc<Mutex<AtvvVoiceState>>, payload: &[u8]) {
             st.decoder.reset_with(pred, idx);
         }
         let samples = st.decoder.decode_bytes(&frame);
-        let gain_db = crate::bridges::xiaomi::voice_gain::gain_db();
+        let gain_db = crate::bridges::shared::voice_gain::gain_db();
         let samples = postprocess(&samples, gain_db);
         ble_pcm::push_16k(&samples);
         st.frames += 1;

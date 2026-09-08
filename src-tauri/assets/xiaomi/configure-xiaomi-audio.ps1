@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [ValidateSet("Install", "InstallElevated", "Finish", "Repair", "Restore", "Audit", "EnsureMic")]
+  [ValidateSet("Install", "InstallElevated", "Finish", "Repair", "Restore", "Audit", "EnsureMic", "EnsureUsbMic")]
   [string] $Mode = "Install",
   [string] $AppPath = "",
   [string] $DriverZipPath = "",
@@ -31,7 +31,28 @@ function Get-VBCableEndpoint([string] $Flow, [string] $Prefix, [string] $Pattern
 
 function Get-VBCableCapture { Get-VBCableEndpoint "Capture" "{0.0.1.00000000}" "(?i)(^|\s)CABLE Output(\s|$)" }
 function Get-VBCableRender { Get-VBCableEndpoint "Render" "{0.0.0.00000000}" "(?i)(^|\s)CABLE Input(\s|$)" }
+function Get-T1UsbMicCapture { Get-VBCableEndpoint "Capture" "{0.0.1.00000000}" "(?i)Mic Device" }
 function Test-VBCableReady { return [bool](Get-VBCableCapture) -and [bool](Get-VBCableRender) }
+
+function Allow-MicrophonePrivacy {
+  $root = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+  $desktop = Join-Path $root "NonPackaged"
+  $null = New-Item -ItemType Directory -Force -Path $root, $desktop
+  Set-ItemProperty -LiteralPath $root -Name Value -Value Allow -Type String
+  Set-ItemProperty -LiteralPath $desktop -Name Value -Value Allow -Type String
+}
+
+function Set-DefaultCaptureEndpoint([string] $DeviceId, [string] $Label) {
+  Initialize-AudioEndpointApi
+  $current = [XiaomiAudioEndpoint]::GetDefaultCapture()
+  if (-not (Test-Path -LiteralPath $PreviousMicFile) -and $current -ne $DeviceId) {
+    Set-Content -LiteralPath $PreviousMicFile -Value $current -Encoding UTF8
+  }
+  [XiaomiAudioEndpoint]::SetDefaultCapture($DeviceId)
+  Allow-MicrophonePrivacy
+  Set-CableEndpointVolume -DeviceId $DeviceId -Level 1.0
+  Write-Output ("Phase: DefaultCapture | {0} => {1}" -f $Label, $DeviceId)
+}
 
 function Initialize-AudioEndpointApi {
   if ("XiaomiAudioEndpoint" -as [type]) { return }
@@ -178,21 +199,16 @@ function Set-CableEndpointVolume([string] $DeviceId, [float] $Level = 1.0) {
 function Set-DefaultCableMicrophone {
   $capture = Get-VBCableCapture
   if (-not $capture) { throw "CABLE Output is not available" }
-  Initialize-AudioEndpointApi
-  $current = [XiaomiAudioEndpoint]::GetDefaultCapture()
-  if (-not (Test-Path -LiteralPath $PreviousMicFile) -and $current -ne $capture.Id) {
-    Set-Content -LiteralPath $PreviousMicFile -Value $current -Encoding UTF8
-  }
-  [XiaomiAudioEndpoint]::SetDefaultCapture($capture.Id)
-  $root = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
-  $desktop = Join-Path $root "NonPackaged"
-  $null = New-Item -ItemType Directory -Force -Path $root, $desktop
-  Set-ItemProperty -LiteralPath $root -Name Value -Value Allow -Type String
-  Set-ItemProperty -LiteralPath $desktop -Name Value -Value Allow -Type String
-  # 输入法听的是 Capture「CABLE Output」；播放端是 Render「CABLE Input」——两端都拉满并取消静音
-  Set-CableEndpointVolume -DeviceId $capture.Id -Level 1.0
+  Set-DefaultCaptureEndpoint -DeviceId $capture.Id -Label "CABLE Output"
+  # 播放端是 Render「CABLE Input」——两端都拉满并取消静音
   $render = Get-VBCableRender
   if ($render) { Set-CableEndpointVolume -DeviceId $render.Id -Level 1.0 }
+}
+
+function Set-DefaultUsbMicrophone {
+  $capture = Get-T1UsbMicCapture
+  if (-not $capture) { throw "Mic Device is not available" }
+  Set-DefaultCaptureEndpoint -DeviceId $capture.Id -Label "Mic Device"
 }
 
 function Set-FinishRunOnce {
@@ -250,6 +266,11 @@ try {
       # 轻量：仅把默认麦设为 CABLE Output 并拉满音量（语音键按下时调用，无需 zip）
       if (-not (Test-VBCableReady)) { throw "VB-CABLE is not ready" }
       Set-DefaultCableMicrophone
+      $result = "OK"
+    }
+    "EnsureUsbMic" {
+      # T1 USB：默认麦切到 Mic Device（避免仍停在 CABLE Output 导致输入法无声）
+      Set-DefaultUsbMicrophone
       $result = "OK"
     }
     "Restore" {

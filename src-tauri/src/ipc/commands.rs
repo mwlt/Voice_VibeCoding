@@ -59,7 +59,13 @@ pub async fn start_bridge(
 
     match bt {
         BridgeType::Xiaomi => start_xiaomi_bridge(app, &state, &config_manager).await,
-        BridgeType::T1 => {
+        BridgeType::T1Usb | BridgeType::T1Ble => {
+            // 蓝牙走独立 IPC；此处仅 USB（含历史别名 "t1"）
+            if bt == BridgeType::T1Ble {
+                let msg: String = "T1(蓝牙) 请使用 start_t1_ble_bridge".into();
+                state.update_status(bt, BridgeStatus::Error(msg.clone()));
+                return Err(msg);
+            }
             match crate::bridges::t1::runtime::start_t1_bridge(
                 app.clone(),
                 &state,
@@ -234,8 +240,14 @@ pub async fn stop_bridge(
         if let Some(runtime) = app.try_state::<Arc<XiaomiRuntime>>() {
             runtime.request_stop();
         }
-    } else if bt == BridgeType::T1 {
+    } else if bt == BridgeType::T1Usb || bridge_type.eq_ignore_ascii_case("t1") {
         crate::bridges::t1::runtime::stop_t1_bridge(&app, &state);
+        return Ok(());
+    } else if bt == BridgeType::T1Ble {
+        if let Some(runtime) = app.try_state::<Arc<crate::bridges::t1::ble_runtime::T1BleRuntime>>()
+        {
+            crate::bridges::t1::ble_runtime::stop_t1_ble_bridge(&app, &runtime);
+        }
         return Ok(());
     }
     state.update_status(bt, BridgeStatus::Disconnected);
@@ -269,7 +281,7 @@ pub async fn t1_ble_running(
     Ok(crate::bridges::t1::ble_runtime::is_running(&runtime))
 }
 
-/// T1 BLE 主机状态（虚拟声卡 / WinUHid / L0 Search剥离 / ATVV / USB）
+/// T1 BLE 主机状态（虚拟声卡 / WinUHid / Consumer / ATVV / USB）
 #[tauri::command]
 pub async fn get_t1_ble_host_status(
     app: AppHandle,
@@ -288,7 +300,9 @@ pub async fn get_t1_hid_filter_status(
     .map_err(|e| format!("t1 L0 status task: {e}"))?)
 }
 
-/// T1 蓝牙专属 L0：自动修复 / 安装 Search 剥离驱动（白名单仅 T1 BLE）
+/// T1 蓝牙专属 L0：自动修复 Consumer（重新启用误禁用的集合；Search 靠 L1）
+///
+/// 启动流水线与 BLE 连接也会自动调用；本命令供设置页手动触发（无视冷却）。
 #[tauri::command]
 pub async fn repair_t1_hid_filter(
 ) -> Result<crate::bridges::t1::t1_hid_filter_env::T1HidFilterActionResult, String> {
@@ -323,7 +337,7 @@ pub async fn save_config(
 ) -> Result<(), String> {
     let device = bridge_type_to_device(&bridge_type)?;
     config_manager.save_device_config(device, &config)?;
-    if device == "t1" {
+    if device == "t1_ble" || device == "t1_usb" || device == "t1" {
         sync_t1_media_gates(&config);
     }
     Ok(())
@@ -389,7 +403,7 @@ pub async fn update_key_mapping(
     let mut config = config_manager.get_device_config(device)?;
     config.button_bindings.insert(button_id, action);
     config_manager.save_device_config(device, &config)?;
-    if device == "t1" {
+    if device == "t1_ble" || device == "t1_usb" || device == "t1" {
         sync_t1_media_gates(&config);
     }
     Ok(())
@@ -1025,7 +1039,8 @@ fn append_host_log(_config_manager: &ConfigManager, message: &str) {
 fn parse_bridge_type(s: &str) -> Result<BridgeType, String> {
     match s.to_lowercase().as_str() {
         "xiaomi" => Ok(BridgeType::Xiaomi),
-        "t1" => Ok(BridgeType::T1),
+        "t1_ble" | "t1-ble" => Ok(BridgeType::T1Ble),
+        "t1_usb" | "t1-usb" | "t1" => Ok(BridgeType::T1Usb),
         "hanvon" | "v60" => Ok(BridgeType::Hanvon),
         _ => Err(format!("未知设备类型: {}", s)),
     }
@@ -1034,7 +1049,9 @@ fn parse_bridge_type(s: &str) -> Result<BridgeType, String> {
 fn bridge_type_to_device(s: &str) -> Result<&str, String> {
     match s.to_lowercase().as_str() {
         "xiaomi" => Ok("xiaomi"),
-        "t1" => Ok("t1"),
+        "t1_ble" | "t1-ble" => Ok("t1_ble"),
+        "t1_usb" | "t1-usb" => Ok("t1_usb"),
+        "t1" => Ok("t1_usb"), // 历史别名 → USB
         "hanvon" | "v60" => Ok("hanvon"),
         _ => Err(format!("未知设备类型: {}", s)),
     }

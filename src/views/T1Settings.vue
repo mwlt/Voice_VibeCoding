@@ -4,21 +4,31 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { useBridgeStore } from "../stores/bridge";
 import { useConfigStore } from "../stores/config";
-import type { DeviceConfig } from "../types";
+import type { DeviceConfig, BridgeType } from "../types";
 import DeviceStatus from "../components/DeviceStatus.vue";
 import BatteryLevelIcon from "../components/BatteryLevelIcon.vue";
 import CableVolRuler from "../components/CableVolRuler.vue";
 import T1KeyMappingStage from "../components/t1/T1KeyMappingStage.vue";
 import { cableZoneForLevel } from "../utils/cableVolMeter";
+import { stripT1FixedBindings } from "../utils/t1Keys";
 
 type LogEntry = { id: number; time: string; text: string };
 
+const props = withDefaults(
+  defineProps<{ transport?: "ble" | "usb" }>(),
+  { transport: "ble" }
+);
+
 const bridge = useBridgeStore();
 const configStore = useConfigStore();
-const type = "t1" as const;
+const type = computed<BridgeType>(() =>
+  props.transport === "usb" ? "t1_usb" : "t1_ble"
+);
+const isBlePage = computed(() => props.transport === "ble");
+const isUsbPage = computed(() => props.transport === "usb");
 
-const device = computed(() => bridge.devices[type]);
-const config = computed(() => configStore.configs[type]);
+const device = computed(() => bridge.devices[type.value]);
+const config = computed(() => configStore.configs[type.value]);
 
 const logs = ref<LogEntry[]>([]);
 const logAreaRef = ref<HTMLElement | null>(null);
@@ -161,20 +171,23 @@ const bleButtonText = computed(() => {
   return "蓝牙连接";
 });
 
-const usbConnected = computed(() => device.value.status === "Connected");
-const bleConnected = computed(() => bleStatus.value === "connected");
+const usbConnected = computed(() =>
+  isUsbPage.value && device.value.status === "Connected"
+);
+const bleConnected = computed(() =>
+  isBlePage.value && bleStatus.value === "connected"
+);
 
 const infoName = computed(() => {
-  if (bleConnected.value && bleName.value) return bleName.value;
-  if (usbConnected.value && device.value.device_name) return device.value.device_name;
-  return bleName.value || device.value.device_name || "T1 Google Remote";
+  if (isBlePage.value) {
+    return bleName.value || device.value.device_name || "T1-Remote";
+  }
+  return device.value.device_name || "T1 Google Remote";
 });
 
 const connectionModeLabel = computed(() => {
-  if (usbConnected.value && bleConnected.value) return "USB + 蓝牙 BLE";
-  if (usbConnected.value) return "USB";
-  if (bleConnected.value) return "蓝牙 BLE";
-  return "—";
+  if (isBlePage.value) return bleConnected.value ? "蓝牙 BLE" : "—";
+  return usbConnected.value ? "USB" : "—";
 });
 
 const usbAddress = computed(() => (device.value.device_address || "").trim());
@@ -182,25 +195,15 @@ const bleAddressValue = computed(() =>
   (bleAddress.value || config.value?.bluetooth_address || "").trim()
 );
 
-const showUsbAddress = computed(() => {
-  if (usbConnected.value) {
-    if (usbAddress.value && usbAddress.value === infoName.value) return false;
-    return true;
-  }
-  return !bleConnected.value;
-});
-const showBleAddress = computed(() => {
-  if (!bleConnected.value) return false;
-  if (!usbConnected.value) return true;
-  const usb = usbAddress.value.toLowerCase();
-  const ble = bleAddressValue.value.toLowerCase();
-  if (!usb) return true;
-  if (!ble) return false;
-  return usb !== ble;
-});
+const showUsbAddress = computed(
+  () => isUsbPage.value && usbConnected.value && !!usbAddress.value
+);
+const showBleAddress = computed(
+  () => isBlePage.value && bleConnected.value && !!bleAddressValue.value
+);
 
 const batteryLevel = computed(() => {
-  if (bleBattery.value != null) return bleBattery.value;
+  if (isBlePage.value && bleBattery.value != null) return bleBattery.value;
   return device.value.battery_level ?? null;
 });
 
@@ -209,14 +212,8 @@ const USB_HOST_IDS = new Set(["usb", "winuhid"]);
 
 const hostItems = computed(() => {
   const items = host.value.items;
-  const bleOn = bleConnected.value || host.value.ble_alive;
-  const usbOn = usbConnected.value || host.value.usb_alive;
-  if (bleOn && usbOn) {
-    return items.filter((i) => BLE_HOST_IDS.has(i.id) || USB_HOST_IDS.has(i.id));
-  }
-  if (bleOn) return items.filter((i) => BLE_HOST_IDS.has(i.id));
-  if (usbOn) return items.filter((i) => USB_HOST_IDS.has(i.id));
-  return items.filter((i) => i.id === "usb" || i.id === "ble");
+  if (isBlePage.value) return items.filter((i) => BLE_HOST_IDS.has(i.id));
+  return items.filter((i) => USB_HOST_IDS.has(i.id));
 });
 
 function itemToneClass(tone: string): string {
@@ -318,8 +315,8 @@ function prependLog(text: string) {
 }
 
 function toggleConnection() {
-  if (device.value.status === "Connected") bridge.stopBridge(type);
-  else bridge.startBridge(type);
+  if (device.value.status === "Connected") bridge.stopBridge(type.value);
+  else bridge.startBridge(type.value);
 }
 
 async function toggleBleConnection() {
@@ -372,7 +369,7 @@ function onBleEvent(payload: {
   if (payload.address) bleAddress.value = payload.address;
   if (typeof payload.level === "number" && Number.isFinite(payload.level)) {
     bleBattery.value = Math.max(0, Math.min(100, Math.round(payload.level)));
-    void bridge.refreshStatus(type);
+    void bridge.refreshStatus(type.value);
   }
   const st = (payload.status || "").toLowerCase();
   if (st === "connected") bleStatus.value = "connected";
@@ -389,7 +386,8 @@ function onBleEvent(payload: {
 }
 
 async function onKeyMappingSave(cfg: DeviceConfig) {
-  const ok = await configStore.saveConfig(type, cfg);
+  const toSave = isBlePage.value ? stripT1FixedBindings(cfg, "ble") : cfg;
+  const ok = await configStore.saveConfig(type.value, toSave);
   prependLog(ok ? "按键映射已保存" : "按键映射保存失败");
 }
 
@@ -497,86 +495,106 @@ watch(
 
 onMounted(async () => {
   prependLog("日志区准备就绪");
-  await Promise.all([bridge.refreshStatus(type), configStore.loadConfig(type)]);
-  await Promise.all([refreshHostStatus(), refreshVoiceMeter()]);
+  await Promise.all([bridge.refreshStatus(type.value), configStore.loadConfig(type.value)]);
+  const loaded = configStore.configs[type.value];
+  if (loaded && isBlePage.value) {
+    const stripped = stripT1FixedBindings(loaded, "ble");
+    const changed =
+      JSON.stringify(stripped.button_bindings) !==
+      JSON.stringify(loaded.button_bindings);
+    configStore.configs[type.value] = stripped;
+    if (changed) {
+      void configStore.saveConfig(type.value, stripped);
+    }
+  }
+  await refreshHostStatus();
+  if (isBlePage.value) {
+    await refreshVoiceMeter();
+  }
   hostPollTimer = setInterval(() => {
     void refreshHostStatus();
   }, 2000);
   devicePollTimer = setInterval(() => {
-    void bridge.refreshStatus(type);
+    void bridge.refreshStatus(type.value);
   }, 1500);
-  try {
-    const running = await invoke<boolean>("t1_ble_running");
-    if (running) {
-      bleStatus.value = "connected";
-      bleMessage.value = "蓝牙桥接运行中";
-    }
-  } catch {
-    /* ignore */
-  }
-  try {
-    unlistenKey = await listen<{
-      id?: string;
-      event?: string;
-      message?: string;
-      pressed?: boolean;
-      phase?: string;
-    }>("t1-key", (ev) => {
-      const p = ev.payload;
-      applyRemoteLed(p);
-      if (p.message) {
-        const phase = (p.phase || "").toLowerCase();
-        const tag =
-          phase === "native"
-            ? "[USB原生]"
-            : phase === "inject"
-              ? "[USB注入]"
-              : phase === "ll"
-                ? "[USB-LL]"
-                : phase === "key"
-                  ? "[USB]"
-                  : "[USB]";
-        prependLog(`${tag} ${p.message}`);
-        return;
+  if (isBlePage.value) {
+    try {
+      const running = await invoke<boolean>("t1_ble_running");
+      if (running) {
+        bleStatus.value = "connected";
+        bleMessage.value = "蓝牙桥接运行中";
       }
-      if (p.id) prependLog(`[USB] 按键 ${p.id}${p.event ? ` (${p.event})` : ""}`);
-    });
-  } catch (e) {
-    console.warn("listen t1-key failed", e);
-    prependLog("按键日志监听失败");
+    } catch {
+      /* ignore */
+    }
   }
-  try {
-    unlistenBle = await listen<{
-      phase?: string;
-      message?: string;
-      status?: string;
-      name?: string;
-      address?: string;
-      level?: number;
-      id?: string;
-      pressed?: boolean;
-    }>("t1-ble", (ev) => {
-      onBleEvent(ev.payload);
-      void refreshHostStatus();
-    });
-  } catch (e) {
-    console.warn("listen t1-ble failed", e);
-    prependLog("蓝牙日志监听失败");
+  if (isUsbPage.value) {
+    try {
+      unlistenKey = await listen<{
+        id?: string;
+        event?: string;
+        message?: string;
+        pressed?: boolean;
+        phase?: string;
+      }>("t1-key", (ev) => {
+        const p = ev.payload;
+        applyRemoteLed(p);
+        if (p.message) {
+          const phase = (p.phase || "").toLowerCase();
+          const tag =
+            phase === "native"
+              ? "[USB原生]"
+              : phase === "inject"
+                ? "[USB注入]"
+                : phase === "ll"
+                  ? "[USB-LL]"
+                  : phase === "key"
+                    ? "[USB]"
+                    : "[USB]";
+          prependLog(`${tag} ${p.message}`);
+          return;
+        }
+        if (p.id) prependLog(`[USB] 按键 ${p.id}${p.event ? ` (${p.event})` : ""}`);
+      });
+    } catch (e) {
+      console.warn("listen t1-key failed", e);
+      prependLog("按键日志监听失败");
+    }
   }
-  try {
-    unlistenMeter = await listen<VoiceMeterSnapshot>("t1-ble-voice-meter", (ev) => {
-      const p = ev.payload;
-      voiceMeter.value = {
-        bleState: p.bleState,
-        bleLevel: p.bleLevel,
-        waveform: p.waveform?.length ? p.waveform : Array(28).fill(0),
-        cableActive: p.cableActive,
-        cableLevel: p.cableLevel,
-        atvvOk: p.atvvOk,
-      };
-    });
-  } catch (e) {
-    console.warn("listen t1-ble-voice-meter failed", e);
+  if (isBlePage.value) {
+    try {
+      unlistenBle = await listen<{
+        phase?: string;
+        message?: string;
+        status?: string;
+        name?: string;
+        address?: string;
+        level?: number;
+        id?: string;
+        pressed?: boolean;
+      }>("t1-ble", (ev) => {
+        onBleEvent(ev.payload);
+        void refreshHostStatus();
+      });
+    } catch (e) {
+      console.warn("listen t1-ble failed", e);
+      prependLog("蓝牙日志监听失败");
+    }
+    try {
+      unlistenMeter = await listen<VoiceMeterSnapshot>("t1-ble-voice-meter", (ev) => {
+        const p = ev.payload;
+        voiceMeter.value = {
+          bleState: p.bleState,
+          bleLevel: p.bleLevel,
+          waveform: p.waveform?.length ? p.waveform : Array(28).fill(0),
+          cableActive: p.cableActive,
+          cableLevel: p.cableLevel,
+          atvvOk: p.atvvOk,
+        };
+      });
+    } catch (e) {
+      console.warn("listen t1-ble-voice-meter failed", e);
+    }
   }
 });
 
@@ -593,14 +611,15 @@ onUnmounted(() => {
 <template>
   <div class="page">
     <header class="page-header">
-      <h2>T1 遥控器</h2>
+      <h2>{{ isBlePage ? "T1(蓝牙)" : "T1(USB)" }}</h2>
       <div class="header-actions">
         <DeviceStatus
+          v-if="isUsbPage"
           :status="device.status"
           :loading="bridge.loading[type]"
           @toggle="toggleConnection"
         />
-        <div class="ble-status">
+        <div v-if="isBlePage" class="ble-status">
           <span
             :class="[
               'status-indicator',
@@ -664,6 +683,7 @@ onUnmounted(() => {
             </div>
           </div>
           <div
+            v-if="isBlePage"
             class="info-item info-item-audio"
             :class="{
               'is-session': voiceMeter.bleState === 'session',
@@ -686,6 +706,7 @@ onUnmounted(() => {
             </div>
           </div>
           <div
+            v-if="isBlePage"
             class="info-item info-item-cable-vol"
             :class="[
               `cable-zone-${cableVolZone}`,
@@ -725,18 +746,18 @@ onUnmounted(() => {
               </span>
             </div>
           </div>
-          <div class="host-l0-row">
+          <div v-if="isBlePage" class="host-l0-row">
             <button
               class="btn btn-secondary host-l0-btn"
               type="button"
               :disabled="l0Repairing"
-              title="仅禁用 T1 蓝牙 Consumer Control（AC Search），不碰键盘/鼠标/其它电脑外设；无需改 BIOS"
+              title="恢复 T1 Consumer（Home/删除）。无法用 pnputil 只禁 AC Search；搜索靠应用内 L1"
               @click="repairT1L0Filter"
             >
-              {{ l0Repairing ? "修复中…" : "自动修复 Search 剥离" }}
+              {{ l0Repairing ? "修复中…" : "自动修复 Consumer" }}
             </button>
             <span class="host-l0-hint">
-              禁用 T1 的 Consumer HID（切断 AC Search）；需 UAC，不改 BIOS / 不装自签驱动
+              整集禁用会导致 Home/删除失效；修复=重新启用。AC Search 由 L1 吞键（需 UAC）
             </span>
           </div>
           <p v-if="l0RepairMsg" class="host-l0-msg">{{ l0RepairMsg }}</p>
@@ -770,6 +791,7 @@ onUnmounted(() => {
         <T1KeyMappingStage
           :config="config"
           :hardware-lit="remoteLedLit"
+          :transport="props.transport"
           @save="onKeyMappingSave"
         />
       </section>

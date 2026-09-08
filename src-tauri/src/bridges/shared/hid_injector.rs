@@ -363,7 +363,7 @@ fn release_keyboard(dev: &Devices, vks: &[u16]) -> Result<(), String> {
 
 pub fn press(vks: &[u16]) -> Result<(), String> {
     ensure_init();
-    crate::bridges::xiaomi::key_log::note_virtual_hid_inject(vks);
+    log::trace!("virtual hid inject vks={vks:?}");
     let guard = DEVICES.lock();
     let Some(dev) = guard.as_ref() else {
         return Err("WinUHid not open".into());
@@ -409,7 +409,7 @@ pub fn release_all() -> Result<(), String> {
 /// 语音路径专用；其它映射键仍走分步 press/release。
 pub fn press_single(vks: &[u16]) -> Result<(), String> {
     ensure_init();
-    crate::bridges::xiaomi::key_log::note_virtual_hid_inject(vks);
+    log::trace!("virtual hid inject vks={vks:?}");
     let guard = DEVICES.lock();
     let dev = guard
         .as_ref()

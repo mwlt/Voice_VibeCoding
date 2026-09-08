@@ -1,7 +1,7 @@
-//! T1 蓝牙专属 L0：禁用 Consumer Control HID 集合（切断 AC Search），无需自签 `.sys`。
+//! T1 蓝牙专属 L0：保证 Consumer Control 集合可用（恢复误禁用），Search 靠 L1 吞键。
 //!
-//! Secure Boot 下不能让用户关 BIOS / 开 testsigning；因此不装自定义内核过滤驱动。
-//! **绝不**动 USB T1 / 小米 / WinUHid / 其它键盘；仅 `01620A/0407` 的 Consumer TLC。
+//! `pnputil` **无法**只禁 AC Search 单个 Usage；旧方案整集禁用会导致 Home/删除/音量全死。
+//! 现行：自动修复 = Enable 白名单内 T1 Consumer；AC Search 由 LL/HotKey/WH_SHELL（L1）处理。
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -13,8 +13,17 @@ use std::time::{Duration, Instant};
 static STATUS_CACHE: Mutex<Option<(Instant, T1HidFilterEnvStatus)>> = Mutex::new(None);
 static L0_READY: AtomicBool = AtomicBool::new(false);
 static REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+/// 本进程是否已对「未禁用」跑过自动修复（避免反复弹 UAC）
+static AUTO_REPAIR_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+static WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
+static LAST_AUTO_REPAIR_AT: Mutex<Option<Instant>> = Mutex::new(None);
+/// 串行化 Status/Install，避免启动流水线与 BLE 连接同时弹两次 UAC
+static REPAIR_LOCK: Mutex<()> = Mutex::new(());
 /// 主机状态轮询很勤；L0 探测走 PowerShell 很慢，禁止在 IPC 热路径同步执行。
 const STATUS_TTL: Duration = Duration::from_secs(60);
+/// 重连后 Consumer 可能重新启用：冷却期内不重复弹 UAC
+const AUTO_REPAIR_COOLDOWN: Duration = Duration::from_secs(90);
+const WATCHDOG_INTERVAL: Duration = Duration::from_secs(45);
 
 pub fn invalidate_status_cache() {
     *STATUS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -56,6 +65,141 @@ fn cache_is_fresh() -> bool {
         Some((at, _)) => at.elapsed() < STATUS_TTL,
         None => false,
     }
+}
+
+/// 是否应对 L0 跑自动修复（恢复被禁用的 T1 Consumer）。
+/// - 已就绪：否
+/// - 冷却中：否
+/// - 仅 `NOT_BOUND`（找到设备但仍有禁用实例）才修
+pub fn should_auto_repair_l0(ready: bool, result_code: &str, blocked_by_attempt_or_cooldown: bool) -> bool {
+    if ready || blocked_by_attempt_or_cooldown {
+        return false;
+    }
+    result_code.eq_ignore_ascii_case("NOT_BOUND")
+}
+
+fn auto_repair_blocked() -> bool {
+    if AUTO_REPAIR_ATTEMPTED.load(Ordering::SeqCst) {
+        // 进程内首次尝试后仍允许冷却到期再试（BLE 重连可能冒出新实例）
+        if let Some(at) = *LAST_AUTO_REPAIR_AT.lock().unwrap_or_else(|e| e.into_inner()) {
+            if at.elapsed() < AUTO_REPAIR_COOLDOWN {
+                return true;
+            }
+            return false;
+        }
+        return true;
+    }
+    false
+}
+
+fn mark_auto_repair_attempted() {
+    AUTO_REPAIR_ATTEMPTED.store(true, Ordering::SeqCst);
+    *LAST_AUTO_REPAIR_AT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+}
+
+/// 同步探测；若为 NOT_BOUND 则跑一次 Install（可能弹 UAC）。
+pub fn ensure_ready_once(reason: &str) -> T1HidFilterActionResult {
+    let _guard = REPAIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    invalidate_status_cache();
+    let status = env_status();
+    L0_READY.store(status.ready, Ordering::SeqCst);
+    *STATUS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((Instant::now(), status.clone()));
+    if status.ready {
+        crate::bridges::t1::ble_keys::resync_gates_after_l0();
+        return T1HidFilterActionResult {
+            ok: true,
+            ready: true,
+            needs_reboot: false,
+            message: status.message,
+            result_code: "READY".into(),
+        };
+    }
+    if !should_auto_repair_l0(status.ready, &status.result_code, auto_repair_blocked()) {
+        log::info!(
+            "T1 L0 auto-repair skip reason={reason} code={} ready={} blocked={}",
+            status.result_code,
+            status.ready,
+            auto_repair_blocked()
+        );
+        return T1HidFilterActionResult {
+            ok: false,
+            ready: false,
+            needs_reboot: false,
+            message: status.message,
+            result_code: status.result_code,
+        };
+    }
+    mark_auto_repair_attempted();
+    log::info!("T1 L0 auto-repair begin reason={reason}");
+    // 已持 REPAIR_LOCK：直接 Install，避免 repair() 再抢锁死锁
+    match repair_unlocked() {
+        Ok(r) => {
+            log::info!(
+                "T1 L0 auto-repair done reason={reason} ready={} code={}",
+                r.ready,
+                r.result_code
+            );
+            r
+        }
+        Err(e) => {
+            log::warn!("T1 L0 auto-repair failed reason={reason}: {e}");
+            T1HidFilterActionResult {
+                ok: false,
+                ready: false,
+                needs_reboot: false,
+                message: e,
+                result_code: "SCRIPT_ERROR".into(),
+            }
+        }
+    }
+}
+
+/// 后台：BLE 连接 / 启动流水线调用，不阻塞 UI。
+pub fn kick_auto_repair_if_needed(reason: &'static str) {
+    let _ = thread::Builder::new()
+        .name("t1-l0-auto-repair".into())
+        .spawn(move || {
+            let _ = ensure_ready_once(reason);
+        });
+}
+
+/// 常驻看门狗：Consumer 被系统重新枚举启用后自动再禁（冷却防刷 UAC）。
+pub fn spawn_auto_repair_watchdog() {
+    if WATCHDOG_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let _ = thread::Builder::new()
+        .name("t1-l0-watchdog".into())
+        .spawn(|| {
+            log::info!(
+                "T1 L0 watchdog start interval={}s cooldown={}s",
+                WATCHDOG_INTERVAL.as_secs(),
+                AUTO_REPAIR_COOLDOWN.as_secs()
+            );
+            loop {
+                thread::sleep(WATCHDOG_INTERVAL);
+                // 已就绪则只做轻量过期刷新；未就绪则走 ensure
+                if L0_READY.load(Ordering::Relaxed) && cache_is_fresh() {
+                    continue;
+                }
+                invalidate_status_cache();
+                let st = env_status();
+                L0_READY.store(st.ready, Ordering::SeqCst);
+                *STATUS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((Instant::now(), st.clone()));
+                if should_auto_repair_l0(st.ready, &st.result_code, auto_repair_blocked()) {
+                    mark_auto_repair_attempted();
+                    log::warn!(
+                        "T1 L0 watchdog: Consumer 仍禁用，自动恢复启用 matched={} bound={}",
+                        st.matched_device_count,
+                        st.bound_device_count
+                    );
+                    let _guard = REPAIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                    let _ = repair_unlocked();
+                }
+            }
+        });
 }
 
 /// 过期时在后台线程跑 Status；可重入、单飞。
@@ -326,13 +470,13 @@ pub fn env_status() -> T1HidFilterEnvStatus {
                     let (ready, _svc, _bin, matched, bound) = parse_status_phase(&stdout);
                     let message = match result.as_str() {
                         "READY" => {
-                            "已禁用 T1 蓝牙 Consumer Control（AC Search 不会进系统）。键盘/鼠标集合仍保留。".into()
+                            "T1 Consumer 已启用（Home/删除/音量可用）。AC Search 由应用内 L1 吞键，非整集禁用。".into()
                         }
                         "NO_T1_BLE_DEVICE" => {
                             "未检测到 T1 蓝牙 Consumer HID（01620A/0407）。请先系统配对并连接 T1-Remote。".into()
                         }
                         "NOT_BOUND" => {
-                            "已找到 T1 Consumer Control，尚未禁用。可点「自动修复 Search 剥离」（需 UAC，不改 BIOS）。".into()
+                            "T1 Consumer 仍有禁用实例（旧整集剥离残留）。点「自动修复」重新启用（需 UAC）。".into()
                         }
                         other => format!("L0 状态：{other}"),
                     };
@@ -367,6 +511,11 @@ pub fn env_status() -> T1HidFilterEnvStatus {
 }
 
 pub fn repair() -> Result<T1HidFilterActionResult, String> {
+    let _guard = REPAIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    repair_unlocked()
+}
+
+fn repair_unlocked() -> Result<T1HidFilterActionResult, String> {
     invalidate_status_cache();
     let status = env_status();
     L0_READY.store(status.ready, Ordering::SeqCst);
@@ -392,13 +541,16 @@ pub fn repair() -> Result<T1HidFilterActionResult, String> {
     *STATUS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
         Some((Instant::now(), after.clone()));
     let ready = after.ready || result == "READY";
+    if ready {
+        crate::bridges::t1::ble_keys::resync_gates_after_l0();
+    }
     let message = if ready {
-        "已禁用 T1 蓝牙 Consumer Control：系统不再收到 AC Search。仅影响该遥控器的媒体键集合，不影响键盘/鼠标/其它电脑外设。".into()
+        "已恢复 T1 Consumer Control：Home/删除/音量可映射。Windows 搜索靠应用内 L1 防护（无法用 pnputil 只剥 AC Search 一键）。".into()
     } else {
         match result.as_str() {
             "NO_T1_BLE_DEVICE" => after.message,
             "REFUSED_NON_T1_BLE" => {
-                "安全拒绝：匹配结果含非 T1 蓝牙设备，未禁用任何设备。".into()
+                "安全拒绝：匹配结果含非 T1 蓝牙设备，未改动任何设备。".into()
             }
             "NEED_ADMIN" => "需要管理员权限（UAC）。请允许提权后重试。".into(),
             other => format!("{}（{other}）", after.message),
@@ -440,5 +592,15 @@ mod tests {
     fn package_layout_exists_in_repo() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/t1_hid_filter");
         assert!(root.join("install-t1-hid-filter.ps1").is_file());
+    }
+
+    #[test]
+    fn auto_repair_only_when_not_bound() {
+        assert!(!should_auto_repair_l0(true, "READY", false));
+        assert!(!should_auto_repair_l0(false, "NOT_BOUND", true));
+        assert!(!should_auto_repair_l0(false, "NO_T1_BLE_DEVICE", false));
+        assert!(!should_auto_repair_l0(false, "NEED_ADMIN", false));
+        assert!(should_auto_repair_l0(false, "NOT_BOUND", false));
+        assert!(should_auto_repair_l0(false, "not_bound", false));
     }
 }

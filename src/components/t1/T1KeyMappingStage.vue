@@ -14,8 +14,6 @@ import T1RemoteHotspot from "./T1RemoteHotspot.vue";
 import T1KeyIcon from "./T1KeyIcon.vue";
 import { MEDIA_PICK_KEYS, vkDisplayName } from "../../utils/vkDisplay";
 import {
-  T1_LEFT_COLUMN_IDS,
-  T1_RIGHT_COLUMN_IDS,
   T1_VOICE_QUICK_PRESETS,
   T1_FIXED_SYSTEM_HINTS,
   applyT1CapturedBinding,
@@ -24,14 +22,22 @@ import {
   t1ActionLabel,
   t1IsFixedSystemKey,
   t1LabelOf,
+  t1LeftColumnIds,
+  t1RightColumnIds,
   type T1FixedSystemId,
+  type T1Transport,
   type T1VoiceQuickPreset,
 } from "../../utils/t1Keys";
 
-const props = defineProps<{
-  config: DeviceConfig;
-  hardwareLit?: boolean;
-}>();
+const props = withDefaults(
+  defineProps<{
+    config: DeviceConfig;
+    hardwareLit?: boolean;
+    /** ble：隐藏透传键；usb：完整映射台 */
+    transport?: T1Transport;
+  }>(),
+  { transport: "ble" }
+);
 
 const emit = defineEmits<{
   save: [config: DeviceConfig];
@@ -130,15 +136,22 @@ function applyVoiceQuick(item: T1VoiceQuickPreset, e: MouseEvent) {
   window.setTimeout(() => {
     if (voiceQuickPressedId.value === item.id) voiceQuickPressedId.value = null;
   }, 160);
-  emit("save", applyT1VoiceQuick(props.config, item));
+  emit("save", applyT1VoiceQuick(props.config, item, props.transport));
   (e.currentTarget as HTMLButtonElement).blur();
   if (selectedId.value === "voice" || hoverId.value === "voice") {
     void nextTick().then(scheduleUpdateLine);
   }
 }
 
+const leftColumnIds = computed(() => t1LeftColumnIds(props.transport));
+const rightColumnIds = computed(() => t1RightColumnIds(props.transport));
+
+function isFixedKey(id: string): boolean {
+  return t1IsFixedSystemKey(id, props.transport);
+}
+
 const leftButtons = computed(() =>
-  T1_LEFT_COLUMN_IDS.map((id) => ({
+  leftColumnIds.value.map((id) => ({
     id,
     label: t1LabelOf(id, props.config.button_aliases),
     action: actionOf(id),
@@ -147,7 +160,7 @@ const leftButtons = computed(() =>
 );
 
 const rightButtons = computed(() =>
-  T1_RIGHT_COLUMN_IDS.map((id) => ({
+  rightColumnIds.value.map((id) => ({
     id,
     label: t1LabelOf(id, props.config.button_aliases),
     action: actionOf(id),
@@ -217,7 +230,7 @@ function updateLine() {
     return;
   }
 
-  const side = (T1_LEFT_COLUMN_IDS as readonly string[]).includes(id)
+  const side = (leftColumnIds.value as readonly string[]).includes(id)
     ? "left"
     : "right";
   const keyPt = keyEdgeToward(key, stageBox, side);
@@ -235,7 +248,7 @@ function updateLine() {
 
   const nextPath = `M ${cardPt.x} ${cardPt.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${keyPt.x} ${keyPt.y}`;
   const strong = selectedId.value === id;
-  const fixed = t1IsFixedSystemKey(id);
+  const fixed = isFixedKey(id);
   const opacity = fixed ? 0.55 : strong ? 1 : 0.45;
   if (linePath.value !== nextPath) linePath.value = nextPath;
   if (dotA.value.x !== cardPt.x || dotA.value.y !== cardPt.y) dotA.value = cardPt;
@@ -246,12 +259,12 @@ function updateLine() {
 }
 
 function fixedHintOf(id: string): string {
-  if (!t1IsFixedSystemKey(id)) return "";
+  if (!isFixedKey(id)) return "";
   return T1_FIXED_SYSTEM_HINTS[id as T1FixedSystemId];
 }
 
 async function selectButton(id: string) {
-  if (t1IsFixedSystemKey(id)) {
+  if (isFixedKey(id)) {
     // 电源 / 鼠标：仅展示说明，不进入选中与录入
     return;
   }
@@ -323,7 +336,7 @@ async function onCaptured(keys: number[], _labels: string[]) {
 
   const buttonId = selectedId.value;
   if (buttonId && keys?.length) {
-    emit("save", applyT1CapturedBinding(props.config, buttonId, keys));
+    emit("save", applyT1CapturedBinding(props.config, buttonId, keys, props.transport));
   }
   try {
     await invoke("capture_shortcut_stop");
@@ -336,7 +349,7 @@ async function onCaptured(keys: number[], _labels: string[]) {
 
 async function startCapture() {
   const buttonId = selectedId.value;
-  if (!buttonId || t1IsFixedSystemKey(buttonId)) return;
+  if (!buttonId || isFixedKey(buttonId)) return;
   if (capturing.value) {
     await cancelCapture();
     return;
@@ -373,7 +386,7 @@ async function cancelCapture() {
 }
 
 function onClearBinding(buttonId: string) {
-  emit("save", clearT1Binding(props.config, buttonId));
+  emit("save", clearT1Binding(props.config, buttonId, props.transport));
 }
 
 watch([selectedId, hoverId], () => {
@@ -475,14 +488,14 @@ onUnmounted(() => {
           :ref="(el) => setCardRef(btn.id, el)"
           class="map-card"
           :class="{
-            active: !t1IsFixedSystemKey(btn.id) && selectedId === btn.id,
+            active: !isFixedKey(btn.id) && selectedId === btn.id,
             hover:
-              !t1IsFixedSystemKey(btn.id) &&
+              !isFixedKey(btn.id) &&
               hoverId === btn.id &&
               selectedId !== btn.id,
-            'map-card-fixed': t1IsFixedSystemKey(btn.id),
+            'map-card-fixed': isFixedKey(btn.id),
             'map-card-fixed-hover':
-              t1IsFixedSystemKey(btn.id) && hoverId === btn.id,
+              isFixedKey(btn.id) && hoverId === btn.id,
           }"
           @mouseenter="onCardHover(btn.id)"
           @mouseleave="onCardHover(null)"
@@ -491,13 +504,13 @@ onUnmounted(() => {
           <div class="map-card-main">
             <span
               class="map-name"
-              :class="{ 'map-name-fixed': t1IsFixedSystemKey(btn.id) }"
+              :class="{ 'map-name-fixed': isFixedKey(btn.id) }"
             >
               <T1KeyIcon :key-id="btn.id" />
               {{ btn.label }}
             </span>
             <span
-              v-if="t1IsFixedSystemKey(btn.id)"
+              v-if="isFixedKey(btn.id)"
               class="map-bind map-bind-fixed"
               :title="fixedHintOf(btn.id)"
             >
@@ -511,7 +524,7 @@ onUnmounted(() => {
             </span>
           </div>
           <div
-            v-if="!t1IsFixedSystemKey(btn.id) && selectedId === btn.id"
+            v-if="!isFixedKey(btn.id) && selectedId === btn.id"
             class="map-card-actions"
             @click.stop
           >
@@ -595,14 +608,14 @@ onUnmounted(() => {
           :ref="(el) => setCardRef(btn.id, el)"
           class="map-card"
           :class="{
-            active: !t1IsFixedSystemKey(btn.id) && selectedId === btn.id,
+            active: !isFixedKey(btn.id) && selectedId === btn.id,
             hover:
-              !t1IsFixedSystemKey(btn.id) &&
+              !isFixedKey(btn.id) &&
               hoverId === btn.id &&
               selectedId !== btn.id,
-            'map-card-fixed': t1IsFixedSystemKey(btn.id),
+            'map-card-fixed': isFixedKey(btn.id),
             'map-card-fixed-hover':
-              t1IsFixedSystemKey(btn.id) && hoverId === btn.id,
+              isFixedKey(btn.id) && hoverId === btn.id,
           }"
           @mouseenter="onCardHover(btn.id)"
           @mouseleave="onCardHover(null)"
@@ -611,13 +624,13 @@ onUnmounted(() => {
           <div class="map-card-main">
             <span
               class="map-name"
-              :class="{ 'map-name-fixed': t1IsFixedSystemKey(btn.id) }"
+              :class="{ 'map-name-fixed': isFixedKey(btn.id) }"
             >
               <T1KeyIcon :key-id="btn.id" />
               {{ btn.label }}
             </span>
             <span
-              v-if="t1IsFixedSystemKey(btn.id)"
+              v-if="isFixedKey(btn.id)"
               class="map-bind map-bind-fixed"
               :title="fixedHintOf(btn.id)"
             >
@@ -631,7 +644,7 @@ onUnmounted(() => {
             </span>
           </div>
           <div
-            v-if="!t1IsFixedSystemKey(btn.id) && selectedId === btn.id"
+            v-if="!isFixedKey(btn.id) && selectedId === btn.id"
             class="map-card-actions"
             @click.stop
           >

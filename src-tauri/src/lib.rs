@@ -160,11 +160,12 @@ pub fn run() {
                 bridges::xiaomi::conflict_guard::check_audio_router_after_spawn(app.handle());
             }
 
-            // 启动环境串行自动修复：声卡 → 键盘 → 等路由 → 等桥接 → ATVV
+            // 启动环境串行自动修复：声卡 → 键盘 → 等路由 → 等桥接 → ATVV → T1 L0
             // （取代原先并行的 winuhid-ensure，避免与声卡提权/桥接重启冲突）
             startup_env::spawn_startup_env_pipeline(app.handle().clone());
-            // L0 状态后台探测（勿同步跑 PowerShell，否则会卡死主机状态/蓝牙 IPC）
+            // L0 状态后台探测 + 常驻看门狗（Consumer 重枚举后自动再禁）
             bridges::t1::t1_hid_filter_env::kick_status_refresh_if_stale();
+            bridges::t1::t1_hid_filter_env::spawn_auto_repair_watchdog();
 
             // 启动后自动连接 + 断线重连（对齐 Python worker 循环）
             let auto_app = app.handle().clone();
@@ -225,7 +226,7 @@ pub fn run() {
                         return;
                     }
                     let addr = config_manager
-                        .get_device_config("t1")
+                        .get_device_config("t1_ble")
                         .ok()
                         .and_then(|c| c.bluetooth_address);
                     if !bridges::t1::ble_runtime::should_autostart_t1_ble(addr.as_deref()) {

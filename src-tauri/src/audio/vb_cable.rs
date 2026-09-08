@@ -524,6 +524,42 @@ pub fn ensure_cable_mic_for_voice() -> Result<VoiceEnvActionResult, String> {
     run_configure_script_ex("EnsureMic", None, false)
 }
 
+/// T1 USB：异步把默认麦切到 Mic Device（并取消静音、拉满音量）。
+/// 小米/BLE 的 EnsureMic 会把默认麦设成 CABLE；USB 路径若不切回，输入法听 CABLE 必无声。
+pub fn ensure_usb_mic_for_voice_async() {
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+
+    {
+        let mut last = LAST.lock();
+        if let Some(t) = *last {
+            if t.elapsed() < Duration::from_secs(5) {
+                return;
+            }
+        }
+        *last = Some(Instant::now());
+    }
+    if BUSY
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    std::thread::spawn(|| {
+        let result = ensure_usb_mic_for_voice();
+        BUSY.store(false, Ordering::SeqCst);
+        match result {
+            Ok(r) => log::info!("T1 USB EnsureUsbMic: {}", r.message),
+            Err(e) => log::warn!("T1 USB EnsureUsbMic failed: {e}"),
+        }
+    });
+}
+
+/// 同步：默认录音设备 → Mic Device
+pub fn ensure_usb_mic_for_voice() -> Result<VoiceEnvActionResult, String> {
+    run_configure_script_ex("EnsureUsbMic", None, false)
+}
+
 /// 检测；若已就绪则直接 Repair（设默认麦）；若未就绪则返回 needs_choice
 pub fn check_or_prompt() -> VoiceEnvActionResult {
     let status = voice_env_status_fresh();

@@ -8,7 +8,7 @@ use crate::bridges::t1::mapping::{
 };
 use crate::bridges::t1::native_mic;
 use crate::bridges::t1::native_suppress;
-use crate::bridges::xiaomi::hid_injector;
+use crate::bridges::shared::hid_injector;
 use crate::bridges::{BridgeState, BridgeStatus, BridgeType};
 use crate::config::manager::{ConfigManager, DeviceConfig, KeyAction, TriggerMode};
 use parking_lot::Mutex;
@@ -141,7 +141,7 @@ pub fn force_end_voice_latch(reason: &str) {
     if let Some(ctx) = LL_GATE_CTX.lock().as_ref() {
         *ctx.voice_state.lock() = VoiceSessionState::Idle;
     }
-    crate::bridges::xiaomi::key_log::set_virtual_hid_chord_held(None);
+    crate::bridges::shared::host_hooks::set_virtual_hid_chord_held(None);
     // Mic keepalive 由 USB 桥接生命周期持有，语音结束不关，避免下次再付冷开麦
     crate::bridges::t1::inject::panic_clear_all_modifiers(&format!("force_end_latch:{reason}"));
     native_suppress::release_voice_browser_search();
@@ -189,6 +189,8 @@ pub fn on_ll_gate_keydown(vk: u16) {
     if !native_suppress::is_gate_vk(vk) {
         return;
     }
+    // 进入补映射路径即代表来源已由调用方裁决，清理来源暂挂，避免 Raw 再回放。
+    let _ = native_suppress::consume_source_pending(vk);
     let Some(ctx) = LL_GATE_CTX.lock().clone() else {
         return;
     };
@@ -198,7 +200,7 @@ pub fn on_ll_gate_keydown(vk: u16) {
     let config = ctx
         .app
         .try_state::<ConfigManager>()
-        .and_then(|mgr| mgr.get_device_config("t1").ok());
+        .and_then(|mgr| mgr.get_device_config("t1_usb").ok());
     let target_vks = match (&button_id, &config) {
         (Some(bid), Some(cfg)) => binding_vks(cfg, bid),
         _ => Vec::new(),
@@ -248,7 +250,9 @@ pub fn on_ll_gate_keydown(vk: u16) {
         );
         return;
     }
-    if should_skip_duplicate_inject(&button_id) {
+    if should_skip_duplicate_inject(&button_id)
+        || native_suppress::should_skip_gate_inject(&button_id)
+    {
         key_diag::emit_usb(
             &ctx.app,
             "ll",
@@ -338,10 +342,10 @@ pub fn start_t1_bridge(
     runtime.clear_stop();
     runtime.running.store(true, Ordering::SeqCst);
 
-    let _config = config_manager.get_device_config("t1")?;
+    let _config = config_manager.get_device_config("t1_usb")?;
 
-    crate::bridges::xiaomi::special_keys::ensure_hook_for_capture();
-    native_suppress::set_enabled(true);
+    crate::bridges::shared::host_hooks::ensure_hook_for_capture();
+    native_suppress::arm_reason(native_suppress::SwallowReason::UsbBridge);
     sync_media_gates(&_config);
 
     if hid_injector::is_available() {
@@ -352,6 +356,8 @@ pub fn start_t1_bridge(
 
     // 把 Mic Device 冷开麦（可 >5s）挪到桥接启动；语音按键时端点已热
     native_mic::disable_t1_usb_selective_suspend();
+    // 小米/BLE EnsureMic 常把默认麦设成 CABLE → USB 必须切回 Mic Device，否则输入法听空线
+    crate::audio::vb_cable::ensure_usb_mic_for_voice_async();
     match native_mic::start_mic_keepalive(MIC_LABEL) {
         Ok(()) => log::info!("T1 mic keepalive pre-warm started (USB bridge)"),
         Err(e) => log::warn!("T1 mic keepalive pre-warm failed: {e}"),
@@ -381,6 +387,14 @@ pub fn start_t1_bridge(
         if !device_matches(&ev.device_name, &match_tokens_cb) {
             if let Some(vk) = parse_kbd_vk(&ev.event_id) {
                 native_suppress::on_foreign_keyboard(vk, ev.pressed);
+                // 真实键盘按下重映射方向/OK（已被 LL 吞并暂挂）：直接回放原生键，
+                // 绝不补发遥控映射键。
+                if ev.pressed
+                    && native_suppress::source_decision_pending(vk)
+                    && !native_suppress::replay_foreign_gate_vk(vk)
+                {
+                    log::warn!("T1 foreign replay failed for vk=0x{vk:02X}");
+                }
             }
             return;
         }
@@ -388,12 +402,17 @@ pub fn start_t1_bridge(
             log::info!("T1 device matched: {}", ev.device_name);
             if let Some(st) = app_for_cb.try_state::<BridgeState>() {
                 st.update_device_info(
-                    BridgeType::T1,
+                    BridgeType::T1Usb,
                     Some("T1 Google Remote".into()),
                     Some(ev.device_name.clone()),
                     None,
                 );
             }
+        }
+
+        // T1 设备命中：消费来源暂挂，按正常映射流程走（不额外回放原生键）
+        if let Some(vk) = parse_kbd_vk(&ev.event_id) {
+            let _ = native_suppress::consume_source_pending(vk);
         }
 
         let Some(button_id) = resolve_button(&ev.event_id, &event_to_button) else {
@@ -419,7 +438,7 @@ pub fn start_t1_bridge(
 
         let config = app_for_cb
             .try_state::<ConfigManager>()
-            .and_then(|mgr| mgr.get_device_config("t1").ok());
+            .and_then(|mgr| mgr.get_device_config("t1_usb").ok());
         let Some(config) = config else {
             log::warn!("T1 button ignored: t1 config unavailable");
             return;
@@ -478,20 +497,14 @@ pub fn start_t1_bridge(
     })
     .map_err(|e| {
         runtime_flag.running.store(false, Ordering::SeqCst);
-        let ble_keep = app
-            .try_state::<Arc<crate::bridges::t1::ble_runtime::T1BleRuntime>>()
-            .map(|r| native_suppress::should_keep_swallow_gate(false, r.running.load(Ordering::SeqCst), r.should_stop()))
-            .unwrap_or(false);
-        if !ble_keep {
-            native_suppress::set_enabled(false);
-        }
+        native_suppress::disarm_reason(native_suppress::SwallowReason::UsbBridge);
         e
     })?;
 
     *runtime.inner.lock() = Some(RuntimeInner { raw });
 
     state.update_device_info(
-        BridgeType::T1,
+        BridgeType::T1Usb,
         Some("T1 Google Remote".into()),
         Some("VID_1915&PID_1025".into()),
         None,
@@ -506,7 +519,7 @@ pub fn stop_t1_bridge(app: &AppHandle, state: &BridgeState) {
     force_end_voice_latch("stop_t1_bridge");
     native_mic::stop_mic_keepalive();
     *LL_GATE_CTX.lock() = None;
-    let (ble_running, ble_stopping) = app
+    let (_ble_running, _ble_stopping) = app
         .try_state::<Arc<crate::bridges::t1::ble_runtime::T1BleRuntime>>()
         .map(|r| {
             (
@@ -515,9 +528,7 @@ pub fn stop_t1_bridge(app: &AppHandle, state: &BridgeState) {
             )
         })
         .unwrap_or((false, false));
-    if !native_suppress::should_keep_swallow_gate(false, ble_running, ble_stopping) {
-        native_suppress::set_enabled(false);
-    }
+    native_suppress::disarm_reason(native_suppress::SwallowReason::UsbBridge);
     if let Some(runtime) = app.try_state::<Arc<T1Runtime>>() {
         runtime.request_stop();
         if let Some(mut inner) = runtime.inner.lock().take() {
@@ -526,7 +537,7 @@ pub fn stop_t1_bridge(app: &AppHandle, state: &BridgeState) {
         runtime.running.store(false, Ordering::SeqCst);
         runtime.clear_stop();
     }
-    state.update_status(BridgeType::T1, BridgeStatus::Disconnected);
+    state.update_status(BridgeType::T1Usb, BridgeStatus::Disconnected);
     log::info!("T1 bridge stopped");
 }
 
@@ -546,6 +557,7 @@ fn binding_vks(config: &DeviceConfig, button_id: &str) -> Vec<u16> {
         Some(KeyAction::ComboKey(vks)) => vks.clone(),
         _ => Vec::new(),
     };
+    // 静音未绑定：默认系统静音（HOGP 原生不可靠）
     if button_id == "mute" && vks.is_empty() {
         return vec![0xAD];
     }
@@ -608,6 +620,21 @@ fn handle_button(
     _voice_state: &Mutex<VoiceSessionState>,
     app: &AppHandle,
 ) {
+    if matches!(
+        button_id,
+        "power"
+            | "mouse"
+            | "up"
+            | "down"
+            | "left"
+            | "right"
+            | "ok"
+            | "mute"
+            | "vol_plus"
+            | "vol_minus"
+    ) {
+        return;
+    }
     let Some(action) = config.button_bindings.get(button_id) else {
         let msg = format!("映射无效：{button_id} 未绑定");
         key_diag::emit_usb(app, "inject", Some(button_id), None, None, None, &[], &msg);
@@ -617,7 +644,6 @@ fn handle_button(
     let vks: Vec<u16> = match action {
         KeyAction::SingleKey(vk) => vec![*vk],
         KeyAction::ComboKey(vks) => vks.clone(),
-        KeyAction::None if button_id == "mute" => vec![0xAD],
         KeyAction::None => {
             let msg = format!("映射无效：{button_id} 为空");
             key_diag::emit_usb(app, "inject", Some(button_id), None, None, None, &[], &msg);
@@ -745,6 +771,8 @@ fn handle_voice(
             if starting {
                 native_suppress::arm_voice_browser_search();
                 native_suppress::dismiss_windows_search_async(false);
+                // 注入前确保默认麦=Mic Device（输入法通常跟系统默认，CABLE 残留会导致无声）
+                native_mic::ensure_default_mic_device_for_ime(MIC_LABEL);
                 match native_mic::ensure_mic_device(MIC_LABEL) {
                     Ok(endpoint) => {
                         log::info!("T1 AUDIO OPEN source={MIC_LABEL} endpoint={endpoint}")
@@ -805,6 +833,7 @@ fn handle_voice(
         TriggerMode::Toggle => {
             native_suppress::arm_voice_browser_search();
             native_suppress::dismiss_windows_search_async(false);
+            native_mic::ensure_default_mic_device_for_ime(MIC_LABEL);
             let hold_ms = if vks.len() == 1 && matches!(vks[0], 0x12 | 0xA4 | 0xA5) {
                 100
             } else if vks.iter().any(|&vk| vk == 0x5B || vk == 0x5C) {
@@ -854,7 +883,7 @@ fn voice_press(vks: &[u16]) -> bool {
     if hid_injector::is_available() {
         match hid_injector::press_single(vks) {
             Ok(()) => {
-                crate::bridges::xiaomi::key_log::set_virtual_hid_chord_held(Some(vks));
+                crate::bridges::shared::host_hooks::set_virtual_hid_chord_held(Some(vks));
                 *VOICE_LATCH_VKS.lock() = vks.to_vec();
                 return true;
             }
@@ -876,7 +905,7 @@ fn voice_release(vks: &[u16]) -> bool {
     VOICE_LATCH_VKS.lock().clear();
     *VOICE_LATCH_STARTED.lock() = None;
     native_suppress::allow_pass_vks(vks);
-    crate::bridges::xiaomi::key_log::set_virtual_hid_chord_held(None);
+    crate::bridges::shared::host_hooks::set_virtual_hid_chord_held(None);
     if hid_injector::is_available() {
         if let Err(e) = hid_injector::release(vks) {
             log::warn!("T1 voice WinUHid release failed: {e}");

@@ -8,19 +8,22 @@ type ConfigLoadState = "pending" | "loading" | "ready" | "error";
 export const useConfigStore = defineStore("config", () => {
   const configs = ref<Record<BridgeType, DeviceConfig | null>>({
     xiaomi: null,
-    t1: null,
+    t1_ble: null,
+    t1_usb: null,
     hanvon: null,
   });
 
   const loadStates = ref<Record<BridgeType, ConfigLoadState>>({
     xiaomi: "pending",
-    t1: "pending",
+    t1_ble: "pending",
+    t1_usb: "pending",
     hanvon: "pending",
   });
 
   const loadErrors = ref<Record<BridgeType, string | null>>({
     xiaomi: null,
-    t1: null,
+    t1_ble: null,
+    t1_usb: null,
     hanvon: null,
   });
 
@@ -50,7 +53,6 @@ export const useConfigStore = defineStore("config", () => {
     try {
       await invoke("save_config", { bridgeType: type, config });
       const fresh = await invoke<DeviceConfig>("get_config", { bridgeType: type });
-      // 保存过程中用户继续调节增益时，避免 get_config 回写覆盖未落盘的 UI 值
       if (type === "xiaomi" && sentGainDb !== undefined) {
         const liveGain = configs.value.xiaomi?.gain_db;
         if (liveGain !== undefined && liveGain !== sentGainDb) {

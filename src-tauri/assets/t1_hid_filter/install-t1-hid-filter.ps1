@@ -1,6 +1,7 @@
-# T1 BLE L0 — disable Consumer Control HID collection only (no custom .sys).
-# AC Search (0x0221) lives on UP:000C / U:0001. Keyboard/mouse/vendor collections stay on.
-# Works with Secure Boot; no testsigning / BIOS changes.
+# T1 BLE L0 — Consumer Control HID（白名单仅 T1 BLE）
+# 现行策略：保留 Consumer 集合（Home/删除/音量依赖它），不整集禁用。
+# AC Search 由应用内 L1（LL + HotKey + WH_SHELL）吞掉；pnputil 无法只禁单个 Usage。
+# 「自动修复」= 若曾被整集禁用则重新 Enable，恢复 Home/删除/音量。
 [CmdletBinding()]
 param(
   [ValidateSet("Install", "InstallElevated", "Status", "Uninstall")]
@@ -12,17 +13,16 @@ param(
 $ErrorActionPreference = "Stop"
 $ScriptRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 
-$AllowVid = @("01620a", "1620a", "vid_1620", "vid_620a")
+$AllowVid = @("01620a", "1620a", "vid_1620a", "vid_1620", "vid_01620a")
 $AllowPid = @("0407", "pid&0407", "pid_0407")
 $DenyAny = @(
   "vid_1915", "pid_1025", "vid_2717", "winuhid", "root\winuhid", "vid_046d", "vid_05ac"
 )
-# Consumer Control TLC — HID_DEVICE_SYSTEM_CONSUMER / UP:000C_U:0001
 $ConsumerMarkers = @(
   "hid_device_system_consumer",
   "up:000c_u:0001",
-  "up:000c_u:0001",
-  "hid-compliant consumer control"
+  "hid-compliant consumer control",
+  "consumer control device"
 )
 
 function Write-Phase([string] $Name, [string] $Detail) {
@@ -67,7 +67,6 @@ function Test-BlobConsumer([string] $Blob) {
 }
 
 function Test-DeviceDisabled([string] $RegPath) {
-  # CONFIGFLAG_DISABLED = 0x1
   $cf = (Get-ItemProperty -LiteralPath $RegPath -Name ConfigFlags -ErrorAction SilentlyContinue).ConfigFlags
   if ($null -ne $cf -and (($cf -as [int]) -band 1) -ne 0) { return $true }
   return $false
@@ -116,17 +115,16 @@ function Enable-Instance([string] $InstanceId) {
   Write-Phase "Enable" ("{0} => {1}" -f $InstanceId, ($r.Trim() -replace '\s+', ' '))
 }
 
-# --- main ---
-# PackageDir kept for Rust IPC compatibility; unused for disable path.
 if (-not [string]::IsNullOrWhiteSpace($PackageDir)) {
-  # no-op
+  # no-op — PackageDir kept for Rust IPC compatibility
 }
 
 if ($Mode -eq "Status") {
   $devs = @(Get-T1ConsumerDevices)
   $disabled = @($devs | Where-Object { $_.Disabled })
-  $ready = ($devs.Count -gt 0) -and ($disabled.Count -eq $devs.Count)
-  # ready / svc(unused=false) / bin(always true — no .sys) / matched / bound(=disabled)
+  # READY = 已找到 T1 Consumer 且全部启用（Home/删除/音量可用；Search 靠应用 L1）
+  $ready = ($devs.Count -gt 0) -and ($disabled.Count -eq 0)
+  # bound = 仍处于禁用的数量（历史整集剥离残留）
   Write-Phase "Status" ("ready={0} svc=False bin=True matched={1} bound={2}" -f $ready, $devs.Count, $disabled.Count)
   if ($ready) {
     Write-Output "Result: READY"
@@ -136,6 +134,7 @@ if ($Mode -eq "Status") {
     Write-Output "Result: NO_T1_BLE_DEVICE"
     exit 3
   }
+  # 有设备但仍有禁用实例 → 需自动修复 Enable
   Write-Output "Result: NOT_BOUND"
   exit 1
 }
@@ -148,6 +147,7 @@ if ($Mode -eq "Install") {
   $Mode = "InstallElevated"
 }
 
+# Uninstall：与 Install 相同——确保 Consumer 启用（兼容旧「整集禁用」用户）
 if ($Mode -eq "Uninstall") {
   if (-not (Test-IsAdmin)) {
     Write-Phase "Elevate" "UAC"
@@ -182,14 +182,15 @@ if ($Mode -eq "InstallElevated") {
       }
     }
   }
+  # 恢复 Consumer（不再整集 Disable；否则 Home/删除/音量全死）
   foreach ($d in $devs) {
-    if (-not $d.Disabled) { Disable-Instance $d.InstanceId }
-    else { Write-Phase "Disable" "already $($d.InstanceId)" }
+    if ($d.Disabled) { Enable-Instance $d.InstanceId }
+    else { Write-Phase "Enable" "already $($d.InstanceId)" }
   }
   Start-Sleep -Milliseconds 500
   $after = @(Get-T1ConsumerDevices)
   $disabled = @($after | Where-Object { $_.Disabled })
-  if (($after.Count -gt 0) -and ($disabled.Count -eq $after.Count)) {
+  if (($after.Count -gt 0) -and ($disabled.Count -eq 0)) {
     Write-Output "Result: READY"
     exit 0
   }

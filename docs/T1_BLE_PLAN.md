@@ -1,6 +1,7 @@
 # T1 蓝牙桥接计划与落地清单
 
 > 与 USB 路径完全独立；USB 行为以 [T1_BRIDGE_PLAN.md](./T1_BRIDGE_PLAN.md) 为准。  
+> **产品**：侧栏 **T1(蓝牙)**（`/t1-ble`，`t1_ble.json`）；契约 [T1_USB_BLE_SPLIT.md](./T1_USB_BLE_SPLIT.md)。  
 > 工作方式：TDD（红→绿）垂直切片；每步执行 → 测试 → 全量检查 → 修正 → 更新本清单。
 
 ## 当前方案：长时收音（已落地）

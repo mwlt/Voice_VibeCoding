@@ -4,15 +4,22 @@ import {
   T1_BUTTON_IDS,
   T1_DEFAULT_LABELS,
   T1_FACE_BUTTON_IDS,
+  T1_BLE_FIXED_SYSTEM_IDS,
+  T1_USB_FIXED_SYSTEM_IDS,
+  T1_BLE_LEFT_COLUMN_IDS,
+  T1_BLE_RIGHT_COLUMN_IDS,
+  T1_USB_LEFT_COLUMN_IDS,
+  T1_USB_RIGHT_COLUMN_IDS,
   T1_FIXED_SYSTEM_HINTS,
-  T1_LEFT_COLUMN_IDS,
-  T1_RIGHT_COLUMN_IDS,
   T1_VOICE_QUICK_PRESETS,
   applyT1CapturedBinding,
   applyT1VoiceQuick,
   clearT1Binding,
+  stripT1FixedBindings,
   t1ActionLabel,
   t1IsFixedSystemKey,
+  t1LeftColumnIds,
+  t1RightColumnIds,
   t1VksToHotkeyNames,
 } from "./t1Keys";
 
@@ -39,6 +46,7 @@ function baseConfig(): DeviceConfig {
     button_aliases: { ...T1_DEFAULT_LABELS },
     button_bindings: {
       ok: { type: "SingleKey", value: 0x0d },
+      delete: { type: "SingleKey", value: 0x08 },
     },
     voice_hotkey: ["rightalt"],
     trigger_mode: "Toggle",
@@ -58,16 +66,32 @@ describe("T1 button registry", () => {
     }
   });
 
-  it("face ids exclude side volume; columns cover all 14 without overlap", () => {
+  it("BLE mapping columns only show bindable keys", () => {
     expect(T1_FACE_BUTTON_IDS).not.toContain("vol_plus");
     expect(T1_FACE_BUTTON_IDS).not.toContain("vol_minus");
     expect(T1_FACE_BUTTON_IDS).toHaveLength(12);
 
-    const cols = [...T1_LEFT_COLUMN_IDS, ...T1_RIGHT_COLUMN_IDS];
-    expect(cols.sort()).toEqual([...BACKEND_T1_IDS].sort());
-    expect(new Set(cols).size).toBe(14);
-    expect(T1_LEFT_COLUMN_IDS).not.toContain("power");
-    expect(T1_RIGHT_COLUMN_IDS).toEqual([
+    const cols = [...T1_BLE_LEFT_COLUMN_IDS, ...T1_BLE_RIGHT_COLUMN_IDS];
+    expect(cols.sort()).toEqual(["delete", "home", "menu", "voice"].sort());
+    expect(new Set(cols).size).toBe(4);
+    for (const id of cols) {
+      expect(t1IsFixedSystemKey(id, "ble")).toBe(false);
+    }
+  });
+
+  it("USB mapping columns keep full remote layout", () => {
+    const cols = [
+      ...T1_USB_LEFT_COLUMN_IDS,
+      ...T1_USB_RIGHT_COLUMN_IDS,
+    ];
+    expect(cols).toEqual([
+      "up",
+      "left",
+      "ok",
+      "down",
+      "delete",
+      "mute",
+      "mouse",
       "power",
       "vol_plus",
       "vol_minus",
@@ -76,14 +100,35 @@ describe("T1 button registry", () => {
       "home",
       "menu",
     ]);
+    expect(t1LeftColumnIds("usb")).toEqual(T1_USB_LEFT_COLUMN_IDS);
+    expect(t1RightColumnIds("usb")).toEqual(T1_USB_RIGHT_COLUMN_IDS);
+    expect(t1IsFixedSystemKey("ok", "usb")).toBe(false);
+    expect(t1IsFixedSystemKey("mute", "usb")).toBe(false);
+    expect(t1IsFixedSystemKey("power", "usb")).toBe(true);
+    expect(t1IsFixedSystemKey("mouse", "usb")).toBe(true);
   });
 
-  it("marks power and mouse as fixed system keys (not bindable)", () => {
-    expect(t1IsFixedSystemKey("power")).toBe(true);
-    expect(t1IsFixedSystemKey("mouse")).toBe(true);
-    expect(t1IsFixedSystemKey("ok")).toBe(false);
-    expect(T1_FIXED_SYSTEM_HINTS.power).toContain("不可绑定");
-    expect(T1_FIXED_SYSTEM_HINTS.mouse).toContain("不可绑定");
+  it("marks BLE passthrough face/media keys as fixed", () => {
+    for (const id of T1_BLE_FIXED_SYSTEM_IDS) {
+      expect(t1IsFixedSystemKey(id, "ble")).toBe(true);
+      expect(T1_FIXED_SYSTEM_HINTS[id]).toContain("不可绑定");
+    }
+    expect(t1IsFixedSystemKey("ok", "ble")).toBe(true);
+    expect(t1IsFixedSystemKey("delete", "ble")).toBe(false);
+    expect([...T1_USB_FIXED_SYSTEM_IDS]).toEqual(["power", "mouse"]);
+  });
+
+  it("stripT1FixedBindings only clears transport-fixed keys", () => {
+    const ble = stripT1FixedBindings(baseConfig(), "ble");
+    expect(ble.button_bindings.ok).toEqual({ type: "None", value: null });
+    expect(ble.button_bindings.delete).toEqual({
+      type: "SingleKey",
+      value: 0x08,
+    });
+
+    const usb = stripT1FixedBindings(baseConfig(), "usb");
+    expect(usb.button_bindings.ok).toEqual({ type: "SingleKey", value: 0x0d });
+    expect(usb.button_bindings.power).toEqual({ type: "None", value: null });
   });
 });
 
@@ -98,31 +143,37 @@ describe("T1 voice quick presets", () => {
     ]);
   });
 
-  it("applies voice binding, hotkey and trigger mode without writing mic", () => {
-    const hold = applyT1VoiceQuick(baseConfig(), T1_VOICE_QUICK_PRESETS[0]);
+  it("applies voice binding without wiping USB ok binding", () => {
+    const hold = applyT1VoiceQuick(baseConfig(), T1_VOICE_QUICK_PRESETS[0], "usb");
     expect(hold.button_bindings.voice).toEqual({
       type: "ComboKey",
       value: [0xa2, 0x5b],
     });
-    expect(hold.button_bindings.mic).toBeUndefined();
+    expect(hold.button_bindings.ok).toEqual({ type: "SingleKey", value: 0x0d });
     expect(hold.voice_hotkey).toEqual(["leftctrl", "leftwin"]);
-    expect(hold.trigger_mode).toBe("Toggle");
 
-    const toggle = applyT1VoiceQuick(baseConfig(), T1_VOICE_QUICK_PRESETS[2]);
-    expect(toggle.voice_hotkey).toEqual(["rightalt", "space"]);
-    expect(toggle.trigger_mode).toBe("Toggle");
+    const ble = applyT1VoiceQuick(baseConfig(), T1_VOICE_QUICK_PRESETS[0], "ble");
+    expect(ble.button_bindings.ok).toEqual({ type: "None", value: null });
   });
 });
 
 describe("applyT1CapturedBinding", () => {
-  it("writes SingleKey and does not invent mic binding", () => {
-    const next = applyT1CapturedBinding(baseConfig(), "ok", [0x0d]);
-    expect(next.button_bindings.ok).toEqual({ type: "SingleKey", value: 0x0d });
-    expect(next.button_bindings.mic).toBeUndefined();
+  it("refuses capture on BLE fixed keys (ok)", () => {
+    const base = baseConfig();
+    const next = applyT1CapturedBinding(base, "ok", [0x0d], "ble");
+    expect(next).toBe(base);
   });
 
-  it("writes ComboKey for multi-vk", () => {
-    const next = applyT1CapturedBinding(baseConfig(), "home", [0x5b, 0x0d]);
+  it("allows capture on USB ok", () => {
+    const next = applyT1CapturedBinding(baseConfig(), "ok", [0x20], "usb");
+    expect(next.button_bindings.ok).toEqual({
+      type: "SingleKey",
+      value: 0x20,
+    });
+  });
+
+  it("writes ComboKey for home", () => {
+    const next = applyT1CapturedBinding(baseConfig(), "home", [0x5b, 0x0d], "usb");
     expect(next.button_bindings.home).toEqual({
       type: "ComboKey",
       value: [0x5b, 0x0d],
@@ -130,7 +181,7 @@ describe("applyT1CapturedBinding", () => {
   });
 
   it("syncs voice_hotkey only for voice, never mic", () => {
-    const next = applyT1CapturedBinding(baseConfig(), "voice", [0xa5]);
+    const next = applyT1CapturedBinding(baseConfig(), "voice", [0xa5], "ble");
     expect(next.button_bindings.voice).toEqual({
       type: "SingleKey",
       value: 0xa5,
@@ -140,39 +191,36 @@ describe("applyT1CapturedBinding", () => {
     expect(next.trigger_mode).toBe("Hold");
   });
 
-  it("sets Toggle when voice is a chord (豆包免按)", () => {
-    const next = applyT1CapturedBinding(baseConfig(), "voice", [0xa5, 0x20]);
+  it("sets Toggle when voice is a chord", () => {
+    const next = applyT1CapturedBinding(baseConfig(), "voice", [0xa5, 0x20], "ble");
     expect(next.voice_hotkey).toEqual(["rightalt", "space"]);
     expect(next.trigger_mode).toBe("Toggle");
   });
 
-  it("clears empty capture to None without touching voice_hotkey for non-voice", () => {
-    const next = applyT1CapturedBinding(baseConfig(), "mute", []);
-    expect(next.button_bindings.mute).toEqual({ type: "None", value: null });
-    expect(next.voice_hotkey).toEqual(["rightalt"]);
+  it("ignores capture on BLE mute (fixed)", () => {
+    const base = baseConfig();
+    const next = applyT1CapturedBinding(base, "mute", [], "ble");
+    expect(next).toBe(base);
   });
 
-  it("ignores capture/clear for fixed system keys", () => {
+  it("ignores capture/clear for power/mouse on both transports", () => {
     const base = baseConfig();
-    const afterCapture = applyT1CapturedBinding(base, "power", [0x1b]);
-    expect(afterCapture).toBe(base);
-    const afterClear = clearT1Binding(base, "mouse");
-    expect(afterClear).toBe(base);
+    expect(applyT1CapturedBinding(base, "power", [0x1b], "usb")).toBe(base);
+    expect(clearT1Binding(base, "mouse", "ble")).toBe(base);
   });
 });
 
 describe("clearT1Binding", () => {
   it("clears binding and voice_hotkey when clearing voice", () => {
-    const cfg = applyT1CapturedBinding(baseConfig(), "voice", [0xa5, 0x20]);
-    const next = clearT1Binding(cfg, "voice");
+    const cfg = applyT1CapturedBinding(baseConfig(), "voice", [0xa5, 0x20], "usb");
+    const next = clearT1Binding(cfg, "voice", "usb");
     expect(next.button_bindings.voice).toEqual({ type: "None", value: null });
-    expect(next.button_bindings.mic).toBeUndefined();
     expect(next.voice_hotkey).toEqual([]);
   });
 
-  it("clears non-voice without wiping voice_hotkey", () => {
-    const next = clearT1Binding(baseConfig(), "ok");
-    expect(next.button_bindings.ok).toEqual({ type: "None", value: null });
+  it("clears delete without wiping voice_hotkey", () => {
+    const next = clearT1Binding(baseConfig(), "delete", "usb");
+    expect(next.button_bindings.delete).toEqual({ type: "None", value: null });
     expect(next.voice_hotkey).toEqual(["rightalt"]);
   });
 });

@@ -16,6 +16,8 @@
 //! - HID `02-21-02` / LL swallow / hotkey / 映射前后都 `dismiss SearchHost`；
 //! - WinEvent 关 Search **仅在** 遥控触发的短 arm 窗口内生效（勿常驻杀开始菜单）；
 //! - 绝不 `on_foreign_keyboard` 回放 0xAA。
+//! - `on_foreign_keyboard` 只回放 Apps/Browser Home/Back/(可选)VK_HOME；
+//!   **禁止**回放方向/OK/音量/静音（防 foreign↔LL 无限连击）。
 
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
@@ -213,13 +215,47 @@ pub fn should_tap_escape_for_shell(found_search_or_start: bool, launcher_visible
     found_search_or_start || launcher_visible
 }
 
-/// USB 仍在，或 BLE 运行时未主动停止（含 GATT 闪断重连）时必须保持闸门。
+/// 吞键闸门原因位：任一侧需要则开闸，全部清除才关。业务只 arm/disarm，不问对端是否存活。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SwallowReason {
+    UsbBridge = 1 << 0,
+    BleBridge = 1 << 1,
+}
+
+static REASON_BITS: AtomicU32 = AtomicU32::new(0);
+
+fn sync_gate_from_reasons() {
+    let on = REASON_BITS.load(Ordering::SeqCst) != 0;
+    let was = ENABLED.load(Ordering::SeqCst);
+    if on == was {
+        return;
+    }
+    set_enabled(on);
+}
+
+pub fn arm_reason(reason: SwallowReason) {
+    REASON_BITS.fetch_or(reason as u32, Ordering::SeqCst);
+    sync_gate_from_reasons();
+}
+
+pub fn disarm_reason(reason: SwallowReason) {
+    REASON_BITS.fetch_and(!(reason as u32), Ordering::SeqCst);
+    sync_gate_from_reasons();
+}
+
+pub fn reasons_active() -> u32 {
+    REASON_BITS.load(Ordering::SeqCst)
+}
+
+/// 兼容旧调用：改为「是否仍有任一原因位」。
 pub fn should_keep_swallow_gate(
     usb_alive: bool,
     ble_runtime_running: bool,
     ble_stopping: bool,
 ) -> bool {
-    usb_alive || (ble_runtime_running && !ble_stopping)
+    let _ = (usb_alive, ble_runtime_running, ble_stopping);
+    REASON_BITS.load(Ordering::SeqCst) != 0
 }
 
 /// `foreground_process_hint` 形如 `SearchHost.exe pid=1234`。
@@ -256,6 +292,9 @@ pub fn set_gate(on: bool) {
 }
 
 pub fn set_enabled(on: bool) {
+    if !on {
+        REASON_BITS.store(0, Ordering::SeqCst);
+    }
     set_gate(on);
     if !on {
         stop_browser_search_hotkey();
@@ -343,26 +382,30 @@ fn media_gate_needed(native_vk: u16, binding_vks: Option<&[u16]>) -> bool {
 }
 
 /// 配置加载/保存后刷新音量/静音闸门。
-/// - 音量±：未绑定或同键 = 透传系统音量（WinUHid 也发不出音量 VK，不必绑回自身）。
-/// - 静音：始终开闸（HOGP 原生静音常无效，靠 SendInput 注入映射或 0xAD）。
+/// 音量±：仅重映射时开闸；静音：有绑定则开闸（含同键 0xAD，HOGP 原生不可靠）。
 pub fn refresh_media_gates_from_bindings(
     vol_plus: Option<&[u16]>,
     vol_minus: Option<&[u16]>,
-    _mute: Option<&[u16]>,
+    mute: Option<&[u16]>,
 ) {
     GATE_VOL_UP.store(media_gate_needed(0xAF, vol_plus), Ordering::SeqCst);
     GATE_VOL_DOWN.store(media_gate_needed(0xAE, vol_minus), Ordering::SeqCst);
-    GATE_MUTE.store(true, Ordering::SeqCst);
+    GATE_MUTE.store(
+        match mute {
+            None | Some([]) => false,
+            Some(_) => true,
+        },
+        Ordering::SeqCst,
+    );
     log::info!(
-        "T1 media gates vol+={} vol-={} mute={} (mute always-on)",
+        "T1 media gates vol+={} vol-={} mute={}",
         GATE_VOL_UP.load(Ordering::SeqCst),
         GATE_VOL_DOWN.load(Ordering::SeqCst),
         GATE_MUTE.load(Ordering::SeqCst)
     );
 }
 
-/// 方向/OK 映射到其它键时开 LL 闸门，避免「原生方向 + 映射键」双发。
-/// 同键/未绑定不开 → 实体键盘同 VK 仍可用。
+/// 方向/OK：仅重映射到其它键时开闸（同键/未绑定透传）。
 pub fn refresh_dpad_remap_gates(
     up: Option<&[u16]>,
     down: Option<&[u16]>,
@@ -405,8 +448,7 @@ pub fn is_side_effect_identity(button_id: &str, target_vks: &[u16]) -> bool {
     matches!((side, target_vks), ([s], [t]) if *s == *t)
 }
 
-/// 同键或侧效应同键：不吞、不注入。
-/// 静音例外：即使绑 0xAD 也必须注入（HOGP 原生静音常无效）。
+/// 同键或侧效应同键：不吞、不注入。静音永不透传（需注入）。
 pub fn is_passthrough_binding(
     button_id: &str,
     native_vk: Option<u16>,
@@ -697,6 +739,24 @@ pub fn on_mute_hid_seen() {
     log::info!("T1 arm mute native suppress vk=0xAD from HID");
 }
 
+/// HID 见 Consumer Volume Up（02-E9）→ 武装音量+闸门侧效应。
+pub fn on_vol_up_hid_seen() {
+    if !is_enabled() {
+        return;
+    }
+    arm_for_button("vol_plus", Some(0xAF), &[]);
+    log::info!("T1 arm vol+ native suppress vk=0xAF from HID");
+}
+
+/// HID 见 Consumer Volume Down（02-EA）→ 武装音量-闸门侧效应。
+pub fn on_vol_down_hid_seen() {
+    if !is_enabled() {
+        return;
+    }
+    arm_for_button("vol_minus", Some(0xAE), &[]);
+    log::info!("T1 arm vol- native suppress vk=0xAE from HID");
+}
+
 /// Consumer HID 落盘后：武装 + LL 闸门同路径补映射（设备名偶发不匹配时仍能注入）。
 pub fn inject_after_consumer_hid(button_hint_vk: u16) {
     if !is_enabled() {
@@ -706,6 +766,8 @@ pub fn inject_after_consumer_hid(button_hint_vk: u16) {
         0xAC | 0x24 => on_ac_home_hid_seen(),
         0xA6 => on_ac_back_hid_seen(),
         0xAD => on_mute_hid_seen(),
+        0xAF => on_vol_up_hid_seen(),
+        0xAE => on_vol_down_hid_seen(),
         _ => {}
     }
     crate::bridges::t1::runtime::on_ll_gate_keydown(button_hint_vk);
@@ -725,22 +787,57 @@ pub fn release_menu_apps_key() {}
 
 pub fn release_browser_home_key() {}
 
+/// 占位：LL 钩子每轮调用的过期清理(保留以兼容 special_keys 调用)。
 pub fn sweep_expired_pending() {}
 
-/// 非 T1 键盘：回放被闸门误吞的 Apps / Browser Home。
+/// LL / RegisterHotKey 吞掉闸门键后补映射（菜单/主页/删除/静音/音量/重映射方向·OK）。
+/// USB runtime 与 BLE keys 共用去重表，避免同一次按键在 LL/HotKey/HID 与 USB/BLE
+/// 双重路径下重复注入（菜单键一次按下会同时命中共用 RegisterHotKey + LL + 双 runtime）。
+static GATE_INJECT_DEDUPE: LazyLock<Mutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+const GATE_INJECT_DEDUPE_MS: u64 = 120;
+
+/// 闸门键补映射去重（跨 USB/BLE/LL/HotKey 共用）。true = 应跳过本次注入。
+pub fn should_skip_gate_inject(button_id: &str) -> bool {
+    let mut g = GATE_INJECT_DEDUPE.lock();
+    let now = Instant::now();
+    g.retain(|_, at| now.duration_since(*at) < Duration::from_millis(GATE_INJECT_DEDUPE_MS));
+    if g.contains_key(button_id) {
+        return true;
+    }
+    g.insert(button_id.to_string(), now);
+    false
+}
+
+
+/// 非 T1 键盘：回放被闸门误吞的侧效应键（Apps / Browser Home/Back / 可选 VK_HOME）。
+///
+/// **禁止**回放方向/OK/音量/静音等重映射闸门键：
+/// - `allow_pass` 对闸门 VK 无效，注入后 LL 仍吞；
+/// - Raw 再把注入当 foreign → `press`→`foreign` 死循环（实体/遥控左方向无限连发）。
 /// **0xAA 绝不回放**——HOGP 常带 LLKHF_INJECTED，误判 foreign 再注入等于主动开搜索。
-pub fn on_foreign_keyboard(vk: u16, pressed: bool) {
+pub fn on_foreign_keyboard(vk: u16, pressed: bool) -> bool {
     if !is_enabled() || !is_gate_vk(vk) {
-        return;
+        return false;
     }
     if vk == 0xAA {
         log::debug!("T1 gate refuse foreign replay of BrowserSearch 0xAA");
-        return;
+        return false;
+    }
+    // 仅冷门侧效应；方向/OK/音量/静音禁止回放（防连击）
+    if !matches!(vk, 0x5D | 0xAC | 0xA6 | 0x24) {
+        log::debug!("T1 gate refuse foreign replay of remap-gate vk=0x{vk:02X}");
+        return false;
     }
     let now = Instant::now();
     if recently_claimed(vk, now) {
-        return;
+        return false;
     }
+    // 先 claim，防止 Raw 把我们的 SendInput 再当 foreign 打回来
+    RECENT_CLAIM
+        .lock()
+        .insert(vk, Instant::now() + CLAIM_TTL);
     log::info!("T1 gate foreign replay vk=0x{vk:02X} pressed={pressed}");
     allow_pass_vks(&[vk]);
     let ok = if pressed {
@@ -751,6 +848,12 @@ pub fn on_foreign_keyboard(vk: u16, pressed: bool) {
     if !ok {
         log::warn!("T1 gate foreign replay failed vk=0x{vk:02X}");
     }
+    ok
+}
+
+/// 是否允许对某闸门 VK 做 foreign 回放（单测缝）。
+pub fn foreign_replay_allowed_for_gate_vk(vk: u16) -> bool {
+    matches!(vk, 0x5D | 0xAC | 0xA6 | 0x24) && vk != 0xAA
 }
 
 pub fn arm_browser_home_guard() {
@@ -797,6 +900,97 @@ pub fn maybe_arm_home_from_hid_hex(hex: &str) {
 ///
 /// **硬约束：** WinEvent 常驻钩不得在未 arm 时关 Search/Start，否则用户点任务栏/
 /// 开始菜单/搜索框会被立刻关掉（见 `search_dismiss_armed`）。
+/// LL 吞掉的重映射方向/OK 等「来源暂未判明」的按键（vk, 吞键时刻）。
+/// LL 拿不到设备来源；Raw Input 随后裁决：T1 设备补映射，真实键盘回放原生键。
+static PENDING_SOURCE_GATE: LazyLock<Mutex<HashMap<u16, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+const PENDING_SOURCE_TTL: Duration = Duration::from_millis(150);
+static SOURCE_WATCHDOG_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// 该闸门键是否必须等 Raw 判明来源后才能补映射（方向/OK 等实体键盘常用键）。
+/// Apps/Browser_* 等冷门侧效应键不受影响，LL 可直接补映射。
+pub fn gate_needs_source_decision(vk: u16) -> bool {
+    matches!(vk, 0x25 | 0x26 | 0x27 | 0x28 | 0x0D | 0x24)
+}
+
+/// 单一后台守护：Raw 超过窗口仍未裁决来源时，兜底回放原生键。
+/// 这样即使 Raw Input 未运行/迟到达，实体键盘方向键/回车也不至于永久丢失。
+fn ensure_source_watchdog() {
+    if SOURCE_WATCHDOG_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    thread::spawn(|| {
+        log::info!(
+            "T1 source-gate watchdog start ttl={}ms",
+            PENDING_SOURCE_TTL.as_millis()
+        );
+        while SOURCE_WATCHDOG_RUNNING.load(Ordering::SeqCst) {
+            thread::sleep(PENDING_SOURCE_TTL / 2);
+            let now = Instant::now();
+            let expired: Vec<u16> = {
+                let mut g = PENDING_SOURCE_GATE.lock();
+                let out: Vec<u16> = g
+                    .iter()
+                    .filter(|(_, until)| **until <= now)
+                    .map(|(vk, _)| *vk)
+                    .collect();
+                for vk in &out {
+                    g.remove(vk);
+                }
+                out
+            };
+            for vk in expired {
+                // 兜底回放原生键（带 EXTRA_INFO，LL 会放行）。Raw 随后若确认是
+                // T1 仍会注入映射；实体键盘则只需这一次原生回放。
+                allow_pass_vks(&[vk]);
+                let ok = crate::bridges::t1::inject::tap_single_vk(vk, 50);
+                log::warn!("T1 source-gate watchdog replay vk=0x{vk:02X} ok={ok}");
+            }
+        }
+        log::info!("T1 source-gate watchdog stopped");
+    });
+}
+
+/// LL 吞键时记录来源待判定的重映射方向/OK/Home 键。
+pub fn defer_gate_source(vk: u16, down: bool) {
+    if !down || !gate_needs_source_decision(vk) {
+        return;
+    }
+    PENDING_SOURCE_GATE
+        .lock()
+        .insert(vk, Instant::now() + PENDING_SOURCE_TTL);
+    ensure_source_watchdog();
+}
+
+/// 该键的暂挂窗口是否仍有效（Raw 未在窗口内裁决策略时，允许把原键透传下去）。
+pub fn source_decision_pending(vk: u16) -> bool {
+    let mut g = PENDING_SOURCE_GATE.lock();
+    let now = Instant::now();
+    g.retain(|_, until| *until > now);
+    g.get(&vk).is_some_and(|until| *until > now)
+}
+
+/// Raw 已判明来源（无论 T1 还是真实键盘）：清掉暂挂，避免错过窗口后的重复回放。
+pub fn consume_source_pending(vk: u16) -> bool {
+    PENDING_SOURCE_GATE.lock().remove(&vk).is_some()
+}
+
+/// 真实键盘按下的重映射方向/OK：用带 EXTRA_INFO 的 SendInput 回放原生键，
+/// 不再补发遥控映射键。EXTRA_INFO 会让 LL 视为 our_inject 放行，不会死循环。
+pub fn replay_foreign_gate_vk(vk: u16) -> bool {
+    if !gate_needs_source_decision(vk) || !is_enabled() {
+        return false;
+    }
+    let _ = consume_source_pending(vk);
+    allow_pass_vks(&[vk]);
+    let ok = crate::bridges::t1::inject::tap_single_vk(vk, 50);
+    log::info!(
+        "T1 foreign gate replay vk=0x{vk:02X} ok={ok} (EXTRA_INFO, LL passthrough)"
+    );
+    ok
+}
+
 static LAST_SEARCH_DISMISS: LazyLock<Mutex<Option<Instant>>> =
     LazyLock::new(|| Mutex::new(None));
 
@@ -1096,7 +1290,7 @@ fn tap_escape_once() -> bool {
         use windows::Win32::UI::Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
         };
-        let extra = crate::bridges::xiaomi::key_mapping::EXTRA_INFO;
+        let extra = crate::bridges::shared::input_vk::EXTRA_INFO;
         let mk = |up: bool| INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
@@ -1878,6 +2072,41 @@ mod tests {
     }
 
     #[test]
+    fn foreign_replay_refuses_remap_gate_vks() {
+        set_enabled(true);
+        refresh_dpad_remap_gates(
+            Some(&[0x57]),
+            Some(&[0x53]),
+            Some(&[0x41]),
+            Some(&[0x44]),
+            Some(&[0x20]),
+        );
+        refresh_media_gates_from_bindings(Some(&[0x20]), Some(&[0x20]), Some(&[0x20]));
+        assert!(is_gate_vk(0x25));
+        assert!(is_gate_vk(0x0D));
+        assert!(is_gate_vk(0xAF));
+        assert!(is_gate_vk(0xAD));
+        assert!(
+            !foreign_replay_allowed_for_gate_vk(0x25),
+            "left remap must not foreign-replay"
+        );
+        assert!(!foreign_replay_allowed_for_gate_vk(0x0D));
+        assert!(!foreign_replay_allowed_for_gate_vk(0xAF));
+        assert!(!foreign_replay_allowed_for_gate_vk(0xAD));
+        assert!(!foreign_replay_allowed_for_gate_vk(0xAA));
+        assert!(foreign_replay_allowed_for_gate_vk(0x5D));
+        assert!(foreign_replay_allowed_for_gate_vk(0xAC));
+        assert!(foreign_replay_allowed_for_gate_vk(0xA6));
+        // 调用路径：方向键不得进入注入（返回 false）
+        assert!(!on_foreign_keyboard(0x25, true));
+        assert!(!on_foreign_keyboard(0x0D, true));
+        assert!(!on_foreign_keyboard(0xAF, true));
+        refresh_dpad_remap_gates(None, None, None, None, None);
+        refresh_media_gates_from_bindings(Some(&[0xAF]), Some(&[0xAE]), Some(&[0xAD]));
+        set_enabled(false);
+    }
+
+    #[test]
     fn browser_search_is_gate_when_t1_enabled() {
         set_enabled(true);
         assert!(is_armable_suppress_vk(0xAA));
@@ -2019,5 +2248,56 @@ mod tests {
         assert!(is_gate_vk(0xAC));
         assert!(should_suppress_native(0xAC, false, true));
         set_enabled(false);
+    }
+
+    #[test]
+    fn dpad_remap_gate_needs_source_decision() {
+        assert!(gate_needs_source_decision(0x25));
+        assert!(gate_needs_source_decision(0x26));
+        assert!(gate_needs_source_decision(0x27));
+        assert!(gate_needs_source_decision(0x28));
+        assert!(gate_needs_source_decision(0x0D));
+        assert!(gate_needs_source_decision(0x24));
+        assert!(!gate_needs_source_decision(0x5D), "Apps 键 LL 可直接补映射");
+        assert!(!gate_needs_source_decision(0xAC));
+        assert!(!gate_needs_source_decision(0xAF));
+    }
+
+    #[test]
+    fn deferred_gate_source_is_consumable_and_expires() {
+        defer_gate_source(0x26, true);
+        assert!(source_decision_pending(0x26));
+        assert!(consume_source_pending(0x26));
+        assert!(!source_decision_pending(0x26));
+
+        // 非 down 不暂挂
+        defer_gate_source(0x25, false);
+        assert!(!source_decision_pending(0x25));
+
+        // 冷门侧效应键不暂挂
+        defer_gate_source(0x5D, true);
+        assert!(!source_decision_pending(0x5D));
+    }
+
+    #[test]
+    fn replay_foreign_gate_vk_clears_pending_only_for_dpad() {
+        defer_gate_source(0x27, true);
+        assert!(replay_foreign_gate_vk(0x27));
+        assert!(!source_decision_pending(0x27));
+        // 冷门键不应回放
+        defer_gate_source(0x5D, true);
+        assert!(!replay_foreign_gate_vk(0x5D));
+    }
+
+    #[test]
+    fn gate_inject_dedupe_is_shared_across_paths() {
+        // 模拟 menu 键同时命中了 LL、RegisterHotKey、USB runtime、BLE runtime：
+        // 第一次会允许，紧随其后的重复调用必须被去重（一次物理按键只注入一次）。
+        assert!(!should_skip_gate_inject("menu"));
+        assert!(should_skip_gate_inject("menu"));
+        assert!(should_skip_gate_inject("menu"));
+        // 不同按钮互不影响
+        assert!(!should_skip_gate_inject("home"));
+        assert!(should_skip_gate_inject("home"));
     }
 }

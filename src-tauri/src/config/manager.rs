@@ -2,7 +2,9 @@
 //!
 //! 配置文件存放于 %APPDATA%\RemoteBridgeHub\
 //! - xiaomi.json   — 小米遥控器配置
-//! - t1.json       — T1 遥控器配置
+//! - t1_ble.json   — T1(蓝牙)
+//! - t1_usb.json   — T1(USB)
+//! - t1.json       — 已废弃；首次启动复制到 ble/usb 两份
 //! - hanvon.json   — 汉王 V60 配置
 //! - settings.json — 全局设置
 
@@ -199,10 +201,33 @@ impl ConfigManager {
         let config_dir = get_config_dir(&app_handle)?;
         fs::create_dir_all(&config_dir)?;
         fs::create_dir_all(config_dir.join("logs")).ok();
-        Ok(Self {
+        let mgr = Self {
             config_dir,
             device_cache: Mutex::new(HashMap::new()),
-        })
+        };
+        mgr.migrate_legacy_t1_config();
+        Ok(mgr)
+    }
+
+    /// 旧 `t1.json` → 若 `t1_ble.json` / `t1_usb.json` 缺失则各复制一份，之后独立。
+    fn migrate_legacy_t1_config(&self) {
+        let legacy = self.device_config_path("t1");
+        if !legacy.exists() {
+            return;
+        }
+        for key in ["t1_ble", "t1_usb"] {
+            let dest = self.device_config_path(key);
+            if dest.exists() {
+                continue;
+            }
+            match fs::copy(&legacy, &dest) {
+                Ok(_) => log::info!(
+                    "migrated legacy t1.json → {}.json",
+                    key
+                ),
+                Err(e) => log::warn!("migrate t1.json → {key}.json failed: {e}"),
+            }
+        }
     }
 
     pub fn config_dir(&self) -> &PathBuf {
@@ -244,7 +269,12 @@ impl ConfigManager {
                 if device == "xiaomi" {
                     Self::merge_xiaomi_defaults(&mut config);
                     config.gain_db =
-                        crate::bridges::xiaomi::voice_gain::normalize_gain_db(config.gain_db);
+                        crate::bridges::shared::voice_gain::normalize_gain_db(config.gain_db);
+                }
+                if device == "t1_ble" || device == "t1_usb" {
+                    Self::merge_t1_defaults(device, &mut config);
+                    config.gain_db =
+                        crate::bridges::shared::voice_gain::normalize_gain_db(config.gain_db);
                 }
                 Ok(config)
             }
@@ -296,17 +326,104 @@ impl ConfigManager {
         }
     }
 
+    /// 对齐 T1 默认别名/绑定，不覆盖用户已有项；BLE 另强制透传键未绑定。
+    fn merge_t1_defaults(device: &str, config: &mut DeviceConfig) {
+        let defaults = Self::default_config_for(device);
+        for (k, v) in &defaults.button_aliases {
+            config.button_aliases.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &defaults.button_bindings {
+            config.button_bindings.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        if config
+            .voice_hotkey
+            .as_ref()
+            .map(|v| v.is_empty())
+            .unwrap_or(true)
+        {
+            config.voice_hotkey = defaults.voice_hotkey.clone();
+        }
+        if device == "t1_ble" {
+            Self::strip_t1_ble_passthrough_bindings(config);
+        }
+        if device == "t1_usb" {
+            // 误把 BLE 透传 strip 套到 USB 后：方向/OK/音量会全部变成 None → 恢复默认绑定
+            Self::restore_usb_bindings_if_bulk_stripped(config, &defaults);
+        }
+    }
+
+    /// 检测「整组透传键被清空」并写回 USB 默认（单键手动清绑不会触发）。
+    fn restore_usb_bindings_if_bulk_stripped(
+        config: &mut DeviceConfig,
+        defaults: &DeviceConfig,
+    ) {
+        const MARKERS: &[&str] = &["up", "down", "left", "right", "ok"];
+        let all_none = MARKERS.iter().all(|id| {
+            matches!(
+                config.button_bindings.get(*id),
+                None | Some(KeyAction::None)
+            )
+        });
+        if !all_none {
+            return;
+        }
+        for id in [
+            "up",
+            "down",
+            "left",
+            "right",
+            "ok",
+            "mute",
+            "vol_plus",
+            "vol_minus",
+        ] {
+            if let Some(v) = defaults.button_bindings.get(id) {
+                if matches!(
+                    config.button_bindings.get(id),
+                    None | Some(KeyAction::None)
+                ) {
+                    config.button_bindings.insert(id.into(), v.clone());
+                }
+            }
+        }
+    }
+
+    /// BLE：方向/OK/音量/静音/电源/鼠标强制 None（系统原生透传）。USB 不调用。
+    fn strip_t1_ble_passthrough_bindings(config: &mut DeviceConfig) {
+        for id in [
+            "power",
+            "mouse",
+            "up",
+            "down",
+            "left",
+            "right",
+            "ok",
+            "mute",
+            "vol_plus",
+            "vol_minus",
+        ] {
+            config
+                .button_bindings
+                .insert(id.into(), KeyAction::None);
+        }
+    }
+
     /// 保存设备配置（写临时文件 → sync → rename；并更新缓存）
     pub fn save_device_config(&self, device: &str, config: &DeviceConfig) -> Result<(), String> {
         let mut config = config.clone();
         if device == "xiaomi" {
             crate::bridges::xiaomi::key_mapping::sync_voice_from_mic_binding(&mut config);
             config.gain_db =
-                crate::bridges::xiaomi::voice_gain::normalize_gain_db(config.gain_db);
+                crate::bridges::shared::voice_gain::normalize_gain_db(config.gain_db);
         }
-        if device == "t1" {
+        if device == "t1_ble" {
+            Self::strip_t1_ble_passthrough_bindings(&mut config);
             config.gain_db =
-                crate::bridges::xiaomi::voice_gain::normalize_gain_db(config.gain_db);
+                crate::bridges::shared::voice_gain::normalize_gain_db(config.gain_db);
+        }
+        if device == "t1_usb" || device == "t1" {
+            config.gain_db =
+                crate::bridges::shared::voice_gain::normalize_gain_db(config.gain_db);
         }
         let path = self.device_config_path(device);
         let tmp_path = path.with_extension("json.tmp");
@@ -328,8 +445,8 @@ impl ConfigManager {
             format!("替换配置文件失败: {}", e)
         })?;
 
-        if device == "xiaomi" || device == "t1" {
-            crate::bridges::xiaomi::voice_gain::set_gain_db(config.gain_db);
+        if device == "xiaomi" || device == "t1_ble" || device == "t1_usb" || device == "t1" {
+            crate::bridges::shared::voice_gain::set_gain_db(config.gain_db);
         }
 
         self.device_cache
@@ -418,7 +535,19 @@ impl ConfigManager {
                 hid_report_tap_enabled: true,
                 ..DeviceConfig::new()
             },
-            "t1" => DeviceConfig {
+            "t1_ble" => {
+                let mut config = DeviceConfig {
+                    button_aliases: Self::t1_button_aliases(),
+                    button_bindings: Self::t1_default_bindings(),
+                    voice_hotkey: Some(vec!["leftshift".into(), "k".into()]),
+                    trigger_mode: TriggerMode::Toggle,
+                    bluetooth_address: None,
+                    ..DeviceConfig::new()
+                };
+                Self::strip_t1_ble_passthrough_bindings(&mut config);
+                config
+            }
+            "t1_usb" | "t1" => DeviceConfig {
                 button_aliases: Self::t1_button_aliases(),
                 button_bindings: Self::t1_default_bindings(),
                 // 对齐 Python T1 standalone：Left Shift + K
@@ -505,15 +634,16 @@ impl ConfigManager {
         m
     }
 
-    // ---- T1 遥控器默认按键（别名单一来源：bridges::t1::config）----
+    // ---- T1 遥控器默认按键（别名单一来源：bridges::t1_common::config）----
     fn t1_button_aliases() -> HashMap<String, String> {
-        crate::bridges::t1::config::default_button_aliases()
+        crate::bridges::t1_common::config::default_button_aliases()
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
     }
 
     fn t1_default_bindings() -> HashMap<String, KeyAction> {
+        // USB 默认完整绑定；BLE 在 merge/save 时再 strip 透传键
         let mut m = HashMap::new();
         m.insert("up".into(), KeyAction::SingleKey(0x26));
         m.insert("down".into(), KeyAction::SingleKey(0x28));
@@ -521,7 +651,7 @@ impl ConfigManager {
         m.insert("right".into(), KeyAction::SingleKey(0x27));
         m.insert("ok".into(), KeyAction::SingleKey(0x0D));
         m.insert("delete".into(), KeyAction::SingleKey(0x08));
-        m.insert("home".into(), KeyAction::SingleKey(0x20)); // Space（勿默认左 Win，易弹开始菜单）
+        m.insert("home".into(), KeyAction::SingleKey(0x20)); // Space
         m.insert("vol_plus".into(), KeyAction::SingleKey(0xAF));
         m.insert("vol_minus".into(), KeyAction::SingleKey(0xAE));
         m.insert("mute".into(), KeyAction::SingleKey(0xAD));

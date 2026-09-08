@@ -164,11 +164,19 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .item(&xiaomi_disconnect)
         .build()?;
 
-    let t1_connect = MenuItemBuilder::with_id("t1_connect", "连接 T1 遥控器").build(app)?;
-    let t1_disconnect = MenuItemBuilder::with_id("t1_disconnect", "断开 T1 遥控器").build(app)?;
-    let t1_submenu = SubmenuBuilder::new(app, "T1 遥控器")
-        .item(&t1_connect)
-        .item(&t1_disconnect)
+    let t1_usb_connect = MenuItemBuilder::with_id("t1_usb_connect", "连接 T1(USB)").build(app)?;
+    let t1_usb_disconnect =
+        MenuItemBuilder::with_id("t1_usb_disconnect", "断开 T1(USB)").build(app)?;
+    let t1_ble_connect = MenuItemBuilder::with_id("t1_ble_connect", "连接 T1(蓝牙)").build(app)?;
+    let t1_ble_disconnect =
+        MenuItemBuilder::with_id("t1_ble_disconnect", "断开 T1(蓝牙)").build(app)?;
+    let t1_usb_submenu = SubmenuBuilder::new(app, "T1(USB)")
+        .item(&t1_usb_connect)
+        .item(&t1_usb_disconnect)
+        .build()?;
+    let t1_ble_submenu = SubmenuBuilder::new(app, "T1(蓝牙)")
+        .item(&t1_ble_connect)
+        .item(&t1_ble_disconnect)
         .build()?;
 
     let v60_connect = MenuItemBuilder::with_id("hanvon_connect", "连接 V60 语音笔").build(app)?;
@@ -190,7 +198,8 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .item(&restart_app)
         .item(&separator1)
         .item(&xiaomi_submenu)
-        .item(&t1_submenu)
+        .item(&t1_ble_submenu)
+        .item(&t1_usb_submenu)
         .item(&v60_submenu)
         .item(&separator2)
         .item(&quit)
@@ -263,8 +272,8 @@ fn on_menu_event(app: &AppHandle, id: &str) {
             // 断开后回到「初始化中」黄标，避免仍显示已就绪
             sync_runtime_icons(app, TrayIconKind::Init);
         }
-        "t1_connect" => {
-            log::info!("Tray: connecting T1");
+        "t1_usb_connect" | "t1_connect" => {
+            log::info!("Tray: connecting T1 USB");
             let app = app.clone();
             std::thread::spawn(move || {
                 let Some(state) = app.try_state::<crate::bridges::BridgeState>() else {
@@ -276,7 +285,7 @@ fn on_menu_event(app: &AppHandle, id: &str) {
                     return;
                 };
                 state.update_status(
-                    crate::bridges::BridgeType::T1,
+                    crate::bridges::BridgeType::T1Usb,
                     crate::bridges::BridgeStatus::Connecting,
                 );
                 if let Err(e) = crate::bridges::t1::runtime::start_t1_bridge(
@@ -284,18 +293,43 @@ fn on_menu_event(app: &AppHandle, id: &str) {
                     &state,
                     &config_manager,
                 ) {
-                    log::warn!("Tray T1 connect failed: {e}");
+                    log::warn!("Tray T1 USB connect failed: {e}");
                     state.update_status(
-                        crate::bridges::BridgeType::T1,
+                        crate::bridges::BridgeType::T1Usb,
                         crate::bridges::BridgeStatus::Error(e),
                     );
                 }
             });
         }
-        "t1_disconnect" => {
-            log::info!("Tray: disconnecting T1");
+        "t1_usb_disconnect" | "t1_disconnect" => {
+            log::info!("Tray: disconnecting T1 USB");
             if let Some(state) = app.try_state::<crate::bridges::BridgeState>() {
                 crate::bridges::t1::runtime::stop_t1_bridge(app, &state);
+            }
+        }
+        "t1_ble_connect" => {
+            log::info!("Tray: connecting T1 BLE");
+            let app = app.clone();
+            std::thread::spawn(move || {
+                let Some(runtime) = app
+                    .try_state::<std::sync::Arc<crate::bridges::t1::ble_runtime::T1BleRuntime>>()
+                else {
+                    return;
+                };
+                if let Err(e) = crate::bridges::t1::ble_runtime::start_t1_ble_bridge(
+                    app.clone(),
+                    std::sync::Arc::clone(&runtime),
+                ) {
+                    log::warn!("Tray T1 BLE connect failed: {e}");
+                }
+            });
+        }
+        "t1_ble_disconnect" => {
+            log::info!("Tray: disconnecting T1 BLE");
+            if let Some(runtime) =
+                app.try_state::<std::sync::Arc<crate::bridges::t1::ble_runtime::T1BleRuntime>>()
+            {
+                crate::bridges::t1::ble_runtime::stop_t1_ble_bridge(app, &runtime);
             }
         }
         "hanvon_connect" => log::info!("Tray: connecting V60"),

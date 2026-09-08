@@ -47,8 +47,6 @@ describe("T1Settings wiring", () => {
     expect(src).toContain('phase === "native"');
     expect(src).toContain("[BLE原生]");
     expect(src).toContain("[USB原生]");
-    expect(src).toContain("02-21-02");
-    expect(src).toContain("02-CF-00");
   });
 
   it("shows Xiaomi-style device info without duplicate USB/BLE fields", () => {
@@ -64,5 +62,12 @@ describe("T1Settings wiring", () => {
       src.indexOf("host-card")
     );
     expect(deviceInfoBlock).not.toContain("语音快捷键");
+  });
+
+  it("splits product transport ble vs usb", () => {
+    const src = readFileSync(t1SettingsPath, "utf8");
+    expect(src).toContain('transport?: "ble" | "usb"');
+    expect(src).toContain('"t1_ble"');
+    expect(src).toContain('"t1_usb"');
   });
 });

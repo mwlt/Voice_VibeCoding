@@ -1,7 +1,7 @@
 //! T1 BLE 语音快捷键注入（独立于 USB runtime 闩锁，避免互相干扰）
 
 use crate::bridges::t1::inject::{names_to_vks, press_vks, release_vks};
-use crate::bridges::xiaomi::hid_injector;
+use crate::bridges::shared::hid_injector;
 use crate::config::manager::{ConfigManager, DeviceConfig, KeyAction, TriggerMode};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,7 +100,7 @@ fn resolve_voice_vks(config: &DeviceConfig) -> Vec<u16> {
 
 fn load_t1_config(app: &AppHandle) -> Option<DeviceConfig> {
     app.try_state::<ConfigManager>()
-        .and_then(|m| m.get_device_config("t1").ok())
+        .and_then(|m| m.get_device_config("t1_ble").ok())
 }
 
 fn emit(app: &AppHandle, message: &str) {
