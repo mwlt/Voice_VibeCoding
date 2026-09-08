@@ -6,8 +6,11 @@ dist/
 
 # Rust / Tauri build output
 src-tauri/target/
-# Alternate cargo target dirs used for diagnosis / TDD (can be huge)
+# Alternate cargo target dirs (repo root OR under src-tauri; diagnosis / TDD can be huge)
+/target/
+/target-*/
 src-tauri/target-*/
+**/target-test*/
 src-tauri/preprocessed.xml
 
 # Local third-party trees / extracted zips (not part of the app source)
@@ -30,6 +33,10 @@ reasonix.toml
 .workbuddy/
 *.code-workspace
 vite.config.ts.timestamp-*.mjs
+
+# Design source binaries (keep exported png/ico in docs/icon-3)
+*.psb
+*.psd
 
 # Local logs & notes (not for repo)
 logs/
@@ -58,4 +65,4 @@ src-tauri/assets/t1_hid_filter/driver/packages/
 src-tauri/assets/t1_hid_filter/driver/obj/
 src-tauri/assets/t1_hid_filter/driver/out/
 src-tauri/assets/t1_hid_filter/driver/nuget.exe
-
+docs/icon-3/桌面图标.psb
