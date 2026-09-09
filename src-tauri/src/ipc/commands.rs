@@ -502,13 +502,13 @@ pub fn xiaomi_host_status_now(app: &AppHandle) -> XiaomiHostStatus {
     } else if !cable_ready {
         (
             "语音环境未就绪".into(),
-            "未检测到 VB-CABLE。可点「虚拟声卡修复」安装或修复。".into(),
+            "未检测到 VB-CABLE。可点「修复虚拟声卡」安装或修复。".into(),
             "warn".into(),
         )
     } else if bridge_alive && !audio_alive {
         (
             "语音路由未就绪".into(),
-            "可点「重启桥接」或「虚拟声卡修复」后重试。".into(),
+            "可点「重启桥接」或「修复虚拟声卡」后重试。".into(),
             "warn".into(),
         )
     } else if !bridge_alive {
@@ -520,7 +520,7 @@ pub fn xiaomi_host_status_now(app: &AppHandle) -> XiaomiHostStatus {
     } else {
         (
             "部分服务异常".into(),
-            "可点「重启桥接」或「虚拟声卡修复」。".into(),
+            "可点「重启桥接」或「修复虚拟声卡」。".into(),
             "warn".into(),
         )
     };
@@ -565,15 +565,42 @@ pub fn restart_xiaomi_bridge_inner(
     state: &BridgeState,
     config_manager: &ConfigManager,
 ) -> Result<(), String> {
-    log::info!("XIAOMI host: restart bridge requested");
+    match restart_xiaomi_bridge_once(app, state, config_manager, false) {
+        Ok(()) => Ok(()),
+        Err(e) if is_retryable_bridge_restart_err(&e) => {
+            log::warn!("XIAOMI host: restart failed ({e}); one more attempt after short wait");
+            append_host_log(
+                config_manager,
+                &format!("bridge restart retry once after: {e}"),
+            );
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            restart_xiaomi_bridge_once(app, state, config_manager, true)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn is_retryable_bridge_restart_err(err: &str) -> bool {
+    err.contains("旧桥接尚未退出") || err.contains("重启 worker 失败")
+}
+
+fn restart_xiaomi_bridge_once(
+    app: &AppHandle,
+    state: &BridgeState,
+    config_manager: &ConfigManager,
+    extended_stop_wait: bool,
+) -> Result<(), String> {
+    log::info!(
+        "XIAOMI host: restart bridge requested extended_wait={extended_stop_wait}"
+    );
     append_host_log(config_manager, "bridge restart requested");
     crate::ipc::tray::sync_runtime_icons(app, crate::ipc::tray::TrayIconKind::Init);
 
     // 仅停 BLE worker；HID Tap 为进程级单例，重启不解绑 30684（避免自占用）
     if let Some(runtime) = app.try_state::<Arc<XiaomiRuntime>>() {
         runtime.request_stop();
-        // 等旧 worker 退出
-        for _ in 0..50 {
+        let rounds = if extended_stop_wait { 80 } else { 50 };
+        for _ in 0..rounds {
             if !runtime.running.load(std::sync::atomic::Ordering::SeqCst) {
                 break;
             }
@@ -773,6 +800,12 @@ pub async fn get_app_log() -> Result<AppLogPayload, String> {
 #[tauri::command]
 pub async fn open_app_log() -> Result<(), String> {
     crate::logging::open_log_in_editor()
+}
+
+/// 清空运行日志（单文件）
+#[tauri::command]
+pub async fn clear_app_log() -> Result<(), String> {
+    crate::logging::clear_log()
 }
 
 /// 对齐 Python `exit`：真正退出进程（非托盘隐藏）

@@ -1,8 +1,8 @@
 {
-  "version": "1.6.7",
-  "notes": "v1.6.7：\n- 全局设置实时保存、hide_dev_menus；小米页 UI 与增益热更新\n- 开机自启/进托盘修复；WebView 恢复尊重托盘态",
-  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.7",
-  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.7",
-  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.6.7/Voice%20VibeCoding_1.6.7_x64-setup.exe",
-  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.6.7/Voice.VibeCoding_1.6.7_x64-setup.exe"
+  "version": "1.6.8",
+  "notes": "v1.6.8：\n1. 修复虚拟声卡改为官方完整驱动安装（不再依赖 ps1 静默修复）\n2. 优化修复虚拟声卡界面（修复/说明/常见问题）\n3. 优化桥接异常时主动重置一次，减少手动重启\n4. 日志单文件写满清空；支持手动清空\n5. 界面细节优化",
+  "giteePage": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.8",
+  "githubPage": "https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.8",
+  "giteeSetupUrl": "https://gitee.com/mwlt/remote-voice-vibe-coding/releases/download/v1.6.8/Voice%20VibeCoding_1.6.8_x64-setup.exe",
+  "githubSetupUrl": "https://github.com/mwlt/Voice_VibeCoding/releases/download/v1.6.8/Voice.VibeCoding_1.6.8_x64-setup.exe"
 }

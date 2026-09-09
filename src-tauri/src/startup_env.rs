@@ -1,6 +1,6 @@
 //! 启动环境自动修复流水线：决策纯函数 + 串行编排
 //!
-//! 顺序：虚拟声卡 → 虚拟键盘 → 等语音路由 → 等桥接落定 → ATVV（条件性一次）
+//! 顺序：虚拟声卡 → 虚拟键盘 → 等语音路由 → 等桥接落定（未连上则主动重置至多 1 次）→ ATVV（条件性一次，与桥接重置互斥）
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -14,7 +14,7 @@ pub enum PipelineStep {
     Atvv,
 }
 
-/// 固定启动修复顺序（桥接本身不单独「修复」，只等待落定）
+/// 固定启动修复顺序
 pub fn pipeline_steps() -> &'static [PipelineStep] {
     &[
         PipelineStep::Cable,
@@ -33,24 +33,35 @@ pub fn should_auto_repair_cable(ready: bool, attempted: bool, reboot_pending: bo
     !ready && !attempted && !reboot_pending
 }
 
+/// 是否应对桥接做一次「主动重置」（等同用户点一次「重启桥接」）。
+/// - 已 BLE 连上：否
+/// - 本进程已主动重置过：否（避免循环踢蓝牙）
+pub fn should_auto_reset_bridge(ble_connected: bool, attempted: bool) -> bool {
+    !ble_connected && !attempted
+}
+
 /// 是否应对 ATVV 跑一次自动修复（= 重启桥接再等订阅）。
 /// - 桥接未起来：否（先等自动连接）
 /// - 已有 ATVV：否
-/// - 本进程已尝试过：否
+/// - 本进程已尝试过 ATVV 修：否
 /// - 尚未等到落定窗口：否
+/// - 本进程已做过桥接主动重置：否（与 WaitBridge 共用「整进程只重置一次」）
 pub fn should_auto_repair_atvv(
     bridge_alive: bool,
     atvv_ok: bool,
     attempted: bool,
     settle_ok: bool,
+    bridge_reset_already: bool,
 ) -> bool {
-    bridge_alive && !atvv_ok && !attempted && settle_ok
+    bridge_alive && !atvv_ok && !attempted && settle_ok && !bridge_reset_already
 }
 
 /// 进程级：声卡自动修是否已尝试
 static CABLE_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 /// 进程级：ATVV 自动修是否已尝试
 static ATVV_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+/// 进程级：桥接主动重置是否已尝试（启动落定失败 / 与 ATVV 修互斥，最多一次）
+static BRIDGE_RESET_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 /// 流水线是否已启动（防重复 spawn）
 static PIPELINE_STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -70,11 +81,20 @@ pub fn mark_atvv_auto_repair_attempted() {
     ATVV_ATTEMPTED.store(true, Ordering::SeqCst);
 }
 
+pub fn bridge_reset_attempted() -> bool {
+    BRIDGE_RESET_ATTEMPTED.load(Ordering::SeqCst)
+}
+
+pub fn mark_bridge_reset_attempted() {
+    BRIDGE_RESET_ATTEMPTED.store(true, Ordering::SeqCst);
+}
+
 /// 测试用重置
 #[cfg(test)]
 pub fn reset_attempt_flags_for_test() {
     CABLE_ATTEMPTED.store(false, Ordering::SeqCst);
     ATVV_ATTEMPTED.store(false, Ordering::SeqCst);
+    BRIDGE_RESET_ATTEMPTED.store(false, Ordering::SeqCst);
     PIPELINE_STARTED.store(false, Ordering::SeqCst);
 }
 
@@ -290,10 +310,18 @@ pub fn wait_bridge_settle(
             if crate::bridges::xiaomi::connect::atvv_subscribed() {
                 return (true, true);
             }
-            if alive_since
+            if xiaomi_ble_connected(app) {
+                if alive_since
+                    .map(|t| t.elapsed() >= settle_after_alive)
+                    .unwrap_or(false)
+                {
+                    return (true, true);
+                }
+            } else if alive_since
                 .map(|t| t.elapsed() >= settle_after_alive)
                 .unwrap_or(false)
             {
+                // worker 在跑但一直未 Connected：仍返回 alive，交由上层决定是否主动重置
                 return (true, true);
             }
         }
@@ -307,7 +335,62 @@ pub fn wait_bridge_settle(
         && alive_since
             .map(|t| t.elapsed() >= settle_after_alive)
             .unwrap_or(false);
-    (alive, settle_ok || alive) // 超时但仍 alive：允许尝试一次 ATVV 修
+    (alive, settle_ok || alive) // 超时但仍 alive：允许尝试一次 ATVV 修 / 桥接重置
+}
+
+fn xiaomi_ble_connected(app: &tauri::AppHandle) -> bool {
+    use crate::bridges::{BridgeStatus, BridgeType};
+    use tauri::Manager;
+    app.try_state::<crate::bridges::BridgeState>()
+        .map(|s| s.get_info(BridgeType::Xiaomi).status == BridgeStatus::Connected)
+        .unwrap_or(false)
+}
+
+fn step_wait_bridge_with_one_reset(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    let (alive, settle) = wait_bridge_settle(
+        app,
+        std::time::Duration::from_secs(45),
+        std::time::Duration::from_secs(8),
+    );
+    let connected = xiaomi_ble_connected(app);
+    log::info!(
+        "startup-env bridge settle alive={alive} settle_ok={settle} ble_connected={connected}"
+    );
+
+    if should_auto_reset_bridge(connected, bridge_reset_attempted()) {
+        mark_bridge_reset_attempted();
+        let Some(state) = app.try_state::<crate::bridges::BridgeState>() else {
+            return Err("BridgeState 不可用".into());
+        };
+        let Some(config) = app.try_state::<crate::config::manager::ConfigManager>() else {
+            return Err("ConfigManager 不可用".into());
+        };
+        log::info!("startup-env bridge one active reset (same as 重启桥接 once)");
+        match crate::ipc::commands::restart_xiaomi_bridge_inner(app, state.inner(), config.inner())
+        {
+            Ok(()) => {
+                let (alive2, settle2) = wait_bridge_settle(
+                    app,
+                    std::time::Duration::from_secs(30),
+                    std::time::Duration::from_secs(6),
+                );
+                let connected2 = xiaomi_ble_connected(app);
+                log::info!(
+                    "startup-env bridge after reset alive={alive2} settle_ok={settle2} ble_connected={connected2}"
+                );
+                if !alive2 {
+                    return Err("主动重置后桥接仍未启动（将依赖后续重连）".into());
+                }
+                Ok(())
+            }
+            Err(e) => Err(format!("桥接主动重置失败: {e}")),
+        }
+    } else if !alive {
+        Err("桥接未在时限内启动（将依赖后续重连）".into())
+    } else {
+        Ok(())
+    }
 }
 
 fn step_atvv_once(app: &tauri::AppHandle) -> Result<(), String> {
@@ -322,14 +405,18 @@ fn step_atvv_once(app: &tauri::AppHandle) -> Result<(), String> {
         atvv_ok,
         atvv_auto_repair_attempted(),
         true, // WaitBridge 已保证落定后再进本步
+        bridge_reset_attempted(),
     ) {
         log::info!(
-            "startup-env atvv skip auto-repair bridge_alive={bridge_alive} atvv_ok={atvv_ok} attempted={}",
-            atvv_auto_repair_attempted()
+            "startup-env atvv skip auto-repair bridge_alive={bridge_alive} atvv_ok={atvv_ok} attempted={} bridge_reset={}",
+            atvv_auto_repair_attempted(),
+            bridge_reset_attempted()
         );
         return Ok(());
     }
     mark_atvv_auto_repair_attempted();
+    // ATVV 修也会重启桥接：计入「主动重置」，避免同进程再来一次
+    mark_bridge_reset_attempted();
     let Some(state) = app.try_state::<crate::bridges::BridgeState>() else {
         return Err("BridgeState 不可用".into());
     };
@@ -369,16 +456,7 @@ pub fn run_startup_env_pipeline(app: tauri::AppHandle) -> PipelineReport {
         wait_audio_router(std::time::Duration::from_secs(20))
     });
     runner.push(PipelineStep::WaitBridge, move || {
-        let (alive, settle) = wait_bridge_settle(
-            &app_bridge,
-            std::time::Duration::from_secs(45),
-            std::time::Duration::from_secs(8),
-        );
-        log::info!("startup-env bridge settle alive={alive} settle_ok={settle}");
-        if !alive {
-            return Err("桥接未在时限内启动（将依赖后续重连）".into());
-        }
-        Ok(())
+        step_wait_bridge_with_one_reset(&app_bridge)
     });
     runner.push(PipelineStep::Atvv, move || step_atvv_once(&app_atvv));
 

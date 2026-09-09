@@ -1,8 +1,8 @@
 //! 启动环境流水线：决策与步骤顺序（不跑真实驱动安装）
 
 use remote_bridge_hub_lib::startup_env::{
-    pipeline_steps, should_auto_repair_atvv, should_auto_repair_cable, try_mark_pipeline_started,
-    PipelineRunner, PipelineStep,
+    pipeline_steps, should_auto_repair_atvv, should_auto_repair_cable, should_auto_reset_bridge,
+    try_mark_pipeline_started, PipelineRunner, PipelineStep,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -30,12 +30,22 @@ fn cable_auto_repair_only_when_not_ready_and_not_attempted() {
 }
 
 #[test]
+fn bridge_auto_reset_only_when_not_connected_and_not_attempted() {
+    assert!(should_auto_reset_bridge(false, false));
+    assert!(!should_auto_reset_bridge(true, false));
+    assert!(!should_auto_reset_bridge(false, true));
+    assert!(!should_auto_reset_bridge(true, true));
+}
+
+#[test]
 fn atvv_auto_repair_only_after_bridge_settle_without_atvv() {
-    assert!(should_auto_repair_atvv(true, false, false, true));
-    assert!(!should_auto_repair_atvv(false, false, false, true));
-    assert!(!should_auto_repair_atvv(true, true, false, true));
-    assert!(!should_auto_repair_atvv(true, false, true, true));
-    assert!(!should_auto_repair_atvv(true, false, false, false));
+    assert!(should_auto_repair_atvv(true, false, false, true, false));
+    assert!(!should_auto_repair_atvv(false, false, false, true, false));
+    assert!(!should_auto_repair_atvv(true, true, false, true, false));
+    assert!(!should_auto_repair_atvv(true, false, true, true, false));
+    assert!(!should_auto_repair_atvv(true, false, false, false, false));
+    // 已做过桥接主动重置：不再因 ATVV 再踢一次
+    assert!(!should_auto_repair_atvv(true, false, false, true, true));
 }
 
 #[test]

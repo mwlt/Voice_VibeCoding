@@ -8,8 +8,8 @@
 1. **虚拟声卡（VB-CABLE）**：未就绪 → 内嵌 Repair **一次**；`needs_reboot` 则同开机内不再反复安装；**OS 重启后**若仍未就绪再试一次  
 2. **虚拟键盘（WinUHid）**：沿用 `ensure_runtime_quiet`（含重启后一次自动修）  
 3. **语音路由**：等待 audio router 就绪（已有 spawn，此处只等）  
-4. **桥接**：沿用现有启动自动连接；流水线 **等待落定**，不额外 restart  
-5. **ATVV**：桥接已在跑且仍无 ATVV → 跑现有 `run_atvv_repair_pipeline` **一次**
+4. **桥接**：沿用启动自动连接；流水线等待落定。若时限内 **未 BLE Connected**，主动「重启桥接」**至多 1 次**（与 ATVV 修互斥），然后短等；**不循环**  
+5. **ATVV**：桥接已在跑、仍无 ATVV、且本进程尚未做过桥接主动重置 → `run_atvv_repair_pipeline` **一次**
 
 ## TDD 测试缝（Seams）
 
@@ -17,10 +17,12 @@
 |------|------|--------|
 | `should_auto_repair_cable(ready, attempted, reboot_pending)` | 是否应对声卡跑一次自动修 | `cargo test --test startup_env_pipeline` ✅ |
 | `cable_reboot_blocks_auto_repair(flag, age, uptime)` | 同开机阻断 / 重启后放行 | 同上 ✅ |
-| `should_auto_repair_atvv(bridge_alive, atvv_ok, attempted, settle_ok)` | 是否应对 ATVV 跑一次修复 | 同上 ✅ |
+| `should_auto_reset_bridge(ble_connected, attempted)` | 启动未连上是否主动重置一次 | 同上 ✅ |
+| `should_auto_repair_atvv(..., bridge_reset_already)` | 是否应对 ATVV 跑一次修复（与桥接重置互斥） | 同上 ✅ |
 | `pipeline_steps()` | 固定步骤顺序 | 同上 ✅ |
 | `PipelineRunner`（可注入步骤） | 串行、不重叠执行；一步失败继续后续 | 同上 ✅ |
 | 启动接线 | `lib.rs` 只起一条 pipeline；无并行 `winuhid-ensure` | 审查 + `cargo check` ✅ |
+| 手动「重启桥接」 | spawn/旧 worker 卡住时 **短延迟再试 1 次**，非循环 | 代码审查 |
 
 真机 UAC / 驱动安装冒烟另测（不强制 CI）。
 

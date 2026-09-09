@@ -1,11 +1,9 @@
 [CmdletBinding()]
 param(
-  [ValidateSet("Install", "InstallElevated", "Finish", "Repair", "Restore", "Audit")]
+  [ValidateSet("Install", "InstallElevated", "Finish", "Repair", "Restore", "Audit", "EnsureMic", "EnsureUsbMic")]
   [string] $Mode = "Install",
-  [Parameter(Mandatory = $true)]
-  [string] $AppPath,
-  [Parameter(Mandatory = $true)]
-  [string] $DriverZipPath,
+  [string] $AppPath = "",
+  [string] $DriverZipPath = "",
   [switch] $Force
 )
 
@@ -33,7 +31,28 @@ function Get-VBCableEndpoint([string] $Flow, [string] $Prefix, [string] $Pattern
 
 function Get-VBCableCapture { Get-VBCableEndpoint "Capture" "{0.0.1.00000000}" "(?i)(^|\s)CABLE Output(\s|$)" }
 function Get-VBCableRender { Get-VBCableEndpoint "Render" "{0.0.0.00000000}" "(?i)(^|\s)CABLE Input(\s|$)" }
+function Get-T1UsbMicCapture { Get-VBCableEndpoint "Capture" "{0.0.1.00000000}" "(?i)Mic Device" }
 function Test-VBCableReady { return [bool](Get-VBCableCapture) -and [bool](Get-VBCableRender) }
+
+function Allow-MicrophonePrivacy {
+  $root = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+  $desktop = Join-Path $root "NonPackaged"
+  $null = New-Item -ItemType Directory -Force -Path $root, $desktop
+  Set-ItemProperty -LiteralPath $root -Name Value -Value Allow -Type String
+  Set-ItemProperty -LiteralPath $desktop -Name Value -Value Allow -Type String
+}
+
+function Set-DefaultCaptureEndpoint([string] $DeviceId, [string] $Label) {
+  Initialize-AudioEndpointApi
+  $current = [XiaomiAudioEndpoint]::GetDefaultCapture()
+  if (-not (Test-Path -LiteralPath $PreviousMicFile) -and $current -ne $DeviceId) {
+    Set-Content -LiteralPath $PreviousMicFile -Value $current -Encoding UTF8
+  }
+  [XiaomiAudioEndpoint]::SetDefaultCapture($DeviceId)
+  Allow-MicrophonePrivacy
+  Set-CableEndpointVolume -DeviceId $DeviceId -Level 1.0
+  Write-Output ("Phase: DefaultCapture | {0} => {1}" -f $Label, $DeviceId)
+}
 
 function Initialize-AudioEndpointApi {
   if ("XiaomiAudioEndpoint" -as [type]) { return }
@@ -68,6 +87,22 @@ internal interface IPolicyConfig {
   int GetPropertyValue(string d, IntPtr k, IntPtr v); int SetPropertyValue(string d, IntPtr k, IntPtr v);
   int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string d, ERole role); int SetEndpointVisibility(string d, int v);
 }
+[ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IAudioEndpointVolume {
+  int RegisterControlChangeNotify(IntPtr p);
+  int UnregisterControlChangeNotify(IntPtr p);
+  int GetChannelCount(out uint pnChannelCount);
+  int SetMasterVolumeLevel(float levelDB, ref Guid ctx);
+  int GetMasterVolumeLevel(out float levelDB);
+  int SetMasterVolumeLevelScalar(float fLevel, ref Guid ctx);
+  int GetMasterVolumeLevelScalar(out float pfLevel);
+  int SetChannelVolumeLevel(uint n, float levelDB, ref Guid ctx);
+  int GetChannelVolumeLevel(uint n, out float levelDB);
+  int SetChannelVolumeLevelScalar(uint n, float fLevel, ref Guid ctx);
+  int GetChannelVolumeLevelScalar(uint n, out float fLevel);
+  int SetMute([MarshalAs(UnmanagedType.Bool)] bool bMute, ref Guid ctx);
+  int GetMute(out bool pbMute);
+}
 public static class XiaomiAudioEndpoint {
   public static string GetDefaultCapture() {
     IMMDeviceEnumerator e = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject(); IMMDevice d = null;
@@ -76,6 +111,23 @@ public static class XiaomiAudioEndpoint {
   }
   public static void SetDefaultCapture(string id) {
     IPolicyConfig c=(IPolicyConfig)new PolicyConfigClient(); try { for(int r=0;r<3;r++){int hr=c.SetDefaultEndpoint(id,(ERole)r);if(hr!=0)Marshal.ThrowExceptionForHR(hr);} } finally { Marshal.ReleaseComObject(c); }
+  }
+  public static string SetEndpointVolume(string id, float level) {
+    IMMDeviceEnumerator e = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+    IMMDevice d = null; IntPtr pVol = IntPtr.Zero;
+    try {
+      int hr = e.GetDevice(id, out d); if (hr != 0) return "GetDevice hr="+hr;
+      Guid iid = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
+      hr = d.Activate(ref iid, 23, IntPtr.Zero, out pVol); if (hr != 0) return "Activate hr="+hr;
+      IAudioEndpointVolume vol = (IAudioEndpointVolume)Marshal.GetTypedObjectForIUnknown(pVol, typeof(IAudioEndpointVolume));
+      Guid g = Guid.Empty; vol.SetMute(false, ref g); vol.SetMasterVolumeLevelScalar(level, ref g);
+      float cur; bool mute; vol.GetMasterVolumeLevelScalar(out cur); vol.GetMute(out mute);
+      return "level="+cur+" mute="+mute;
+    } finally {
+      if (pVol != IntPtr.Zero) Marshal.Release(pVol);
+      if (d != null) Marshal.ReleaseComObject(d);
+      Marshal.ReleaseComObject(e);
+    }
   }
 }
 '@
@@ -134,20 +186,29 @@ function Prepare-DriverFiles {
   return $inf
 }
 
+function Set-CableEndpointVolume([string] $DeviceId, [float] $Level = 1.0) {
+  Initialize-AudioEndpointApi
+  try {
+    $r = [XiaomiAudioEndpoint]::SetEndpointVolume($DeviceId, $Level)
+    Write-Output ("Phase: Volume | {0} => {1}" -f $DeviceId, $r)
+  } catch {
+    Write-Output ("Phase: VolumeWarn | {0}" -f $_.Exception.Message)
+  }
+}
+
 function Set-DefaultCableMicrophone {
   $capture = Get-VBCableCapture
   if (-not $capture) { throw "CABLE Output is not available" }
-  Initialize-AudioEndpointApi
-  $current = [XiaomiAudioEndpoint]::GetDefaultCapture()
-  if (-not (Test-Path -LiteralPath $PreviousMicFile) -and $current -ne $capture.Id) {
-    Set-Content -LiteralPath $PreviousMicFile -Value $current -Encoding UTF8
-  }
-  [XiaomiAudioEndpoint]::SetDefaultCapture($capture.Id)
-  $root = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
-  $desktop = Join-Path $root "NonPackaged"
-  $null = New-Item -ItemType Directory -Force -Path $root, $desktop
-  Set-ItemProperty -LiteralPath $root -Name Value -Value Allow -Type String
-  Set-ItemProperty -LiteralPath $desktop -Name Value -Value Allow -Type String
+  Set-DefaultCaptureEndpoint -DeviceId $capture.Id -Label "CABLE Output"
+  # 播放端是 Render「CABLE Input」——两端都拉满并取消静音
+  $render = Get-VBCableRender
+  if ($render) { Set-CableEndpointVolume -DeviceId $render.Id -Level 1.0 }
+}
+
+function Set-DefaultUsbMicrophone {
+  $capture = Get-T1UsbMicCapture
+  if (-not $capture) { throw "Mic Device is not available" }
+  Set-DefaultCaptureEndpoint -DeviceId $capture.Id -Label "Mic Device"
 }
 
 function Set-FinishRunOnce {
@@ -177,6 +238,8 @@ try {
   $null = New-Item -ItemType Directory -Force -Path $StateRoot
   switch ($Mode) {
     "InstallElevated" {
+      # 已弃用：应用改为启动官方 VBCABLE_Setup_x64.exe 有界面安装。
+      # 保留此模式仅供旧文档/手工调试；请勿再从 app 调用。
       if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw "Administrator rights are required" }
       $inf = Prepare-DriverFiles
       Initialize-RootDeviceInstaller
@@ -185,18 +248,29 @@ try {
       exit 0
     }
     "Install" {
-      if ($Force -or -not (Test-VBCableReady)) { Invoke-ElevatedInstall }
-      if (Wait-VBCable 45) { Set-DefaultCableMicrophone; Remove-Item -LiteralPath $RebootFlag -Force -ErrorAction SilentlyContinue }
-      else { Set-Content -LiteralPath $RebootFlag -Value "reboot required" -Encoding ASCII; Set-FinishRunOnce; $result = "Driver installed; Windows restart required" }
+      # 已弃用静默 SetupAPI；请用应用内「官方安装程序」路径
+      throw "Deprecated: use official VBCABLE_Setup from the app (embedded zip). Silent SetupAPI install is disabled."
     }
     "Finish" {
       if (Wait-VBCable 60) { Set-DefaultCableMicrophone; Remove-Item -LiteralPath $RebootFlag -Force -ErrorAction SilentlyContinue; Remove-ItemProperty -Path $RunOnceKey -Name $RunOnceName -Force -ErrorAction SilentlyContinue }
       else { throw "VB-CABLE endpoints are still unavailable after restart" }
     }
     "Repair" {
-      # 默认：已就绪则只修默认麦，不重装驱动。-Force：始终走提权安装（排障/测试用）
-      if ($Force -or -not (Test-VBCableReady)) { Invoke-ElevatedInstall }
-      if (Wait-VBCable 45) { Set-DefaultCableMicrophone } else { Set-FinishRunOnce; $result = "Driver installed; Windows restart required" }
+      if (-not (Test-VBCableReady)) {
+        throw "VB-CABLE is not ready"
+      }
+      Set-DefaultCableMicrophone
+      $result = "OK"
+    }
+    "EnsureMic" {
+      if (-not (Test-VBCableReady)) { throw "VB-CABLE is not ready" }
+      Set-DefaultCableMicrophone
+      $result = "OK"
+    }
+    "EnsureUsbMic" {
+      # T1 USB：默认麦切到 Mic Device（避免仍停在 CABLE Output 导致输入法无声）
+      Set-DefaultUsbMicrophone
+      $result = "OK"
     }
     "Restore" {
       if (Test-Path -LiteralPath $PreviousMicFile) { Initialize-AudioEndpointApi; $id=(Get-Content -LiteralPath $PreviousMicFile -Raw -Encoding UTF8).Trim(); if($id){[XiaomiAudioEndpoint]::SetDefaultCapture($id)}; Remove-Item -LiteralPath $PreviousMicFile -Force }

@@ -8,7 +8,7 @@ use std::sync::{Mutex, OnceLock};
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static LOG_LOCK: Mutex<()> = Mutex::new(());
 
-const MAX_BYTES: u64 = 1_500_000; // ~1.5MB 后轮转
+const MAX_BYTES: u64 = 1_500_000; // ~1.5MB 后清空重写（只保留一个 app.log）
 
 /// 高频/调试噪音：不写进用户可见日志
 fn is_noise(msg: &str) -> bool {
@@ -61,16 +61,15 @@ fn chrono_like_now() -> String {
         .to_string()
 }
 
-fn rotate_if_needed(path: &Path) {
+/// 超过上限则清空同一文件（不另建 app.log.1）
+fn truncate_if_needed(path: &Path) {
     let Ok(meta) = fs::metadata(path) else {
         return;
     };
     if meta.len() < MAX_BYTES {
         return;
     }
-    let bak = path.with_extension("log.1");
-    let _ = fs::remove_file(&bak);
-    let _ = fs::rename(path, &bak);
+    let _ = fs::write(path, b"");
 }
 
 fn write_line(path: &Path, line: &str) {
@@ -78,7 +77,7 @@ fn write_line(path: &Path, line: &str) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    rotate_if_needed(path);
+    truncate_if_needed(path);
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = f.write_all(line.as_bytes());
         let _ = f.flush();
@@ -203,6 +202,25 @@ pub fn open_log_in_editor() -> Result<(), String> {
     {
         Err("仅支持 Windows".into())
     }
+}
+
+/// 手动清空运行日志（只清 app.log，并写一条标记）
+pub fn clear_log() -> Result<(), String> {
+    let path = LOG_PATH
+        .get()
+        .cloned()
+        .ok_or_else(|| "日志尚未初始化".to_string())?;
+    let _guard = LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    fs::write(&path, b"").map_err(|e| format!("清空日志失败: {e}"))?;
+    drop(_guard);
+    write_line(
+        &path,
+        &format_line(log::Level::Info, "—— 日志已手动清空 ——"),
+    );
+    Ok(())
 }
 
 /// 手动追加一行（兼容旧 append_host_log）

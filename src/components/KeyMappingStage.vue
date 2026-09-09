@@ -849,8 +849,8 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  font-weight: 400;
-  color: #0f172a;
+  font-weight: normal;
+  color: #333;
   flex-shrink: 0;
   min-width: 0;
 }
@@ -911,7 +911,7 @@ onUnmounted(() => {
 .voice-quick-label {
   margin: 0 0 8px;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: normal;
   color: #475569;
   letter-spacing: 0.01em;
 }

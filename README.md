@@ -18,7 +18,7 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 [https://github.com/nijez/open-voice-bridge](https://github.com/nijez/open-voice-bridge)
 
-**v1.6.7** · Windows 桌面应用
+**v1.6.8** · Windows 桌面应用
 
 把小米遥控器 2 Pro（及预留的 T1 / 汉王 V60有兴趣的自己继续开发）接到电脑：按键可映射成键盘快捷键，语音可送到输入法听写。
 
@@ -60,10 +60,10 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 | ATVV / HID Tap 时序 | 订阅语音通道前暂停 HID Tap，降低 AccessDenied；订阅成功后再启 Tap                                                      | 优化        |
 | 语音路由占用策略          | 默认 `hold_device`：启动握 CABLE 设备，仅说话时 play；空闲不常驻写静音（见下文「VB-CABLE 占用方式」）                               | 优化        |
 | 虚拟声卡状态探测          | 优先读系统 MMDevices 注册表判断 CABLE 是否就绪；已就绪后停探，避免设置页轮询经 WASAPI 枚举导致 `audiodg` 句柄异常上涨                      | 优化        |
-| 虚拟声卡修复体验          | 「虚拟声卡修复」可选自动/内嵌/强制重装；隐藏 PowerShell 黑框与系统 OK 弹窗；结果进状态日志；仅需重启 Windows 时弹醒目提示                         | 优化        |
+| 修复虚拟声卡体验          | 「修复虚拟声卡」可选自动/内嵌/强制重装；隐藏 PowerShell 黑框与系统 OK 弹窗；结果进状态日志；仅需重启 Windows 时弹醒目提示                         | 优化        |
 | HID 注入闪窗          | 提权注入 WUDFHost 时隐藏控制台闪窗（UAC 仍保留）                                                                    | 优化        |
 | 音频信号波形            | 设置页实时显示 BLE 解码电平 / 波形，便于判断语音是否真正进机                                                                 | 增强        |
-| 虚拟声卡检测与安装         | 应用内检测 VB-CABLE，支持内嵌驱动或官网安装指引，结果写回主机状态                                                              | 增强        |
+| 修复虚拟声卡检测与安装         | 应用内检测 VB-CABLE，支持内嵌驱动或官网安装指引，结果写回主机状态                                                              | 增强        |
 | 语音键按住说话（微信等）      | WinUHid 注入本软件映射的快捷键；微信侧设为「F5 + 本软件快捷键」（见输入法设置）；松手统一释放                                              | 修复        |
 | 语音键含 Win 不粘滞      | Ctrl+Win / Win+Alt 松开走菜单键同款分步 HID 释放，并无条件补 Win KEYUP，避免 Win 粘住                                     | 修复        |
 | 修复虚拟键盘重启策略        | 仅 Windows 返回 3010 才提示必须重启；否则再点「自动修复」；重启后若仍未就绪自动补一次                                                 | 优化        |
@@ -93,16 +93,16 @@ apple macos版 ，作者 [nijez](https://github.com/nijez)
 
 ## 下载安装包
 
-正式安装包在两边的 Release 页（当前 **v1.6.7**）：
+正式安装包在两边的 Release 页（当前 **v1.6.8**）：
 
-- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.7)（国内优先）
-- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.7)
+- [Gitee Releases](https://gitee.com/mwlt/remote-voice-vibe-coding/releases/tag/v1.6.8)（国内优先）
+- [GitHub Releases](https://github.com/mwlt/Voice_VibeCoding/releases/tag/v1.6.8)
 
 常用文件：
 
-- `Voice VibeCoding_1.6.7_x64-setup.exe`（NSIS）
-- `Voice VibeCoding_1.6.7_x64_zh-CN.msi`
-- `WinUHid_Manual_1.6.7.zip`（WinUHid 虚拟键盘手动安装包，也可在应用内「修复虚拟键盘 → 下载驱动包」下载）
+- `Voice VibeCoding_1.6.8_x64-setup.exe`（NSIS）
+- `Voice VibeCoding_1.6.8_x64_zh-CN.msi`
+- `WinUHid_Manual_1.6.8.zip`（WinUHid 虚拟键盘手动安装包，也可在应用内「修复虚拟键盘 → 下载驱动包」下载）
 
 安装时若提示无法覆盖 `remote-bridge-hub.exe`，请先退出本软件（含托盘）再重试。
 
@@ -170,7 +170,7 @@ $env:REMOTE_BRIDGE_AUDIO_LIFECYCLE = "hold_device"   # always_play | hold_device
 
 更细的对照步骤见 `scripts/ab_audio_lifecycle.md`。
 
-**虚拟声卡「已安装」状态灯：** 优先读注册表 MMDevices（与安装脚本一致）；已就绪后停止自动重探；未就绪约每 60s 可再试一次；点「虚拟声卡检测与修复」强制重探。勿与波形闪烁混淆——闪烁表示正在送语音，不是探测间隔。
+**虚拟声卡「已安装」状态灯：** 优先读注册表 MMDevices（与安装脚本一致）；已就绪后停止自动重探；未就绪约每 60s 可再试一次；点「修复虚拟声卡」强制重探。勿与波形闪烁混淆——闪烁表示正在送语音，不是探测间隔。
 
 ---
 
@@ -189,7 +189,7 @@ $env:REMOTE_BRIDGE_AUDIO_LIFECYCLE = "hold_device"   # always_play | hold_device
 小米语音另需：
 
 - 遥控器已在系统蓝牙设置中配对  
-- **VB-CABLE**（可在应用内「虚拟声卡检测与修复」安装/修复）  
+- **VB-CABLE**（可在应用内「修复虚拟声卡」安装/修复）  
 - 首次启用返回/音量专用通道时，可能弹出 **UAC**（管理员注入）
 
 ---
@@ -221,8 +221,8 @@ npm run tauri:build
 | 类型       | 路径                                                                          |
 | -------- | --------------------------------------------------------------------------- |
 | 可执行文件    | `src-tauri/target/release/remote-bridge-hub.exe`                            |
-| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.6.7_x64_zh-CN.msi`  |
-| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.6.7_x64-setup.exe` |
+| MSI      | `src-tauri/target/release/bundle/msi/Voice VibeCoding_1.6.8_x64_zh-CN.msi`  |
+| NSIS 安装包 | `src-tauri/target/release/bundle/nsis/Voice VibeCoding_1.6.8_x64-setup.exe` |
 
 
 发新版时请同步更新仓库根目录 `update/latest.json`（提高 `version`，填写 Gitee/GitHub 页面与安装包直链）。应用会优先读 Gitee raw，失败再读 GitHub raw。有新版本时在顶栏显示「新版本」与「查看更新内容」；弹窗内可选「不再提醒此版本」（仅抑制自动提醒，不影响设置页「检查更新」）。详见 [docs/UPDATE_IGNORE_PLAN.md](docs/UPDATE_IGNORE_PLAN.md)。
