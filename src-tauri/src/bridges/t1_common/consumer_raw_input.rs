@@ -242,10 +242,126 @@ pub fn looks_power_probe_vk(vk: u16) -> bool {
 
 type EventCallback = Arc<Mutex<dyn FnMut(ConsumerRawEvent) + Send + 'static>>;
 
-pub struct ConsumerRawInput {
+/// 进程内单例 Raw Input：USB/BLE 共用一个 `RegisterRawInputDevices`。
+/// Windows 对同一 usage 后注册覆盖前注册；BLE 重连反复 start/stop 会弄死仍在跑的 USB 收键。
+struct SharedRawHub {
+    listeners: std::collections::HashMap<u64, EventCallback>,
+    next_id: u64,
     running: Arc<AtomicBool>,
     thread_handle: Option<thread::JoinHandle<()>>,
     thread_id: Arc<Mutex<Option<u32>>>,
+    listen_keyboard: bool,
+}
+
+impl SharedRawHub {
+    fn new() -> Self {
+        Self {
+            listeners: std::collections::HashMap::new(),
+            next_id: 1,
+            running: Arc::new(AtomicBool::new(false)),
+            thread_handle: None,
+            thread_id: Arc::new(Mutex::new(None)),
+            listen_keyboard: false,
+        }
+    }
+}
+
+static SHARED_RAW_HUB: LazyLock<Mutex<SharedRawHub>> =
+    LazyLock::new(|| Mutex::new(SharedRawHub::new()));
+
+fn hub_register<F>(listen_keyboard: bool, callback: F) -> Result<u64, String>
+where
+    F: FnMut(ConsumerRawEvent) + Send + 'static,
+{
+    let mut hub = SHARED_RAW_HUB
+        .lock()
+        .map_err(|_| "SharedRawHub lock poisoned".to_string())?;
+    let id = hub.next_id;
+    hub.next_id = hub.next_id.wrapping_add(1).max(1);
+    hub.listeners
+        .insert(id, Arc::new(Mutex::new(callback)) as EventCallback);
+    hub.listen_keyboard |= listen_keyboard;
+
+    if hub.thread_handle.is_none() {
+        hub.running.store(true, Ordering::SeqCst);
+        let running = Arc::clone(&hub.running);
+        let thread_id = Arc::clone(&hub.thread_id);
+        let listen_kb = hub.listen_keyboard;
+        let fanout: EventCallback = Arc::new(Mutex::new(move |ev: ConsumerRawEvent| {
+            let cbs: Vec<EventCallback> = SHARED_RAW_HUB
+                .lock()
+                .map(|h| h.listeners.values().cloned().collect())
+                .unwrap_or_default();
+            for cb in cbs {
+                if let Ok(mut f) = cb.lock() {
+                    f(ev.clone());
+                }
+            }
+        }));
+        hub.thread_handle = Some(thread::spawn(move || {
+            #[cfg(target_os = "windows")]
+            {
+                if let Ok(mut g) = thread_id.lock() {
+                    *g = Some(unsafe { win32::GetCurrentThreadId() });
+                }
+                consumer_raw_thread(running, fanout, listen_kb);
+                if let Ok(mut g) = thread_id.lock() {
+                    *g = None;
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                log::warn!("ConsumerRawInput only on Windows");
+                let _ = (running, fanout, listen_kb);
+            }
+        }));
+        log::info!(
+            "ConsumerRawInput shared hub started listen_keyboard={listen_kb} listeners=1"
+        );
+    } else {
+        log::info!(
+            "ConsumerRawInput shared hub add listener id={id} total={}",
+            hub.listeners.len()
+        );
+    }
+    Ok(id)
+}
+
+fn hub_unregister(id: u64) {
+    let join_handle = {
+        let Ok(mut hub) = SHARED_RAW_HUB.lock() else {
+            return;
+        };
+        hub.listeners.remove(&id);
+        let remaining = hub.listeners.len();
+        if remaining > 0 {
+            log::info!("ConsumerRawInput shared hub remove id={id} remaining={remaining}");
+            return;
+        }
+        // 最后一个监听者离开：停掉唯一的 Raw Input 线程（join 必须在锁外，避免 fanout 死锁）
+        hub.running.store(false, Ordering::SeqCst);
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(g) = hub.thread_id.lock() {
+                if let Some(tid) = *g {
+                    unsafe {
+                        win32::PostThreadMessageW(tid, win32::WM_QUIT, 0, 0);
+                    }
+                }
+            }
+        }
+        hub.listen_keyboard = false;
+        hub.thread_handle.take()
+    };
+    if let Some(h) = join_handle {
+        let _ = h.join();
+        log::info!("ConsumerRawInput shared hub stopped (no listeners)");
+    }
+}
+
+pub struct ConsumerRawInput {
+    running: Arc<AtomicBool>,
+    hub_id: Option<u64>,
     listen_keyboard: bool,
 }
 
@@ -253,8 +369,7 @@ impl ConsumerRawInput {
     pub fn new(listen_keyboard: bool) -> Self {
         Self {
             running: Arc::new(AtomicBool::new(false)),
-            thread_handle: None,
-            thread_id: Arc::new(Mutex::new(None)),
+            hub_id: None,
             listen_keyboard,
         }
     }
@@ -263,56 +378,20 @@ impl ConsumerRawInput {
     where
         F: FnMut(ConsumerRawEvent) + Send + 'static,
     {
-        if self.running.load(Ordering::SeqCst) {
+        if self.hub_id.is_some() {
             return Err("ConsumerRawInput 已在运行".into());
         }
+        let id = hub_register(self.listen_keyboard, callback)?;
+        self.hub_id = Some(id);
         self.running.store(true, Ordering::SeqCst);
-        let running = Arc::clone(&self.running);
-        let thread_id = Arc::clone(&self.thread_id);
-        let listen_keyboard = self.listen_keyboard;
-        let cb: EventCallback = Arc::new(Mutex::new(callback));
-
-        self.thread_handle = Some(thread::spawn(move || {
-            #[cfg(target_os = "windows")]
-            {
-                if let Ok(mut g) = thread_id.lock() {
-                    *g = Some(unsafe { win32::GetCurrentThreadId() });
-                }
-                consumer_raw_thread(running, cb, listen_keyboard);
-                if let Ok(mut g) = thread_id.lock() {
-                    *g = None;
-                }
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                log::warn!("ConsumerRawInput only on Windows");
-                let _ = (running, cb, listen_keyboard);
-            }
-        }));
-
-        log::info!("ConsumerRawInput started listen_keyboard={listen_keyboard}");
         Ok(())
     }
 
     pub fn stop(&mut self) {
-        if !self.running.load(Ordering::SeqCst) {
-            return;
+        if let Some(id) = self.hub_id.take() {
+            hub_unregister(id);
         }
         self.running.store(false, Ordering::SeqCst);
-        #[cfg(target_os = "windows")]
-        {
-            if let Ok(g) = self.thread_id.lock() {
-                if let Some(tid) = *g {
-                    unsafe {
-                        win32::PostThreadMessageW(tid, win32::WM_QUIT, 0, 0);
-                    }
-                }
-            }
-        }
-        if let Some(h) = self.thread_handle.take() {
-            let _ = h.join();
-        }
-        log::info!("ConsumerRawInput stopped");
     }
 
     pub fn is_running(&self) -> bool {
