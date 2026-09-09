@@ -33,7 +33,7 @@
 | 0 | 本文档与缝约定 | ✅ | `docs/STARTUP_ENV_PIPELINE_PLAN.md` |
 | 1 | 纯函数决策 + 顺序测试 | ✅ | `should_*` / `pipeline_steps` 测试绿 |
 | 2 | 串行 PipelineRunner | ✅ | `runner_executes_steps_serially_*` 绿 |
-| 3 | VB-CABLE 启动一次性自动修 | ✅ | `ensure_cable_once` + reboot flag + 重启后放行；相关单测绿。**真机 UAC 未在 CI 跑** |
+| 3 | VB-CABLE 启动一次性自动修 | ✅ | `ensure_cable_once` → **官方 `VBCABLE_Setup_x64.exe` 有界面**（不再静默 SetupAPI）；相关单测/编译绿。**真机 UAC 未在 CI 跑** |
 | 4 | WinUHid 纳入流水线（取消并行 spawn） | ✅ | `run_startup_env_pipeline` 调 `ensure_runtime_quiet`；`lib.rs` 仅 `spawn_startup_env_pipeline`，无 `winuhid-ensure` 线程 |
 | 5 | 等待语音路由 + 桥接落定 | ✅ | `wait_audio_router` / `wait_bridge_settle` 编入流水线；时序依赖真机，无独立 mock 测试 |
 | 6 | ATVV 一次性自动修 | ✅ | `step_atvv_once` → `run_atvv_repair_pipeline`；决策单测绿。**真机桥接冒烟未在 CI 跑** |

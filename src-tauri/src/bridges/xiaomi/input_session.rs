@@ -383,6 +383,8 @@ fn windows_run_input_session(
             );
             voice_pcm::warmup_async();
         }
+        // 与 T1 USB 并存时，会话建立就把默认麦拉回 CABLE（已是则跳过）
+        crate::audio::vb_cable::ensure_cable_mic_for_ime_before_voice();
     } else if battery_ch.is_some() {
         tv_gate::mark_ready(Duration::from_secs_f32(tv_delay.max(0.0)));
     }

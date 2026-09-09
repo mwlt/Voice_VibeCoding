@@ -965,6 +965,9 @@ fn handle_voice(app: &AppHandle, pressed: bool) {
             log::debug!("XIAOMI VOICE bump: hook thread not ready yet");
         }
     }
+    // T1 USB 可能把默认麦抢成 Mic Device；小米 PCM 进 CABLE，输入法听空线会很快结束语音。
+    // 已是 CABLE 则跳过，避免打断推流。
+    crate::audio::vb_cable::ensure_cable_mic_for_ime_before_voice();
     let pressed_ok = {
         let mut state = VOICE_CHORD.lock();
         state.press_with(&vks, inject_voice_chord)

@@ -1105,7 +1105,7 @@ async function runVoiceAutoRepair() {
 }
 
 async function chooseVoiceSource(
-  source: "auto" | "embedded" | "embedded_force" | "download_page" | "download_zip",
+  source: "auto" | "embedded" | "download_page" | "download_zip",
 ) {
   if (source === "auto") {
     await runVoiceAutoRepair();
@@ -1772,8 +1772,8 @@ async function retryLoadConfig() {
                     <div class="tip-badge">会做什么</div>
                     <ul>
                       <li>检测 VB-CABLE 是否已安装、是否可用</li>
-                      <li>已装好则尝试自动修复配置</li>
-                      <li>未安装时可选用内嵌驱动，或下载官网最新版</li>
+                      <li>已装好则只设置默认麦克风为 CABLE Output</li>
+                      <li>未安装 / 需重装时解压内嵌官方包并打开 VBCABLE_Setup（无黑框）</li>
                     </ul>
                   </div>
                   <div class="tip-block tip-off">
@@ -1785,7 +1785,7 @@ async function retryLoadConfig() {
                     </ul>
                   </div>
                   <p class="tip-foot">
-                    点按钮会先弹出选项：默认选「自动修复」即可；也可用下载包 / 官网自测。若提示必须重启电脑，按提示重启后再试。结果会写在右侧状态日志。
+                    点按钮会先弹出选项：「自动修复」只校默认麦；需要重装时点「使用内置官方 V2.15.18 版重新安装」（官方安装界面、无黑框）。也可用下载包 / 官网。若提示必须重启，重启后再点一次「自动修复」。
                   </p>
                 </div>
               </Teleport>
@@ -2140,17 +2140,19 @@ async function retryLoadConfig() {
         <div class="voice-modal" role="dialog" aria-modal="true">
           <h3>虚拟声卡修复</h3>
           <p>{{ voiceChoiceMsg || "请选择检测 / 安装方式：" }}</p>
-          <p class="voice-modal-uac-tip">安装内嵌驱动时如弹出 Windows 管理员确认（UAC），点同意</p>
+          <p class="voice-modal-uac-tip">
+            重新安装会打开<strong>官方 VB-CABLE 安装界面</strong>（无黑框）。弹出 Windows 管理员确认（UAC）时请点允许。
+          </p>
           <p class="voice-modal-reboot-tip">新装驱动完成必须重启系统后才会生效</p>
           <div class="voice-modal-reboot-followup">
             <p class="voice-modal-reboot-followup-title">重启后请按下面做一遍：</p>
             <ol>
               <li>重新打开本软件</li>
-              <li>再点「虚拟声卡修复」→「自动修复」一次</li>
-              <li>若弹出 UAC，点允许；成功后默认麦克风会设为 CABLE Output</li>
+              <li>再点「虚拟声卡修复」→「自动修复」一次（仅设置默认麦克风为 CABLE Output）</li>
+              <li>若驱动仍异常，点「使用内置官方 V2.15.18 版重新安装」并完成安装向导</li>
             </ol>
             <p>
-              强制重装后同样需要重启，重启后也请再点一次「自动修复」。仅装驱动、不点自动修复，语音通路可能仍未就绪。
+              「自动修复」在声卡已正常时只切默认麦；需要重装驱动时用内置官方安装程序。
             </p>
           </div>
 
@@ -2207,15 +2209,7 @@ async function retryLoadConfig() {
               :disabled="voiceRepairing || cableDownloadPhase === 'downloading'"
               @click="chooseVoiceSource('embedded')"
             >
-              使用内嵌驱动安装
-            </button>
-            <button
-              class="btn btn-secondary"
-              type="button"
-              :disabled="voiceRepairing || cableDownloadPhase === 'downloading'"
-              @click="chooseVoiceSource('embedded_force')"
-            >
-              使用内嵌驱动强制重装
+              使用内置官方 V2.15.18 版重新安装
             </button>
             <div class="voice-modal-download-row">
               <button
@@ -2257,7 +2251,7 @@ async function retryLoadConfig() {
             </button>
           </div>
           <p class="voice-modal-note">
-            「自动修复」：已就绪则只校正默认麦克风；未安装则回到本窗让你选安装方式。「内嵌安装」在已检测到 CABLE 时不会重装驱动；异常时用「强制重装」。
+            「自动修复」：已就绪则只校正默认麦克风；未安装则回到本窗让你选安装方式。「使用内置官方 V2.15.18 版重新安装」会打开官方安装界面（无黑框），可完整重装驱动。
           </p>
         </div>
       </div>

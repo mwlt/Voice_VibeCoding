@@ -238,6 +238,8 @@ try {
   $null = New-Item -ItemType Directory -Force -Path $StateRoot
   switch ($Mode) {
     "InstallElevated" {
+      # 已弃用：应用改为启动官方 VBCABLE_Setup_x64.exe 有界面安装。
+      # 保留此模式仅供旧文档/手工调试；请勿再从 app 调用。
       if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw "Administrator rights are required" }
       $inf = Prepare-DriverFiles
       Initialize-RootDeviceInstaller
@@ -246,24 +248,21 @@ try {
       exit 0
     }
     "Install" {
-      if ($Force -or -not (Test-VBCableReady)) { Invoke-ElevatedInstall }
-      if (Wait-VBCable 45) { Set-DefaultCableMicrophone; Remove-Item -LiteralPath $RebootFlag -Force -ErrorAction SilentlyContinue }
-      else { Set-Content -LiteralPath $RebootFlag -Value "reboot required" -Encoding ASCII; Set-FinishRunOnce; $result = "Driver installed; Windows restart required" }
+      # 已弃用静默 SetupAPI；请用应用内「官方安装程序」路径
+      throw "Deprecated: use official VBCABLE_Setup from the app (embedded zip). Silent SetupAPI install is disabled."
     }
     "Finish" {
       if (Wait-VBCable 60) { Set-DefaultCableMicrophone; Remove-Item -LiteralPath $RebootFlag -Force -ErrorAction SilentlyContinue; Remove-ItemProperty -Path $RunOnceKey -Name $RunOnceName -Force -ErrorAction SilentlyContinue }
       else { throw "VB-CABLE endpoints are still unavailable after restart" }
     }
     "Repair" {
-      # 默认：已就绪则只修默认麦，不重装驱动。-Force：始终走提权安装（排障/测试用）
-      if ($Force -or -not (Test-VBCableReady)) {
-        if ([string]::IsNullOrWhiteSpace($DriverZipPath)) { throw "DriverZipPath required for install" }
-        Invoke-ElevatedInstall
+      if (-not (Test-VBCableReady)) {
+        throw "VB-CABLE is not ready"
       }
-      if (Wait-VBCable 45) { Set-DefaultCableMicrophone } else { Set-FinishRunOnce; $result = "Driver installed; Windows restart required" }
+      Set-DefaultCableMicrophone
+      $result = "OK"
     }
     "EnsureMic" {
-      # 轻量：仅把默认麦设为 CABLE Output 并拉满音量（语音键按下时调用，无需 zip）
       if (-not (Test-VBCableReady)) { throw "VB-CABLE is not ready" }
       Set-DefaultCableMicrophone
       $result = "OK"

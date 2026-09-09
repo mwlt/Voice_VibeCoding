@@ -1,6 +1,6 @@
 //! T1 BLE PCM → 本机 audio_router（UDP），自包含，不依赖 xiaomi::voice_pcm
 //!
-//! 豆包请选 **CABLE Output**（BLE ATVV 路径；USB 路径仍用 Mic Device）。
+//! 豆包请选 **CABLE Output**（BLE ATVV 与 USB Mic→CABLE 环回均走虚拟声卡）。
 
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

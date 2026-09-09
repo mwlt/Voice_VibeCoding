@@ -337,7 +337,7 @@ pub async fn save_config(
 ) -> Result<(), String> {
     let device = bridge_type_to_device(&bridge_type)?;
     config_manager.save_device_config(device, &config)?;
-    if device == "t1_ble" || device == "t1_usb" || device == "t1" {
+    if device == "t1_ble" {
         sync_t1_media_gates(&config);
     }
     Ok(())
@@ -403,7 +403,7 @@ pub async fn update_key_mapping(
     let mut config = config_manager.get_device_config(device)?;
     config.button_bindings.insert(button_id, action);
     config_manager.save_device_config(device, &config)?;
-    if device == "t1_ble" || device == "t1_usb" || device == "t1" {
+    if device == "t1_ble" {
         sync_t1_media_gates(&config);
     }
     Ok(())

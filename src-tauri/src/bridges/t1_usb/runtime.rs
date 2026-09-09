@@ -142,7 +142,7 @@ pub fn force_end_voice_latch(reason: &str) {
         *ctx.voice_state.lock() = VoiceSessionState::Idle;
     }
     crate::bridges::shared::host_hooks::set_virtual_hid_chord_held(None);
-    // Mic keepalive 由 USB 桥接生命周期持有，语音结束不关，避免下次再付冷开麦
+    crate::bridges::t1_usb::mic_cable::stop();
     crate::bridges::t1::inject::panic_clear_all_modifiers(&format!("force_end_latch:{reason}"));
     native_suppress::release_voice_browser_search();
     if had {
@@ -354,13 +354,13 @@ pub fn start_t1_bridge(
         log::warn!("T1 WinUHid unavailable — mapped keys fall back to SendInput");
     }
 
-    // 把 Mic Device 冷开麦（可 >5s）挪到桥接启动；语音按键时端点已热
+    // 把 Mic Device 选择暂停关掉即可；不要在「仅连接」时抢系统默认麦。
+    // 否则小米（听 CABLE）与 T1 USB（听 Mic Device）同时在线时，默认麦被钉死在 Mic Device，
+    // 小米唤醒输入法后听空线，输入法会很快自动结束语音。
     native_mic::disable_t1_usb_selective_suspend();
-    // 小米/BLE EnsureMic 常把默认麦设成 CABLE → USB 必须切回 Mic Device，否则输入法听空线
-    crate::audio::vb_cable::ensure_usb_mic_for_voice_async();
     match native_mic::start_mic_keepalive(MIC_LABEL) {
-        Ok(()) => log::info!("T1 mic keepalive pre-warm started (USB bridge)"),
-        Err(e) => log::warn!("T1 mic keepalive pre-warm failed: {e}"),
+        Ok(()) => log::info!("T1 mic session noted at USB bridge start (no capture stream)"),
+        Err(e) => log::warn!("T1 mic session note failed: {e}"),
     }
 
     let mut raw = ConsumerRawInput::new(true);
@@ -509,7 +509,7 @@ pub fn start_t1_bridge(
         Some("VID_1915&PID_1025".into()),
         None,
     );
-    log::info!("T1 bridge started (Consumer HID + keyboard, WinUHid-first inject)");
+    log::info!("T1 USB bridge started (swallow side-effects + LL inject; shared Raw Input hub)");
     ensure_voice_watchdog(app.clone());
     Ok(())
 }
@@ -517,6 +517,7 @@ pub fn start_t1_bridge(
 pub fn stop_t1_bridge(app: &AppHandle, state: &BridgeState) {
     VOICE_WATCHDOG_RUNNING.store(false, Ordering::SeqCst);
     force_end_voice_latch("stop_t1_bridge");
+    crate::bridges::t1_usb::mic_cable::stop();
     native_mic::stop_mic_keepalive();
     *LL_GATE_CTX.lock() = None;
     let (_ble_running, _ble_stopping) = app
@@ -771,8 +772,18 @@ fn handle_voice(
             if starting {
                 native_suppress::arm_voice_browser_search();
                 native_suppress::dismiss_windows_search_async(false);
-                // 注入前确保默认麦=Mic Device（输入法通常跟系统默认，CABLE 残留会导致无声）
-                native_mic::ensure_default_mic_device_for_ime(MIC_LABEL);
+                // 优先 Mic→CABLE（与小米同默认麦）；失败则回退 EnsureUsbMic
+                let via_cable = match crate::bridges::t1_usb::mic_cable::start_for_voice(false) {
+                    Ok(()) => {
+                        log::info!("T1 USB voice audio path=CABLE (mic loopback)");
+                        true
+                    }
+                    Err(e) => {
+                        log::warn!("T1 USB mic→CABLE failed ({e}); fallback EnsureUsbMic");
+                        native_mic::ensure_default_mic_device_for_ime(MIC_LABEL);
+                        false
+                    }
+                };
                 match native_mic::ensure_mic_device(MIC_LABEL) {
                     Ok(endpoint) => {
                         log::info!("T1 AUDIO OPEN source={MIC_LABEL} endpoint={endpoint}")
@@ -794,28 +805,28 @@ fn handle_voice(
                 if ok {
                     *VOICE_LATCH_STARTED.lock() = Some(Instant::now());
                     ensure_voice_watchdog(app.clone());
-                    match native_mic::start_mic_keepalive(MIC_LABEL) {
-                        Ok(()) => log::info!("T1 mic keepalive ensured for voice latch"),
-                        Err(e) => log::warn!("T1 mic keepalive failed (仍继续语音): {e}"),
-                    }
+                    let _ = native_mic::start_mic_keepalive(MIC_LABEL);
                 }
+                let path = if via_cable { "CABLE" } else { "Mic Device" };
                 let msg = if ok {
-                    format!("语音开始（闩锁）→ {label} ✓ 再按一次结束 · 最长 5 分钟 · Mic Device 保活中")
+                    format!("语音开始（闩锁）→ {label} ✓ 再按一次结束 · 经 {path}")
                 } else {
                     format!("语音开始 → {label} 失败")
                 };
                 let _ = app.emit("t1-key", serde_json::json!({ "id": "voice", "message": msg }));
                 if ok {
                     log::info!(
-                        "T1 voice latch DOWN vks={vks:?} winuhid={}",
+                        "T1 voice latch DOWN vks={vks:?} path={path} winuhid={}",
                         hid_injector::is_available()
                     );
                 } else {
                     log::warn!("T1 voice latch DOWN failed vks={vks:?}");
                     *voice_state.lock() = VoiceSessionState::Idle;
+                    crate::bridges::t1_usb::mic_cable::stop();
                 }
             } else {
                 let ok = voice_release(&vks);
+                crate::bridges::t1_usb::mic_cable::stop();
                 native_suppress::release_voice_browser_search();
                 native_suppress::dismiss_windows_search_async(true);
                 let msg = if ok {
@@ -833,7 +844,17 @@ fn handle_voice(
         TriggerMode::Toggle => {
             native_suppress::arm_voice_browser_search();
             native_suppress::dismiss_windows_search_async(false);
-            native_mic::ensure_default_mic_device_for_ime(MIC_LABEL);
+            let via_cable = match crate::bridges::t1_usb::mic_cable::start_for_voice(true) {
+                Ok(()) => {
+                    log::info!("T1 USB voice audio path=CABLE (mic loopback, Toggle)");
+                    true
+                }
+                Err(e) => {
+                    log::warn!("T1 USB mic→CABLE failed ({e}); fallback EnsureUsbMic");
+                    native_mic::ensure_default_mic_device_for_ime(MIC_LABEL);
+                    false
+                }
+            };
             let hold_ms = if vks.len() == 1 && matches!(vks[0], 0x12 | 0xA4 | 0xA5) {
                 100
             } else if vks.iter().any(|&vk| vk == 0x5B || vk == 0x5C) {
@@ -841,11 +862,9 @@ fn handle_voice(
             } else {
                 70
             };
-            // 先点按映射键，再开麦 / 关搜索（BR Search 若漏出也应在组合键之后）
             let ok = voice_tap(&vks, hold_ms);
             native_suppress::release_voice_browser_search();
             native_suppress::arm_voice_browser_search();
-            // Win 和弦勿立刻 Esc（Alt 菜单态下易乱）；非 Win 可 Esc 收开始菜单
             let allow_esc = !vks.iter().any(|&vk| matches!(vk, 0x5B | 0x5C));
             native_suppress::dismiss_windows_search_async(allow_esc);
             match native_mic::ensure_mic_device(MIC_LABEL) {
@@ -854,8 +873,9 @@ fn handle_voice(
                     log::warn!("T1 AUDIO OPEN WARNING (仍注入快捷键): {e}");
                 }
             }
+            let path = if via_cable { "CABLE" } else { "Mic Device" };
             let msg = if ok {
-                format!("语音点按 → {label} ✓")
+                format!("语音点按 → {label} ✓（经 {path}）")
             } else {
                 format!("语音点按 → {label} 失败")
             };
